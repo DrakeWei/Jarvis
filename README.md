@@ -19,8 +19,13 @@ This repository now contains the initial scaffold for:
 
 The project still needs dependency installation before it can be run locally.
 
-## Planned Local Commands
+## Local Run
 
-- Frontend: `cd frontend && npm install && npm run dev`
-- Backend: `cd backend && pip install -e . && python main.py`
-- Desktop shell: `cd src-tauri && cargo tauri dev`
+1. Install backend dependencies:
+   `./.venv/bin/python -m pip install -e backend`
+2. Install frontend and Tauri CLI dependencies:
+   `cd frontend && npm install`
+3. Start the desktop app:
+   `cd frontend && npm run tauri:dev`
+
+The Tauri shell now auto-starts the Python backend if `127.0.0.1:8731` is not already in use.

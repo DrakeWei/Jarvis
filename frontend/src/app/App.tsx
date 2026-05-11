@@ -43,24 +43,43 @@ export function App() {
   const [selectedExecutionId, setSelectedExecutionId] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
   const [connectionState, setConnectionState] = useState("offline");
+  const [bootstrapState, setBootstrapState] = useState("booting");
 
   useEffect(() => {
-    fetchBootstrap().then((data) => {
-      const storedSessionId = window.localStorage.getItem(ACTIVE_SESSION_KEY);
-      setSessions(data.sessions);
-      setTasks(data.tasks);
-      setTeammates(data.teammates);
-      setSubagents(data.subagents);
-      setSelectedTeammateId(data.teammates[0]?.id ?? null);
-      setApprovals(data.approvals);
-      setExecutions(data.tool_executions);
-      setSelectedExecutionId(data.tool_executions[0]?.id ?? null);
-      const fallbackSessionId = data.sessions[0]?.session_id ?? "";
-      const nextSessionId = data.sessions.some((session) => session.session_id === storedSessionId)
-        ? storedSessionId ?? fallbackSessionId
-        : fallbackSessionId;
-      setActiveSessionId(nextSessionId);
-    });
+    let cancelled = false;
+    let retryTimer: number | undefined;
+
+    const attempt = async () => {
+      try {
+        const data = await fetchBootstrap();
+        if (cancelled) return;
+        const storedSessionId = window.localStorage.getItem(ACTIVE_SESSION_KEY);
+        setSessions(data.sessions);
+        setTasks(data.tasks);
+        setTeammates(data.teammates);
+        setSubagents(data.subagents);
+        setSelectedTeammateId(data.teammates[0]?.id ?? null);
+        setApprovals(data.approvals);
+        setExecutions(data.tool_executions);
+        setSelectedExecutionId(data.tool_executions[0]?.id ?? null);
+        const fallbackSessionId = data.sessions[0]?.session_id ?? "";
+        const nextSessionId = data.sessions.some((session) => session.session_id === storedSessionId)
+          ? storedSessionId ?? fallbackSessionId
+          : fallbackSessionId;
+        setActiveSessionId(nextSessionId);
+        setBootstrapState("ready");
+      } catch {
+        if (cancelled) return;
+        setBootstrapState("waiting-for-backend");
+        retryTimer = window.setTimeout(attempt, 1200);
+      }
+    };
+
+    attempt();
+    return () => {
+      cancelled = true;
+      if (retryTimer) window.clearTimeout(retryTimer);
+    };
   }, []);
 
   useEffect(() => {
@@ -224,6 +243,7 @@ export function App() {
 
         <section className="panel">
           <h2>Lead Session</h2>
+          <p className="stream-state">Bootstrap: {bootstrapState}</p>
           <p className="stream-state">Stream: {connectionState}</p>
           <div className="timeline">
             {events.map((entry, index) => (
