@@ -25,6 +25,8 @@ import {
   type ToolExecutionSummary,
 } from "../lib/api";
 
+const ACTIVE_SESSION_KEY = "jarvis.activeSession";
+
 export function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState("");
@@ -44,6 +46,7 @@ export function App() {
 
   useEffect(() => {
     fetchBootstrap().then((data) => {
+      const storedSessionId = window.localStorage.getItem(ACTIVE_SESSION_KEY);
       setSessions(data.sessions);
       setTasks(data.tasks);
       setTeammates(data.teammates);
@@ -52,9 +55,18 @@ export function App() {
       setApprovals(data.approvals);
       setExecutions(data.tool_executions);
       setSelectedExecutionId(data.tool_executions[0]?.id ?? null);
-      setActiveSessionId(data.sessions[0]?.session_id ?? "");
+      const fallbackSessionId = data.sessions[0]?.session_id ?? "";
+      const nextSessionId = data.sessions.some((session) => session.session_id === storedSessionId)
+        ? storedSessionId ?? fallbackSessionId
+        : fallbackSessionId;
+      setActiveSessionId(nextSessionId);
     });
   }, []);
+
+  useEffect(() => {
+    if (!activeSessionId) return;
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, activeSessionId);
+  }, [activeSessionId]);
 
   async function refreshSessionState(sessionId: string) {
     setSubagents(await fetchSubagents(sessionId));

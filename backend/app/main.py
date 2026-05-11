@@ -25,5 +25,6 @@ app.include_router(ws_router, prefix=settings.api_prefix)
 async def startup() -> None:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     init_db()
+    runtime.restore_state()
     if not runtime.list_sessions():
         await runtime.create_session(SessionCreate(title="Command Deck"))

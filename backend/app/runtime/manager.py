@@ -39,6 +39,16 @@ class RuntimeManager:
         self.events = EventBroker()
         self.pending_approvals: dict[int, PendingApproval] = {}
 
+    def restore_state(self) -> None:
+        self.pending_approvals = {}
+        for approval_id, session_id, steps in approval_service.list_pending_runtime_contexts():
+            if not session_id:
+                continue
+            self.pending_approvals[approval_id] = PendingApproval(
+                session_id=session_id,
+                steps=steps,
+            )
+
     def list_sessions(self) -> list[SessionSummary]:
         return session_service.list_sessions()
 
@@ -245,6 +255,7 @@ class RuntimeManager:
                     session_id=session_id,
                     approval_type=tool_name,
                     prompt=f"{tool_name}\n{broker.serialize_input(tool_payload)}",
+                    context=steps[index:],
                 )
                 self.pending_approvals[approval.id] = PendingApproval(
                     session_id=session_id,
