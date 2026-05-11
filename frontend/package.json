@@ -7,8 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri:dev": "tauri dev --config ../src-tauri/tauri.conf.json",
-    "tauri:build": "tauri build --config ../src-tauri/tauri.conf.json"
+    "tauri:dev": "cd .. && ./frontend/node_modules/.bin/tauri dev --config src-tauri/tauri.conf.json",
+    "tauri:build": "cd .. && ./frontend/node_modules/.bin/tauri build --config src-tauri/tauri.conf.json"
   },
   "dependencies": {
     "react": "^19.0.0",

@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.jarvis.cockpit",
   "build": {
-    "beforeDevCommand": "cd ../frontend && npm run dev",
-    "beforeBuildCommand": "cd ../frontend && npm run build",
-    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "bash -lc 'if nc -z 127.0.0.1 5173; then echo Vite dev server already running; else if [ -d frontend ]; then cd frontend; else cd ../frontend; fi && npm run dev; fi'",
+    "beforeBuildCommand": "bash -lc 'if [ -d frontend ]; then cd frontend; else cd ../frontend; fi && npm run build'",
+    "devUrl": "http://127.0.0.1:5173",
     "frontendDist": "../frontend/dist"
   },
   "app": {
