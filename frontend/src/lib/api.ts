@@ -11,12 +11,22 @@ export type TimelineEvent = {
   created_at: string;
 };
 
+export type TaskSummary = {
+  id: number;
+  subject: string;
+  description: string;
+  status: string;
+  owner: string | null;
+  created_at: string;
+};
+
 const API_BASE = "http://127.0.0.1:8731/api";
 
 export async function fetchBootstrap(): Promise<{
   app: string;
   sessions: SessionSummary[];
   panels: string[];
+  tasks: TaskSummary[];
 }> {
   const response = await fetch(`${API_BASE}/bootstrap`);
   if (!response.ok) {
@@ -42,6 +52,32 @@ export async function sendMessage(
   if (!response.ok) {
     throw new Error("Failed to send message");
   }
+}
+
+export async function fetchTimeline(sessionId: string): Promise<TimelineEvent[]> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/timeline`);
+  if (!response.ok) {
+    throw new Error("Failed to load timeline");
+  }
+  return response.json();
+}
+
+export async function createTask(subject: string, sessionId: string): Promise<TaskSummary> {
+  const response = await fetch(`${API_BASE}/tasks`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      subject,
+      session_id: sessionId,
+      description: "",
+    }),
+  });
+  if (!response.ok) {
+    throw new Error("Failed to create task");
+  }
+  return response.json();
 }
 
 export function openSessionEvents(
