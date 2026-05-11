@@ -98,7 +98,7 @@ class RuntimeManager:
             assistant_parts.append(self._summarize_tool_output(tool_name, output, record.status))
         if not assistant_parts:
             assistant_parts.append(
-                "Lead runtime scaffold received your message. Tool routing is active for workspace listing, file reads, and explicit bash commands."
+                "Lead runtime scaffold received your message. Tool routing is active for workspace listing, file reads, file writes, exact file edits, and explicit bash commands."
             )
         reply = "\n\n".join(assistant_parts)
         session_service.create_message_record(session_id, MessageCreate(role="assistant", content=reply))
@@ -117,6 +117,12 @@ class RuntimeManager:
             return "bash", {"command": text.split(":", 1)[1].strip()}
         if lowered.startswith("read "):
             return "read_file", {"path": text.split(" ", 1)[1].strip()}
+        if lowered.startswith("write "):
+            parsed = self._parse_write_command(text)
+            return ("write_file", parsed) if parsed else (None, {})
+        if lowered.startswith("edit "):
+            parsed = self._parse_edit_command(text)
+            return ("edit_file", parsed) if parsed else (None, {})
         if any(token in lowered for token in ["list files", "show files", "workspace", "project structure", "目录"]):
             return "list_files", {}
         return None, {}
@@ -127,6 +133,26 @@ class RuntimeManager:
             return f"Workspace snapshot completed with status `{status}`.\n\n{preview}"
         if tool_name == "read_file":
             return f"File read completed with status `{status}`.\n\n{preview}"
+        if tool_name == "write_file":
+            return f"File write completed with status `{status}`.\n\n{preview}"
+        if tool_name == "edit_file":
+            return f"File edit completed with status `{status}`.\n\n{preview}"
         if tool_name == "bash":
             return f"Bash command completed with status `{status}`.\n\n{preview}"
         return preview
+
+    def _parse_write_command(self, text: str) -> dict[str, object] | None:
+        header, marker, body = text.partition("\n<<<\n")
+        if not marker or not body.endswith("\n>>>"):
+            return None
+        path = header.split(" ", 1)[1].strip()
+        content = body[:-4]
+        return {"path": path, "content": content}
+
+    def _parse_edit_command(self, text: str) -> dict[str, object] | None:
+        header, marker, body = text.partition("\n<<<OLD\n")
+        if not marker or "\n===\n" not in body or not body.endswith("\n>>>"):
+            return None
+        old_text, new_part = body[:-4].split("\n===\n", 1)
+        path = header.split(" ", 1)[1].strip()
+        return {"path": path, "old_text": old_text, "new_text": new_part}
