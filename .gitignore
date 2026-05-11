@@ -16,6 +16,7 @@ backend/.pytest_cache/
 backend/.mypy_cache/
 backend/.ruff_cache/
 backend/.coverage
+backend/*.egg-info/
 backend/data/
 
 data/

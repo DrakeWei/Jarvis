@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException
 
 from app.schemas.events import MessageCreate, SessionCreate
+from app.schemas.tasks import TaskCreate
+from app.services import task_service
 from app.services.runtime_state import runtime
 
 router = APIRouter()
@@ -17,6 +19,7 @@ async def bootstrap() -> dict[str, object]:
         "app": "Jarvis Agent Cockpit",
         "sessions": runtime.list_sessions(),
         "panels": ["tasks", "teammates", "approvals", "logs"],
+        "tasks": task_service.list_tasks(),
     }
 
 
@@ -30,9 +33,26 @@ async def list_sessions():
     return runtime.list_sessions()
 
 
+@router.get("/sessions/{session_id}/timeline")
+async def get_timeline(session_id: str):
+    if not runtime.session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Unknown session")
+    return runtime.list_timeline(session_id)
+
+
 @router.post("/sessions/{session_id}/messages")
 async def post_message(session_id: str, payload: MessageCreate) -> dict[str, str]:
-    if session_id not in runtime.sessions:
+    if not runtime.session_exists(session_id):
         raise HTTPException(status_code=404, detail="Unknown session")
     await runtime.append_message(session_id, payload)
     return {"status": "accepted"}
+
+
+@router.get("/tasks")
+async def list_tasks():
+    return task_service.list_tasks()
+
+
+@router.post("/tasks")
+async def create_task(payload: TaskCreate):
+    return task_service.create_task(payload)

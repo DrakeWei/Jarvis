@@ -1,18 +1,8 @@
 import asyncio
 from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from uuid import uuid4
 
 from app.schemas.events import MessageCreate, SessionCreate, SessionSummary, TimelineEvent
-
-
-@dataclass
-class SessionState:
-    session_id: str
-    title: str
-    created_at: str
-    messages: list[MessageCreate] = field(default_factory=list)
+from app.services import session_service
 
 
 class EventBroker:
@@ -36,45 +26,36 @@ class EventBroker:
 
 class RuntimeManager:
     def __init__(self) -> None:
-        self.sessions: dict[str, SessionState] = {}
         self.events = EventBroker()
 
     def list_sessions(self) -> list[SessionSummary]:
-        return [
-            SessionSummary(
-                session_id=session.session_id,
-                title=session.title,
-                created_at=session.created_at,
-            )
-            for session in self.sessions.values()
-        ]
+        return session_service.list_sessions()
+
+    def session_exists(self, session_id: str) -> bool:
+        return session_service.get_session(session_id) is not None
+
+    def list_timeline(self, session_id: str) -> list[TimelineEvent]:
+        return session_service.list_event_records(session_id)
+
+    async def publish(self, event: TimelineEvent) -> TimelineEvent:
+        stored = session_service.create_event_record(event)
+        await self.events.publish(stored)
+        return stored
 
     async def create_session(self, payload: SessionCreate) -> SessionSummary:
-        session_id = str(uuid4())
-        created_at = datetime.now(timezone.utc).isoformat()
-        session = SessionState(
-            session_id=session_id,
-            title=payload.title,
-            created_at=created_at,
-        )
-        self.sessions[session_id] = session
-        await self.events.publish(
+        session = session_service.create_session_record(payload)
+        await self.publish(
             TimelineEvent(
-                session_id=session_id,
+                session_id=session.session_id,
                 type="session.created",
                 content=f"Session '{payload.title}' created.",
             )
         )
-        return SessionSummary(
-            session_id=session_id,
-            title=payload.title,
-            created_at=created_at,
-        )
+        return session
 
     async def append_message(self, session_id: str, payload: MessageCreate) -> None:
-        session = self.sessions[session_id]
-        session.messages.append(payload)
-        await self.events.publish(
+        session_service.create_message_record(session_id, payload)
+        await self.publish(
             TimelineEvent(
                 session_id=session_id,
                 type=f"message.{payload.role}",
@@ -82,10 +63,10 @@ class RuntimeManager:
             )
         )
         if payload.role == "user":
-            await self.events.publish(
+            await self.publish(
                 TimelineEvent(
                     session_id=session_id,
                     type="runtime.notice",
-                    content="Lead runtime scaffold is connected. Tool broker, teammate manager, and persistence will plug into this stream.",
+                    content="Lead runtime scaffold is connected. Persistence and event replay are now live. Tool broker and teammate orchestration are next.",
                 )
             )
