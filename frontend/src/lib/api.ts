@@ -48,6 +48,16 @@ export type TeammateMessageSummary = {
   created_at: string;
 };
 
+export type SubagentSummary = {
+  id: number;
+  session_id: string | null;
+  name: string;
+  role: string;
+  kind: string;
+  status: string;
+  created_at: string;
+};
+
 export type ToolExecutionSummary = {
   id: number;
   session_id: string;
@@ -66,6 +76,7 @@ export async function fetchBootstrap(): Promise<{
   panels: string[];
   tasks: TaskSummary[];
   teammates: TeammateSummary[];
+  subagents: SubagentSummary[];
   approvals: ApprovalSummary[];
   tool_executions: ToolExecutionSummary[];
 }> {
@@ -219,6 +230,39 @@ export async function sendTeammateMessage(
   });
   if (!response.ok) {
     throw new Error("Failed to send teammate message");
+  }
+  return response.json();
+}
+
+export async function fetchSubagents(sessionId?: string): Promise<SubagentSummary[]> {
+  const url = sessionId
+    ? `${API_BASE}/subagents?session_id=${encodeURIComponent(sessionId)}`
+    : `${API_BASE}/subagents`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error("Failed to load subagents");
+  }
+  return response.json();
+}
+
+export async function runSubagent(
+  sessionId: string,
+  name: string,
+  prompt: string,
+): Promise<{ subagent: SubagentSummary; summary: string }> {
+  const response = await fetch(`${API_BASE}/subagents`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      session_id: sessionId,
+      name,
+      prompt,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error("Failed to run subagent");
   }
   return response.json();
 }

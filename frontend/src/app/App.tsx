@@ -6,14 +6,17 @@ import {
   createTeammate,
   fetchApprovals,
   fetchBootstrap,
+  fetchSubagents,
   fetchTeammateMessages,
   fetchTeammates,
   fetchTimeline,
   fetchToolExecutions,
+  runSubagent,
   sendMessage,
   sendTeammateMessage,
   type ApprovalSummary,
   type SessionSummary,
+  type SubagentSummary,
   type TaskSummary,
   type TeammateMessageSummary,
   type TeammateSummary,
@@ -27,6 +30,8 @@ export function App() {
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
   const [teammates, setTeammates] = useState<TeammateSummary[]>([]);
+  const [subagents, setSubagents] = useState<SubagentSummary[]>([]);
+  const [subagentDraft, setSubagentDraft] = useState("Scan the workspace and summarize the next technical priorities.");
   const [selectedTeammateId, setSelectedTeammateId] = useState<number | null>(null);
   const [teammateMessages, setTeammateMessages] = useState<TeammateMessageSummary[]>([]);
   const [teammateDraft, setTeammateDraft] = useState("Review the latest runtime activity.");
@@ -40,6 +45,7 @@ export function App() {
       setSessions(data.sessions);
       setTasks(data.tasks);
       setTeammates(data.teammates);
+      setSubagents(data.subagents);
       setSelectedTeammateId(data.teammates[0]?.id ?? null);
       setApprovals(data.approvals);
       setExecutions(data.tool_executions);
@@ -51,6 +57,7 @@ export function App() {
   useEffect(() => {
     if (!activeSessionId) return;
     fetchTimeline(activeSessionId).then(setEvents).catch(() => setEvents([]));
+    fetchSubagents(activeSessionId).then(setSubagents).catch(() => setSubagents([]));
     fetchTeammates(activeSessionId)
       .then((items) => {
         setTeammates(items);
@@ -80,6 +87,7 @@ export function App() {
     setDraft("");
     await sendMessage(activeSessionId, content);
     setEvents(await fetchTimeline(activeSessionId));
+    setSubagents(await fetchSubagents(activeSessionId));
     setApprovals(await fetchApprovals(activeSessionId));
     const nextExecutions = await fetchToolExecutions(activeSessionId);
     setExecutions(nextExecutions);
@@ -118,6 +126,13 @@ export function App() {
     await sendTeammateMessage(selectedTeammateId, teammateDraft.trim());
     setTeammateMessages(await fetchTeammateMessages(selectedTeammateId));
     setTeammates(await fetchTeammates(activeSessionId));
+    setEvents(await fetchTimeline(activeSessionId));
+  }
+
+  async function onRunSubagent() {
+    if (!activeSessionId || !subagentDraft.trim()) return;
+    await runSubagent(activeSessionId, `Explorer ${subagents.length + 1}`, subagentDraft.trim());
+    setSubagents(await fetchSubagents(activeSessionId));
     setEvents(await fetchTimeline(activeSessionId));
   }
 
@@ -168,6 +183,23 @@ export function App() {
               <h3>Tasks</h3>
               <button type="button" onClick={onCreateTask}>New Task</button>
               <ul>{tasks.slice(0, 4).map((task) => <li key={task.id}>{task.subject}</li>)}</ul>
+            </article>
+            <article className="ops-card">
+              <h3>Subagents</h3>
+              <textarea
+                value={subagentDraft}
+                onChange={(e) => setSubagentDraft(e.target.value)}
+                rows={3}
+              />
+              <button type="button" onClick={onRunSubagent}>Run Explorer</button>
+              <div className="subagent-list">
+                {subagents.slice(0, 4).map((subagent) => (
+                  <div key={subagent.id} className="subagent-entry">
+                    <strong>{subagent.name}</strong>
+                    <p>{subagent.role} [{subagent.status}]</p>
+                  </div>
+                ))}
+              </div>
             </article>
             <article className="ops-card">
               <h3>Teammates</h3>

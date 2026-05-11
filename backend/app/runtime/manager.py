@@ -3,8 +3,9 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 from app.schemas.events import MessageCreate, SessionCreate, SessionSummary, TimelineEvent
+from app.schemas.subagents import SubagentRunCreate
 from app.schemas.teammates import TeammateCreate
-from app.services import approval_service, session_service, teammate_service, tool_service
+from app.services import approval_service, session_service, subagent_service, teammate_service, tool_service
 from app.tools import broker
 
 
@@ -58,6 +59,9 @@ class RuntimeManager:
 
     def list_teammate_messages(self, agent_id: int):
         return teammate_service.list_teammate_messages(agent_id)
+
+    def list_subagents(self, session_id: str | None = None):
+        return subagent_service.list_subagents(session_id)
 
     async def decide_approval(self, approval_id: int, approve: bool, feedback: str = ""):
         decision = approval_service.update_approval(approval_id, approve=approve, feedback=feedback)
@@ -149,6 +153,27 @@ class RuntimeManager:
                 )
             )
         return {"sent": outbound, "reply": inbound}
+
+    async def run_subagent(self, payload: SubagentRunCreate):
+        subagent = subagent_service.create_subagent(payload.session_id, payload.name)
+        await self.publish(
+            TimelineEvent(
+                session_id=payload.session_id,
+                type="subagent.started",
+                content=f"Subagent '{payload.name}' started.",
+            )
+        )
+        summary = self._generate_subagent_summary(payload.prompt)
+        subagent_service.add_subagent_summary(subagent.id, summary)
+        completed = subagent_service.complete_subagent(subagent.id)
+        await self.publish(
+            TimelineEvent(
+                session_id=payload.session_id,
+                type="subagent.summary",
+                content=f"{payload.name}: {summary}",
+            )
+        )
+        return {"subagent": completed or subagent, "summary": summary}
 
     async def publish(self, event: TimelineEvent) -> TimelineEvent:
         stored = session_service.create_event_record(event)
@@ -328,3 +353,14 @@ class RuntimeManager:
 
     def _generate_teammate_reply(self, name: str, role: str, content: str) -> str:
         return f"{name} ({role}) acknowledged the request and recommends tackling: {content[:120]}"
+
+    def _generate_subagent_summary(self, prompt: str) -> str:
+        files = broker.run("list_files", {})[1].splitlines()[:8]
+        summary_parts = [f"Prompt: {prompt[:140]}"]
+        if files:
+            summary_parts.append("Workspace sample:\n" + "\n".join(files))
+        if "readme" in prompt.lower() or "workspace" in prompt.lower() or "project" in prompt.lower():
+            status, content = broker.run("read_file", {"path": "README.md"})
+            if status == "completed":
+                summary_parts.append("README snapshot:\n" + content[:500])
+        return "\n\n".join(summary_parts)

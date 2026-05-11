@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.schemas.approvals import ApprovalDecision
 from app.schemas.events import MessageCreate, SessionCreate
+from app.schemas.subagents import SubagentRunCreate
 from app.schemas.tasks import TaskCreate
 from app.schemas.teammates import TeammateCreate, TeammateMessageCreate
 from app.services import task_service
@@ -23,6 +24,7 @@ async def bootstrap() -> dict[str, object]:
         "panels": ["tasks", "teammates", "approvals", "logs"],
         "tasks": task_service.list_tasks(),
         "teammates": runtime.list_teammates(),
+        "subagents": runtime.list_subagents(),
         "approvals": runtime.list_approvals(),
         "tool_executions": runtime.list_tool_executions(),
     }
@@ -108,3 +110,15 @@ async def send_teammate_message(agent_id: int, payload: TeammateMessageCreate):
     if not result:
         raise HTTPException(status_code=404, detail="Unknown teammate")
     return result
+
+
+@router.get("/subagents")
+async def list_subagents(session_id: str | None = None):
+    return runtime.list_subagents(session_id)
+
+
+@router.post("/subagents")
+async def run_subagent(payload: SubagentRunCreate):
+    if not runtime.session_exists(payload.session_id):
+        raise HTTPException(status_code=404, detail="Unknown session")
+    return await runtime.run_subagent(payload)
