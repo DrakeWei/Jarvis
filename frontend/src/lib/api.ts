@@ -30,6 +30,24 @@ export type ApprovalSummary = {
   created_at: string;
 };
 
+export type TeammateSummary = {
+  id: number;
+  session_id: string | null;
+  name: string;
+  role: string;
+  kind: string;
+  status: string;
+  created_at: string;
+};
+
+export type TeammateMessageSummary = {
+  id: number;
+  agent_id: number;
+  direction: string;
+  content: string;
+  created_at: string;
+};
+
 export type ToolExecutionSummary = {
   id: number;
   session_id: string;
@@ -47,6 +65,7 @@ export async function fetchBootstrap(): Promise<{
   sessions: SessionSummary[];
   panels: string[];
   tasks: TaskSummary[];
+  teammates: TeammateSummary[];
   approvals: ApprovalSummary[];
   tool_executions: ToolExecutionSummary[];
 }> {
@@ -142,6 +161,64 @@ export async function decideApproval(
   });
   if (!response.ok) {
     throw new Error("Failed to decide approval");
+  }
+  return response.json();
+}
+
+export async function fetchTeammates(sessionId?: string): Promise<TeammateSummary[]> {
+  const url = sessionId
+    ? `${API_BASE}/teammates?session_id=${encodeURIComponent(sessionId)}`
+    : `${API_BASE}/teammates`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error("Failed to load teammates");
+  }
+  return response.json();
+}
+
+export async function createTeammate(
+  sessionId: string,
+  name: string,
+  role: string,
+): Promise<TeammateSummary> {
+  const response = await fetch(`${API_BASE}/teammates`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      session_id: sessionId,
+      name,
+      role,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error("Failed to create teammate");
+  }
+  return response.json();
+}
+
+export async function fetchTeammateMessages(agentId: number): Promise<TeammateMessageSummary[]> {
+  const response = await fetch(`${API_BASE}/teammates/${agentId}/messages`);
+  if (!response.ok) {
+    throw new Error("Failed to load teammate messages");
+  }
+  return response.json();
+}
+
+export async function sendTeammateMessage(
+  agentId: number,
+  content: string,
+): Promise<{ sent: TeammateMessageSummary; reply: TeammateMessageSummary }> {
+  const response = await fetch(`${API_BASE}/teammates/${agentId}/messages`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ content }),
+  });
+  if (!response.ok) {
+    throw new Error("Failed to send teammate message");
   }
   return response.json();
 }

@@ -3,7 +3,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 from app.schemas.events import MessageCreate, SessionCreate, SessionSummary, TimelineEvent
-from app.services import approval_service, session_service, tool_service
+from app.schemas.teammates import TeammateCreate
+from app.services import approval_service, session_service, teammate_service, tool_service
 from app.tools import broker
 
 
@@ -51,6 +52,12 @@ class RuntimeManager:
 
     def list_approvals(self, session_id: str | None = None):
         return approval_service.list_approvals(session_id)
+
+    def list_teammates(self, session_id: str | None = None):
+        return teammate_service.list_teammates(session_id)
+
+    def list_teammate_messages(self, agent_id: int):
+        return teammate_service.list_teammate_messages(agent_id)
 
     async def decide_approval(self, approval_id: int, approve: bool, feedback: str = ""):
         decision = approval_service.update_approval(approval_id, approve=approve, feedback=feedback)
@@ -104,6 +111,44 @@ class RuntimeManager:
                     )
                 )
         return decision
+
+    async def create_teammate(self, payload: TeammateCreate):
+        teammate = teammate_service.create_teammate(payload)
+        await self.publish(
+            TimelineEvent(
+                session_id=payload.session_id,
+                type="teammate.created",
+                content=f"Teammate '{payload.name}' ({payload.role}) joined the session.",
+            )
+        )
+        return teammate
+
+    async def send_teammate_message(self, agent_id: int, content: str):
+        teammate = teammate_service.get_teammate(agent_id)
+        if not teammate:
+            return None
+        teammate_service.update_teammate_status(agent_id, "working")
+        outbound = teammate_service.add_teammate_message(agent_id, "to_agent", content)
+        if teammate.session_id:
+            await self.publish(
+                TimelineEvent(
+                    session_id=teammate.session_id,
+                    type="teammate.message",
+                    content=f"Sent to {teammate.name}: {content}",
+                )
+            )
+        reply_text = self._generate_teammate_reply(teammate.name, teammate.role, content)
+        inbound = teammate_service.add_teammate_message(agent_id, "from_agent", reply_text)
+        teammate_service.update_teammate_status(agent_id, "idle")
+        if teammate.session_id:
+            await self.publish(
+                TimelineEvent(
+                    session_id=teammate.session_id,
+                    type="teammate.reply",
+                    content=f"{teammate.name}: {reply_text}",
+                )
+            )
+        return {"sent": outbound, "reply": inbound}
 
     async def publish(self, event: TimelineEvent) -> TimelineEvent:
         stored = session_service.create_event_record(event)
@@ -280,3 +325,6 @@ class RuntimeManager:
 
     def _edit_guidance(self) -> str:
         return "Edit commands must use this format:\n\nedit path/to/file.txt\n<<<OLD\ntext to replace\n===\nreplacement text\n>>>"
+
+    def _generate_teammate_reply(self, name: str, role: str, content: str) -> str:
+        return f"{name} ({role}) acknowledged the request and recommends tackling: {content[:120]}"

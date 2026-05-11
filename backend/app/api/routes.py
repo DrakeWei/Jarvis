@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException
 from app.schemas.approvals import ApprovalDecision
 from app.schemas.events import MessageCreate, SessionCreate
 from app.schemas.tasks import TaskCreate
+from app.schemas.teammates import TeammateCreate, TeammateMessageCreate
 from app.services import task_service
 from app.services.runtime_state import runtime
 
@@ -21,6 +22,7 @@ async def bootstrap() -> dict[str, object]:
         "sessions": runtime.list_sessions(),
         "panels": ["tasks", "teammates", "approvals", "logs"],
         "tasks": task_service.list_tasks(),
+        "teammates": runtime.list_teammates(),
         "approvals": runtime.list_approvals(),
         "tool_executions": runtime.list_tool_executions(),
     }
@@ -80,4 +82,29 @@ async def decide_approval(approval_id: int, payload: ApprovalDecision):
     )
     if not result:
         raise HTTPException(status_code=404, detail="Unknown approval")
+    return result
+
+
+@router.get("/teammates")
+async def list_teammates(session_id: str | None = None):
+    return runtime.list_teammates(session_id)
+
+
+@router.post("/teammates")
+async def create_teammate(payload: TeammateCreate):
+    if not runtime.session_exists(payload.session_id):
+        raise HTTPException(status_code=404, detail="Unknown session")
+    return await runtime.create_teammate(payload)
+
+
+@router.get("/teammates/{agent_id}/messages")
+async def list_teammate_messages(agent_id: int):
+    return runtime.list_teammate_messages(agent_id)
+
+
+@router.post("/teammates/{agent_id}/messages")
+async def send_teammate_message(agent_id: int, payload: TeammateMessageCreate):
+    result = await runtime.send_teammate_message(agent_id, payload.content)
+    if not result:
+        raise HTTPException(status_code=404, detail="Unknown teammate")
     return result

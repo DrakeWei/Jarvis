@@ -3,14 +3,20 @@ import { FormEvent, useEffect, useState } from "react";
 import {
   decideApproval,
   createTask,
+  createTeammate,
   fetchApprovals,
   fetchBootstrap,
+  fetchTeammateMessages,
+  fetchTeammates,
   fetchTimeline,
   fetchToolExecutions,
   sendMessage,
+  sendTeammateMessage,
   type ApprovalSummary,
   type SessionSummary,
   type TaskSummary,
+  type TeammateMessageSummary,
+  type TeammateSummary,
   type TimelineEvent,
   type ToolExecutionSummary,
 } from "../lib/api";
@@ -20,6 +26,10 @@ export function App() {
   const [activeSessionId, setActiveSessionId] = useState("");
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
+  const [teammates, setTeammates] = useState<TeammateSummary[]>([]);
+  const [selectedTeammateId, setSelectedTeammateId] = useState<number | null>(null);
+  const [teammateMessages, setTeammateMessages] = useState<TeammateMessageSummary[]>([]);
+  const [teammateDraft, setTeammateDraft] = useState("Review the latest runtime activity.");
   const [approvals, setApprovals] = useState<ApprovalSummary[]>([]);
   const [executions, setExecutions] = useState<ToolExecutionSummary[]>([]);
   const [selectedExecutionId, setSelectedExecutionId] = useState<number | null>(null);
@@ -29,6 +39,8 @@ export function App() {
     fetchBootstrap().then((data) => {
       setSessions(data.sessions);
       setTasks(data.tasks);
+      setTeammates(data.teammates);
+      setSelectedTeammateId(data.teammates[0]?.id ?? null);
       setApprovals(data.approvals);
       setExecutions(data.tool_executions);
       setSelectedExecutionId(data.tool_executions[0]?.id ?? null);
@@ -39,6 +51,12 @@ export function App() {
   useEffect(() => {
     if (!activeSessionId) return;
     fetchTimeline(activeSessionId).then(setEvents).catch(() => setEvents([]));
+    fetchTeammates(activeSessionId)
+      .then((items) => {
+        setTeammates(items);
+        setSelectedTeammateId((current) => current ?? items[0]?.id ?? null);
+      })
+      .catch(() => setTeammates([]));
     fetchApprovals(activeSessionId).then(setApprovals).catch(() => setApprovals([]));
     fetchToolExecutions(activeSessionId)
       .then((items) => {
@@ -47,6 +65,13 @@ export function App() {
       })
       .catch(() => setExecutions([]));
   }, [activeSessionId]);
+
+  useEffect(() => {
+    if (!selectedTeammateId) return;
+    fetchTeammateMessages(selectedTeammateId)
+      .then(setTeammateMessages)
+      .catch(() => setTeammateMessages([]));
+  }, [selectedTeammateId]);
 
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
@@ -75,6 +100,25 @@ export function App() {
     const nextExecutions = await fetchToolExecutions(activeSessionId);
     setExecutions(nextExecutions);
     setSelectedExecutionId(nextExecutions[0]?.id ?? null);
+  }
+
+  async function onCreateTeammate() {
+    if (!activeSessionId) return;
+    const teammate = await createTeammate(
+      activeSessionId,
+      `Scout ${teammates.length + 1}`,
+      "Scout",
+    );
+    setTeammates((current) => [teammate, ...current]);
+    setSelectedTeammateId(teammate.id);
+  }
+
+  async function onSendTeammateMessage() {
+    if (!selectedTeammateId || !teammateDraft.trim() || !activeSessionId) return;
+    await sendTeammateMessage(selectedTeammateId, teammateDraft.trim());
+    setTeammateMessages(await fetchTeammateMessages(selectedTeammateId));
+    setTeammates(await fetchTeammates(activeSessionId));
+    setEvents(await fetchTimeline(activeSessionId));
   }
 
   const selected = executions.find((item) => item.id === selectedExecutionId) ?? null;
@@ -124,6 +168,37 @@ export function App() {
               <h3>Tasks</h3>
               <button type="button" onClick={onCreateTask}>New Task</button>
               <ul>{tasks.slice(0, 4).map((task) => <li key={task.id}>{task.subject}</li>)}</ul>
+            </article>
+            <article className="ops-card">
+              <h3>Teammates</h3>
+              <button type="button" onClick={onCreateTeammate}>Add Scout</button>
+              <div className="teammate-list">
+                {teammates.slice(0, 4).map((teammate) => (
+                  <button
+                    key={teammate.id}
+                    type="button"
+                    className={teammate.id === selectedTeammateId ? "teammate-entry active" : "teammate-entry"}
+                    onClick={() => setSelectedTeammateId(teammate.id)}
+                  >
+                    <strong>{teammate.name}</strong>
+                    <p>{teammate.role} [{teammate.status}]</p>
+                  </button>
+                ))}
+              </div>
+              <textarea
+                value={teammateDraft}
+                onChange={(e) => setTeammateDraft(e.target.value)}
+                rows={3}
+              />
+              <button type="button" onClick={onSendTeammateMessage}>Send Brief</button>
+              <div className="teammate-thread">
+                {teammateMessages.slice(0, 4).map((message) => (
+                  <div key={message.id} className="teammate-message">
+                    <strong>{message.direction}</strong>
+                    <p>{message.content}</p>
+                  </div>
+                ))}
+              </div>
             </article>
             <article className="ops-card">
               <h3>Approvals</h3>
