@@ -1,9 +1,16 @@
 import asyncio
 from collections import defaultdict
+from dataclasses import dataclass
 
 from app.schemas.events import MessageCreate, SessionCreate, SessionSummary, TimelineEvent
-from app.services import session_service, tool_service
+from app.services import approval_service, session_service, tool_service
 from app.tools import broker
+
+
+@dataclass
+class PendingApproval:
+    session_id: str
+    steps: list[tuple[str, dict[str, object]]]
 
 
 class EventBroker:
@@ -28,6 +35,7 @@ class EventBroker:
 class RuntimeManager:
     def __init__(self) -> None:
         self.events = EventBroker()
+        self.pending_approvals: dict[int, PendingApproval] = {}
 
     def list_sessions(self) -> list[SessionSummary]:
         return session_service.list_sessions()
@@ -40,6 +48,62 @@ class RuntimeManager:
 
     def list_tool_executions(self, session_id: str | None = None):
         return tool_service.list_tool_executions(session_id)
+
+    def list_approvals(self, session_id: str | None = None):
+        return approval_service.list_approvals(session_id)
+
+    async def decide_approval(self, approval_id: int, approve: bool, feedback: str = ""):
+        decision = approval_service.update_approval(approval_id, approve=approve, feedback=feedback)
+        if not decision:
+            return None
+        pending = self.pending_approvals.pop(approval_id, None)
+        if decision.session_id:
+            await self.publish(
+                TimelineEvent(
+                    session_id=decision.session_id,
+                    type="approval.resolved",
+                    content=f"Approval #{approval_id} {decision.status}.",
+                )
+            )
+        if approve and pending:
+            first_tool, first_payload = pending.steps[0]
+            status, output = broker.run(first_tool, first_payload)
+            record = tool_service.create_tool_execution(
+                session_id=pending.session_id,
+                tool_name=first_tool,
+                status=status,
+                input_json=broker.serialize_input(first_payload),
+                output_text=output,
+            )
+            await self.publish(
+                TimelineEvent(
+                    session_id=pending.session_id,
+                    type="tool.execution",
+                    content=f"{record.tool_name} -> {record.status}",
+                )
+            )
+            parts = [self._summarize_tool_output(first_tool, output, record.status)]
+            more_parts, pause_message = await self._execute_steps(
+                pending.session_id,
+                pending.steps[1:],
+            )
+            parts.extend(more_parts)
+            if pause_message:
+                parts.append(pause_message)
+            if parts:
+                reply = "\n\n".join(parts)
+                session_service.create_message_record(
+                    pending.session_id,
+                    MessageCreate(role="assistant", content=reply),
+                )
+                await self.publish(
+                    TimelineEvent(
+                        session_id=pending.session_id,
+                        type="message.assistant",
+                        content=reply,
+                    )
+                )
+        return decision
 
     async def publish(self, event: TimelineEvent) -> TimelineEvent:
         stored = session_service.create_event_record(event)
@@ -79,23 +143,10 @@ class RuntimeManager:
         )
         steps, guidance = self._plan_steps(content)
         assistant_parts: list[str] = []
-        for tool_name, tool_payload in steps:
-            status, output = broker.run(tool_name, tool_payload)
-            record = tool_service.create_tool_execution(
-                session_id=session_id,
-                tool_name=tool_name,
-                status=status,
-                input_json=broker.serialize_input(tool_payload),
-                output_text=output,
-            )
-            await self.publish(
-                TimelineEvent(
-                    session_id=session_id,
-                    type="tool.execution",
-                    content=f"{record.tool_name} -> {record.status}",
-                )
-            )
-            assistant_parts.append(self._summarize_tool_output(tool_name, output, record.status))
+        executed_parts, pause_message = await self._execute_steps(session_id, steps)
+        assistant_parts.extend(executed_parts)
+        if pause_message:
+            assistant_parts.append(pause_message)
         if guidance:
             assistant_parts.append(guidance)
         if not assistant_parts:
@@ -112,6 +163,49 @@ class RuntimeManager:
             )
         )
 
+    async def _execute_steps(
+        self,
+        session_id: str,
+        steps: list[tuple[str, dict[str, object]]],
+    ) -> tuple[list[str], str | None]:
+        parts: list[str] = []
+        for index, (tool_name, tool_payload) in enumerate(steps):
+            if self._requires_approval(tool_name):
+                approval = approval_service.create_approval(
+                    session_id=session_id,
+                    approval_type=tool_name,
+                    prompt=f"{tool_name}\n{broker.serialize_input(tool_payload)}",
+                )
+                self.pending_approvals[approval.id] = PendingApproval(
+                    session_id=session_id,
+                    steps=steps[index:],
+                )
+                await self.publish(
+                    TimelineEvent(
+                        session_id=session_id,
+                        type="approval.requested",
+                        content=f"Approval #{approval.id} requested for {tool_name}.",
+                    )
+                )
+                return parts, f"Approval required before running `{tool_name}`. Review approval #{approval.id} in the cockpit."
+            status, output = broker.run(tool_name, tool_payload)
+            record = tool_service.create_tool_execution(
+                session_id=session_id,
+                tool_name=tool_name,
+                status=status,
+                input_json=broker.serialize_input(tool_payload),
+                output_text=output,
+            )
+            await self.publish(
+                TimelineEvent(
+                    session_id=session_id,
+                    type="tool.execution",
+                    content=f"{record.tool_name} -> {record.status}",
+                )
+            )
+            parts.append(self._summarize_tool_output(tool_name, output, record.status))
+        return parts, None
+
     def _plan_steps(self, content: str) -> tuple[list[tuple[str, dict[str, object]]], str | None]:
         blocks = [part.strip() for part in content.split("\n\n") if part.strip()]
         if len(blocks) <= 1:
@@ -125,6 +219,9 @@ class RuntimeManager:
             if tool_name:
                 steps.append((tool_name, tool_payload))
         return steps, None
+
+    def _requires_approval(self, tool_name: str) -> bool:
+        return tool_name in {"bash", "write_file", "edit_file"}
 
     def _select_tool(self, content: str) -> tuple[str | None, dict[str, object], str | None]:
         text = content.strip()

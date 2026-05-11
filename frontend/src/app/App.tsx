@@ -1,11 +1,14 @@
 import { FormEvent, useEffect, useState } from "react";
 
 import {
+  decideApproval,
   createTask,
+  fetchApprovals,
   fetchBootstrap,
   fetchTimeline,
   fetchToolExecutions,
   sendMessage,
+  type ApprovalSummary,
   type SessionSummary,
   type TaskSummary,
   type TimelineEvent,
@@ -17,6 +20,7 @@ export function App() {
   const [activeSessionId, setActiveSessionId] = useState("");
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
+  const [approvals, setApprovals] = useState<ApprovalSummary[]>([]);
   const [executions, setExecutions] = useState<ToolExecutionSummary[]>([]);
   const [selectedExecutionId, setSelectedExecutionId] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
@@ -25,6 +29,7 @@ export function App() {
     fetchBootstrap().then((data) => {
       setSessions(data.sessions);
       setTasks(data.tasks);
+      setApprovals(data.approvals);
       setExecutions(data.tool_executions);
       setSelectedExecutionId(data.tool_executions[0]?.id ?? null);
       setActiveSessionId(data.sessions[0]?.session_id ?? "");
@@ -34,6 +39,7 @@ export function App() {
   useEffect(() => {
     if (!activeSessionId) return;
     fetchTimeline(activeSessionId).then(setEvents).catch(() => setEvents([]));
+    fetchApprovals(activeSessionId).then(setApprovals).catch(() => setApprovals([]));
     fetchToolExecutions(activeSessionId)
       .then((items) => {
         setExecutions(items);
@@ -49,6 +55,7 @@ export function App() {
     setDraft("");
     await sendMessage(activeSessionId, content);
     setEvents(await fetchTimeline(activeSessionId));
+    setApprovals(await fetchApprovals(activeSessionId));
     const nextExecutions = await fetchToolExecutions(activeSessionId);
     setExecutions(nextExecutions);
     setSelectedExecutionId(nextExecutions[0]?.id ?? null);
@@ -58,6 +65,16 @@ export function App() {
     if (!activeSessionId) return;
     const task = await createTask("Follow up latest runtime turn", activeSessionId);
     setTasks((current) => [task, ...current]);
+  }
+
+  async function onDecision(approvalId: number, approve: boolean) {
+    await decideApproval(approvalId, approve);
+    if (!activeSessionId) return;
+    setApprovals(await fetchApprovals(activeSessionId));
+    setEvents(await fetchTimeline(activeSessionId));
+    const nextExecutions = await fetchToolExecutions(activeSessionId);
+    setExecutions(nextExecutions);
+    setSelectedExecutionId(nextExecutions[0]?.id ?? null);
   }
 
   const selected = executions.find((item) => item.id === selectedExecutionId) ?? null;
@@ -107,6 +124,24 @@ export function App() {
               <h3>Tasks</h3>
               <button type="button" onClick={onCreateTask}>New Task</button>
               <ul>{tasks.slice(0, 4).map((task) => <li key={task.id}>{task.subject}</li>)}</ul>
+            </article>
+            <article className="ops-card">
+              <h3>Approvals</h3>
+              <div className="approval-list">
+                {approvals.slice(0, 4).map((approval) => (
+                  <div key={approval.id} className="approval-entry">
+                    <strong>#{approval.id} {approval.approval_type}</strong>
+                    <p>{approval.status}</p>
+                    <pre>{approval.prompt}</pre>
+                    {approval.status === "pending" ? (
+                      <div className="approval-actions">
+                        <button type="button" onClick={() => onDecision(approval.id, true)}>Approve</button>
+                        <button type="button" className="ghost" onClick={() => onDecision(approval.id, false)}>Reject</button>
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
             </article>
             <article className="ops-card">
               <h3>Logs</h3>

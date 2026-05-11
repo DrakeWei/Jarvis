@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 
+from app.schemas.approvals import ApprovalDecision
 from app.schemas.events import MessageCreate, SessionCreate
 from app.schemas.tasks import TaskCreate
 from app.services import task_service
@@ -20,6 +21,7 @@ async def bootstrap() -> dict[str, object]:
         "sessions": runtime.list_sessions(),
         "panels": ["tasks", "teammates", "approvals", "logs"],
         "tasks": task_service.list_tasks(),
+        "approvals": runtime.list_approvals(),
         "tool_executions": runtime.list_tool_executions(),
     }
 
@@ -62,3 +64,20 @@ async def create_task(payload: TaskCreate):
 @router.get("/tool-executions")
 async def list_tool_executions(session_id: str | None = None):
     return runtime.list_tool_executions(session_id)
+
+
+@router.get("/approvals")
+async def list_approvals(session_id: str | None = None):
+    return runtime.list_approvals(session_id)
+
+
+@router.post("/approvals/{approval_id}/decision")
+async def decide_approval(approval_id: int, payload: ApprovalDecision):
+    result = await runtime.decide_approval(
+        approval_id,
+        approve=payload.approve,
+        feedback=payload.feedback,
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Unknown approval")
+    return result

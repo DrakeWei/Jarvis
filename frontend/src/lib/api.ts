@@ -20,6 +20,16 @@ export type TaskSummary = {
   created_at: string;
 };
 
+export type ApprovalSummary = {
+  id: number;
+  session_id: string | null;
+  approval_type: string;
+  status: string;
+  prompt: string;
+  feedback: string | null;
+  created_at: string;
+};
+
 export type ToolExecutionSummary = {
   id: number;
   session_id: string;
@@ -37,6 +47,7 @@ export async function fetchBootstrap(): Promise<{
   sessions: SessionSummary[];
   panels: string[];
   tasks: TaskSummary[];
+  approvals: ApprovalSummary[];
   tool_executions: ToolExecutionSummary[];
 }> {
   const response = await fetch(`${API_BASE}/bootstrap`);
@@ -100,6 +111,37 @@ export async function fetchToolExecutions(
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error("Failed to load tool executions");
+  }
+  return response.json();
+}
+
+export async function fetchApprovals(sessionId?: string): Promise<ApprovalSummary[]> {
+  const url = sessionId
+    ? `${API_BASE}/approvals?session_id=${encodeURIComponent(sessionId)}`
+    : `${API_BASE}/approvals`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error("Failed to load approvals");
+  }
+  return response.json();
+}
+
+export async function decideApproval(
+  approvalId: number,
+  approve: boolean,
+): Promise<ApprovalSummary> {
+  const response = await fetch(`${API_BASE}/approvals/${approvalId}/decision`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      approve,
+      feedback: "",
+    }),
+  });
+  if (!response.ok) {
+    throw new Error("Failed to decide approval");
   }
   return response.json();
 }
