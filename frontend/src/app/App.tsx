@@ -6,6 +6,7 @@ import {
   createTeammate,
   fetchApprovals,
   fetchBootstrap,
+  openSessionEvents,
   fetchSubagents,
   fetchTeammateMessages,
   fetchTeammates,
@@ -39,6 +40,7 @@ export function App() {
   const [executions, setExecutions] = useState<ToolExecutionSummary[]>([]);
   const [selectedExecutionId, setSelectedExecutionId] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
+  const [connectionState, setConnectionState] = useState("offline");
 
   useEffect(() => {
     fetchBootstrap().then((data) => {
@@ -54,23 +56,26 @@ export function App() {
     });
   }, []);
 
+  async function refreshSessionState(sessionId: string) {
+    setSubagents(await fetchSubagents(sessionId));
+    setApprovals(await fetchApprovals(sessionId));
+    const nextExecutions = await fetchToolExecutions(sessionId);
+    setExecutions(nextExecutions);
+    setSelectedExecutionId((current) => current ?? nextExecutions[0]?.id ?? null);
+    const nextTeammates = await fetchTeammates(sessionId);
+    setTeammates(nextTeammates);
+    setSelectedTeammateId((current) => current ?? nextTeammates[0]?.id ?? null);
+  }
+
   useEffect(() => {
     if (!activeSessionId) return;
     fetchTimeline(activeSessionId).then(setEvents).catch(() => setEvents([]));
-    fetchSubagents(activeSessionId).then(setSubagents).catch(() => setSubagents([]));
-    fetchTeammates(activeSessionId)
-      .then((items) => {
-        setTeammates(items);
-        setSelectedTeammateId((current) => current ?? items[0]?.id ?? null);
-      })
-      .catch(() => setTeammates([]));
-    fetchApprovals(activeSessionId).then(setApprovals).catch(() => setApprovals([]));
-    fetchToolExecutions(activeSessionId)
-      .then((items) => {
-        setExecutions(items);
-        setSelectedExecutionId(items[0]?.id ?? null);
-      })
-      .catch(() => setExecutions([]));
+    refreshSessionState(activeSessionId).catch(() => {
+      setSubagents([]);
+      setTeammates([]);
+      setApprovals([]);
+      setExecutions([]);
+    });
   }, [activeSessionId]);
 
   useEffect(() => {
@@ -80,6 +85,62 @@ export function App() {
       .catch(() => setTeammateMessages([]));
   }, [selectedTeammateId]);
 
+  useEffect(() => {
+    if (!activeSessionId) return;
+    let disposed = false;
+    let retryTimer: number | undefined;
+
+    const connect = () => {
+      if (disposed) return () => {};
+      setConnectionState("connecting");
+      return openSessionEvents(
+        activeSessionId,
+        (event) => {
+          setEvents((current) => {
+            const exists = current.some(
+              (item) =>
+                item.created_at === event.created_at &&
+                item.type === event.type &&
+                item.content === event.content,
+            );
+            return exists ? current : [...current, event];
+          });
+          if (event.type.startsWith("tool.") || event.type.startsWith("approval.")) {
+            refreshSessionState(activeSessionId).catch(() => undefined);
+          }
+          if (event.type.startsWith("teammate.")) {
+            refreshSessionState(activeSessionId).catch(() => undefined);
+            if (selectedTeammateId) {
+              fetchTeammateMessages(selectedTeammateId).then(setTeammateMessages).catch(() => undefined);
+            }
+          }
+          if (event.type.startsWith("subagent.")) {
+            refreshSessionState(activeSessionId).catch(() => undefined);
+          }
+        },
+        {
+          onOpen: () => setConnectionState("live"),
+          onError: () => setConnectionState("degraded"),
+          onClose: () => {
+            if (disposed) return;
+            setConnectionState("reconnecting");
+            retryTimer = window.setTimeout(() => {
+              cleanup = connect();
+            }, 1200);
+          },
+        },
+      );
+    };
+
+    let cleanup = connect();
+    return () => {
+      disposed = true;
+      if (retryTimer) window.clearTimeout(retryTimer);
+      cleanup();
+      setConnectionState("offline");
+    };
+  }, [activeSessionId, selectedTeammateId]);
+
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
     if (!activeSessionId || !draft.trim()) return;
@@ -87,11 +148,7 @@ export function App() {
     setDraft("");
     await sendMessage(activeSessionId, content);
     setEvents(await fetchTimeline(activeSessionId));
-    setSubagents(await fetchSubagents(activeSessionId));
-    setApprovals(await fetchApprovals(activeSessionId));
-    const nextExecutions = await fetchToolExecutions(activeSessionId);
-    setExecutions(nextExecutions);
-    setSelectedExecutionId(nextExecutions[0]?.id ?? null);
+    await refreshSessionState(activeSessionId);
   }
 
   async function onCreateTask() {
@@ -103,11 +160,8 @@ export function App() {
   async function onDecision(approvalId: number, approve: boolean) {
     await decideApproval(approvalId, approve);
     if (!activeSessionId) return;
-    setApprovals(await fetchApprovals(activeSessionId));
     setEvents(await fetchTimeline(activeSessionId));
-    const nextExecutions = await fetchToolExecutions(activeSessionId);
-    setExecutions(nextExecutions);
-    setSelectedExecutionId(nextExecutions[0]?.id ?? null);
+    await refreshSessionState(activeSessionId);
   }
 
   async function onCreateTeammate() {
@@ -125,14 +179,14 @@ export function App() {
     if (!selectedTeammateId || !teammateDraft.trim() || !activeSessionId) return;
     await sendTeammateMessage(selectedTeammateId, teammateDraft.trim());
     setTeammateMessages(await fetchTeammateMessages(selectedTeammateId));
-    setTeammates(await fetchTeammates(activeSessionId));
+    await refreshSessionState(activeSessionId);
     setEvents(await fetchTimeline(activeSessionId));
   }
 
   async function onRunSubagent() {
     if (!activeSessionId || !subagentDraft.trim()) return;
     await runSubagent(activeSessionId, `Explorer ${subagents.length + 1}`, subagentDraft.trim());
-    setSubagents(await fetchSubagents(activeSessionId));
+    await refreshSessionState(activeSessionId);
     setEvents(await fetchTimeline(activeSessionId));
   }
 
@@ -158,6 +212,7 @@ export function App() {
 
         <section className="panel">
           <h2>Lead Session</h2>
+          <p className="stream-state">Stream: {connectionState}</p>
           <div className="timeline">
             {events.map((entry, index) => (
               <article key={`${entry.created_at}-${index}`} className="timeline-event">

@@ -270,10 +270,18 @@ export async function runSubagent(
 export function openSessionEvents(
   sessionId: string,
   onEvent: (event: TimelineEvent) => void,
+  handlers?: {
+    onOpen?: () => void;
+    onClose?: () => void;
+    onError?: () => void;
+  },
 ): () => void {
   const socket = new WebSocket(`ws://127.0.0.1:8731/api/sessions/${sessionId}/events`);
+  socket.onopen = () => handlers?.onOpen?.();
   socket.onmessage = (message) => {
     onEvent(JSON.parse(message.data) as TimelineEvent);
   };
+  socket.onerror = () => handlers?.onError?.();
+  socket.onclose = () => handlers?.onClose?.();
   return () => socket.close();
 }
