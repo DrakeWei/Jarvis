@@ -77,9 +77,9 @@ class RuntimeManager:
                 content="Lead runtime is evaluating the latest user turn.",
             )
         )
-        tool_name, tool_payload, guidance = self._select_tool(content)
+        steps, guidance = self._plan_steps(content)
         assistant_parts: list[str] = []
-        if tool_name:
+        for tool_name, tool_payload in steps:
             status, output = broker.run(tool_name, tool_payload)
             record = tool_service.create_tool_execution(
                 session_id=session_id,
@@ -96,7 +96,7 @@ class RuntimeManager:
                 )
             )
             assistant_parts.append(self._summarize_tool_output(tool_name, output, record.status))
-        elif guidance:
+        if guidance:
             assistant_parts.append(guidance)
         if not assistant_parts:
             assistant_parts.append(
@@ -111,6 +111,20 @@ class RuntimeManager:
                 content=reply,
             )
         )
+
+    def _plan_steps(self, content: str) -> tuple[list[tuple[str, dict[str, object]]], str | None]:
+        blocks = [part.strip() for part in content.split("\n\n") if part.strip()]
+        if len(blocks) <= 1:
+            tool_name, tool_payload, guidance = self._select_tool(content)
+            return ([(tool_name, tool_payload)] if tool_name else []), guidance
+        steps: list[tuple[str, dict[str, object]]] = []
+        for block in blocks:
+            tool_name, tool_payload, guidance = self._select_tool(block)
+            if guidance:
+                return [], guidance
+            if tool_name:
+                steps.append((tool_name, tool_payload))
+        return steps, None
 
     def _select_tool(self, content: str) -> tuple[str | None, dict[str, object], str | None]:
         text = content.strip()

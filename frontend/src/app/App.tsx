@@ -94,7 +94,7 @@ export function App() {
             <textarea
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              placeholder={"show files\nread README.md\nbash: pwd\nwrite data/note.txt\n<<<\nhello\n>>>"}
+              placeholder={"show files\n\nread README.md\n\nbash: pwd\n\nwrite data/note.txt\n<<<\nhello\n>>>"}
               rows={8}
             />
             <button type="submit">Send Turn</button>
