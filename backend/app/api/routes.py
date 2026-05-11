@@ -20,6 +20,7 @@ async def bootstrap() -> dict[str, object]:
         "sessions": runtime.list_sessions(),
         "panels": ["tasks", "teammates", "approvals", "logs"],
         "tasks": task_service.list_tasks(),
+        "tool_executions": runtime.list_tool_executions(),
     }
 
 
@@ -56,3 +57,8 @@ async def list_tasks():
 @router.post("/tasks")
 async def create_task(payload: TaskCreate):
     return task_service.create_task(payload)
+
+
+@router.get("/tool-executions")
+async def list_tool_executions(session_id: str | None = None):
+    return runtime.list_tool_executions(session_id)

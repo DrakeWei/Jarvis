@@ -20,6 +20,16 @@ export type TaskSummary = {
   created_at: string;
 };
 
+export type ToolExecutionSummary = {
+  id: number;
+  session_id: string;
+  tool_name: string;
+  status: string;
+  input_json: string | null;
+  output_text: string | null;
+  created_at: string;
+};
+
 const API_BASE = "http://127.0.0.1:8731/api";
 
 export async function fetchBootstrap(): Promise<{
@@ -27,6 +37,7 @@ export async function fetchBootstrap(): Promise<{
   sessions: SessionSummary[];
   panels: string[];
   tasks: TaskSummary[];
+  tool_executions: ToolExecutionSummary[];
 }> {
   const response = await fetch(`${API_BASE}/bootstrap`);
   if (!response.ok) {
@@ -76,6 +87,19 @@ export async function createTask(subject: string, sessionId: string): Promise<Ta
   });
   if (!response.ok) {
     throw new Error("Failed to create task");
+  }
+  return response.json();
+}
+
+export async function fetchToolExecutions(
+  sessionId?: string,
+): Promise<ToolExecutionSummary[]> {
+  const url = sessionId
+    ? `${API_BASE}/tool-executions?session_id=${encodeURIComponent(sessionId)}`
+    : `${API_BASE}/tool-executions`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error("Failed to load tool executions");
   }
   return response.json();
 }
