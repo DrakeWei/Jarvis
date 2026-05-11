@@ -77,7 +77,7 @@ class RuntimeManager:
                 content="Lead runtime is evaluating the latest user turn.",
             )
         )
-        tool_name, tool_payload = self._select_tool(content)
+        tool_name, tool_payload, guidance = self._select_tool(content)
         assistant_parts: list[str] = []
         if tool_name:
             status, output = broker.run(tool_name, tool_payload)
@@ -96,6 +96,8 @@ class RuntimeManager:
                 )
             )
             assistant_parts.append(self._summarize_tool_output(tool_name, output, record.status))
+        elif guidance:
+            assistant_parts.append(guidance)
         if not assistant_parts:
             assistant_parts.append(
                 "Lead runtime scaffold received your message. Tool routing is active for workspace listing, file reads, file writes, exact file edits, and explicit bash commands."
@@ -110,25 +112,30 @@ class RuntimeManager:
             )
         )
 
-    def _select_tool(self, content: str) -> tuple[str | None, dict[str, object]]:
+    def _select_tool(self, content: str) -> tuple[str | None, dict[str, object], str | None]:
         text = content.strip()
         lowered = text.lower()
         if lowered.startswith("bash:"):
-            return "bash", {"command": text.split(":", 1)[1].strip()}
+            return "bash", {"command": text.split(":", 1)[1].strip()}, None
         if lowered.startswith("read "):
-            return "read_file", {"path": text.split(" ", 1)[1].strip()}
+            path = text.split(" ", 1)[1].strip()
+            if not path:
+                return None, {}, "Use `read <path>` with a file path, for example `read README.md`."
+            return "read_file", {"path": path}, None
         if lowered.startswith("write "):
             parsed = self._parse_write_command(text)
-            return ("write_file", parsed) if parsed else (None, {})
+            return ("write_file", parsed, None) if parsed else (None, {}, self._write_guidance())
         if lowered.startswith("edit "):
             parsed = self._parse_edit_command(text)
-            return ("edit_file", parsed) if parsed else (None, {})
+            return ("edit_file", parsed, None) if parsed else (None, {}, self._edit_guidance())
         if any(token in lowered for token in ["list files", "show files", "workspace", "project structure", "目录"]):
-            return "list_files", {}
-        return None, {}
+            return "list_files", {}, None
+        return None, {}, None
 
     def _summarize_tool_output(self, tool_name: str, output: str, status: str) -> str:
         preview = output[:1000]
+        if status in {"error", "blocked"}:
+            return f"{tool_name} returned status `{status}`.\n\n{preview}"
         if tool_name == "list_files":
             return f"Workspace snapshot completed with status `{status}`.\n\n{preview}"
         if tool_name == "read_file":
@@ -156,3 +163,9 @@ class RuntimeManager:
         old_text, new_part = body[:-4].split("\n===\n", 1)
         path = header.split(" ", 1)[1].strip()
         return {"path": path, "old_text": old_text, "new_text": new_part}
+
+    def _write_guidance(self) -> str:
+        return "Write commands must use this format:\n\nwrite path/to/file.txt\n<<<\nnew file contents\n>>>"
+
+    def _edit_guidance(self) -> str:
+        return "Edit commands must use this format:\n\nedit path/to/file.txt\n<<<OLD\ntext to replace\n===\nreplacement text\n>>>"
