@@ -8,8 +8,23 @@ from app.core.config import settings
 
 
 class ToolBroker:
-    def __init__(self) -> None:
-        self.project_root = settings.project_root
+    def __init__(self, project_root: Path | str | None = None) -> None:
+        self.project_root = Path(project_root).resolve() if project_root else settings.project_root
+        self._ignored_dir_names = {
+            ".git",
+            ".hg",
+            ".svn",
+            ".venv",
+            "node_modules",
+            "__pycache__",
+            ".mypy_cache",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".tox",
+            "target",
+            "dist",
+            "build",
+        }
 
     def run(self, tool_name: str, payload: dict[str, object]) -> tuple[str, str]:
         try:
@@ -43,15 +58,24 @@ class ToolBroker:
         return path
 
     def _list_files(self) -> str:
-        result = subprocess.run(
-            ["rg", "--files", str(self.project_root)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        output = result.stdout.strip() or result.stderr.strip() or "(no files)"
-        lines = output.splitlines()[:80]
-        return "\n".join(lines)
+        try:
+            result = subprocess.run(
+                ["rg", "--files", str(self.project_root)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            output = result.stdout.strip() or result.stderr.strip() or "(no files)"
+            lines = output.splitlines()[:80]
+            return "\n".join(lines)
+        except FileNotFoundError:
+            files = [
+                path.relative_to(self.project_root).as_posix()
+                for path in sorted(self._iter_visible_files())
+            ]
+            if not files:
+                return "(no files)"
+            return "\n".join(files[:80])
 
     def _read_file(self, path: str) -> tuple[str, str]:
         target = self._safe_path(path)
@@ -95,6 +119,20 @@ class ToolBroker:
         )
         output = (result.stdout + result.stderr).strip()[:10000] or "(no output)"
         return ("completed" if result.returncode == 0 else "error"), output
+
+    def _iter_visible_files(self):
+        import os
+
+        for root, dirs, files in os.walk(self.project_root):
+            dirs[:] = [
+                directory
+                for directory in dirs
+                if directory not in self._ignored_dir_names and not directory.startswith(".")
+            ]
+            for filename in files:
+                if filename.startswith("."):
+                    continue
+                yield Path(root) / filename
 
 
 broker = ToolBroker()

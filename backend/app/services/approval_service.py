@@ -15,7 +15,7 @@ def _public_feedback(value: str | None, status: str) -> str | None:
     return value
 
 
-def _runtime_feedback(context: list[tuple[str, dict[str, object]]] | None) -> str | None:
+def _runtime_feedback(context: dict[str, object] | None) -> str | None:
     if context is None:
         return None
     return RUNTIME_PREFIX + json.dumps(context, ensure_ascii=True)
@@ -48,7 +48,7 @@ def create_approval(
     session_id: str,
     approval_type: str,
     prompt: str,
-    context: list[tuple[str, dict[str, object]]] | None = None,
+    context: dict[str, object] | None = None,
 ) -> ApprovalSummary:
     with create_session() as db:
         row = ApprovalRecord(
@@ -108,16 +108,17 @@ def update_approval(approval_id: int, approve: bool, feedback: str) -> ApprovalS
         )
 
 
-def list_pending_runtime_contexts() -> list[tuple[int, str | None, list[tuple[str, dict[str, object]]]]]:
+def list_pending_runtime_contexts() -> list[tuple[int, str | None, dict[str, object]]]:
     with create_session() as db:
         rows = db.scalars(
             select(ApprovalRecord).where(ApprovalRecord.status == "pending")
         ).all()
-        contexts: list[tuple[int, str | None, list[tuple[str, dict[str, object]]]]] = []
+        contexts: list[tuple[int, str | None, dict[str, object]]] = []
         for row in rows:
             if not row.feedback or not row.feedback.startswith(RUNTIME_PREFIX):
                 continue
             raw = row.feedback[len(RUNTIME_PREFIX):]
             decoded = json.loads(raw)
-            contexts.append((row.id, row.session_id, [(item[0], item[1]) for item in decoded]))
+            if isinstance(decoded, dict):
+                contexts.append((row.id, row.session_id, decoded))
         return contexts

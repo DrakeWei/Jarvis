@@ -1,0 +1,16 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <clipPath id="icon-clip">
+      <rect x="26" y="26" width="460" height="460" rx="108" ry="108" />
+    </clipPath>
+    <linearGradient id="plate" x1="56" y1="40" x2="456" y2="472" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#181514"/>
+      <stop offset="1" stop-color="#312421"/>
+    </linearGradient>
+  </defs>
+  <rect x="26" y="26" width="460" height="460" rx="108" ry="108" fill="url(#plate)"/>
+  <g clip-path="url(#icon-clip)">
+    <image href="jarvis-square.png" x="44" y="44" width="424" height="424" preserveAspectRatio="xMidYMid slice"/>
+  </g>
+  <rect x="26" y="26" width="460" height="460" rx="108" ry="108" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="6"/>
+</svg>
