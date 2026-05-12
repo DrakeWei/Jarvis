@@ -87,6 +87,20 @@ export async function fetchBootstrap(): Promise<{
   return response.json();
 }
 
+export async function createSession(title: string): Promise<SessionSummary> {
+  const response = await fetch(`${API_BASE}/sessions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ title }),
+  });
+  if (!response.ok) {
+    throw new Error("Failed to create session");
+  }
+  return response.json();
+}
+
 export async function sendMessage(
   sessionId: string,
   content: string,

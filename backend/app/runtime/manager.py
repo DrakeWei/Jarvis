@@ -1,18 +1,22 @@
 import asyncio
+import re
 from collections import defaultdict
 from dataclasses import dataclass
+from pathlib import Path
 
+from app.core.config import settings
+from app.providers import TextBlock, create_client
 from app.schemas.events import MessageCreate, SessionCreate, SessionSummary, TimelineEvent
 from app.schemas.subagents import SubagentRunCreate
 from app.schemas.teammates import TeammateCreate
 from app.services import approval_service, session_service, subagent_service, teammate_service, tool_service
-from app.tools import broker
+from app.tools.broker import ToolBroker, broker
 
 
 @dataclass
 class PendingApproval:
     session_id: str
-    steps: list[tuple[str, dict[str, object]]]
+    context: dict[str, object]
 
 
 class EventBroker:
@@ -38,15 +42,16 @@ class RuntimeManager:
     def __init__(self) -> None:
         self.events = EventBroker()
         self.pending_approvals: dict[int, PendingApproval] = {}
+        self.background_tasks: set[asyncio.Task[None]] = set()
 
     def restore_state(self) -> None:
         self.pending_approvals = {}
-        for approval_id, session_id, steps in approval_service.list_pending_runtime_contexts():
+        for approval_id, session_id, context in approval_service.list_pending_runtime_contexts():
             if not session_id:
                 continue
             self.pending_approvals[approval_id] = PendingApproval(
                 session_id=session_id,
-                steps=steps,
+                context=context,
             )
 
     def list_sessions(self) -> list[SessionSummary]:
@@ -87,43 +92,9 @@ class RuntimeManager:
                 )
             )
         if approve and pending:
-            first_tool, first_payload = pending.steps[0]
-            status, output = broker.run(first_tool, first_payload)
-            record = tool_service.create_tool_execution(
-                session_id=pending.session_id,
-                tool_name=first_tool,
-                status=status,
-                input_json=broker.serialize_input(first_payload),
-                output_text=output,
-            )
-            await self.publish(
-                TimelineEvent(
-                    session_id=pending.session_id,
-                    type="tool.execution",
-                    content=f"{record.tool_name} -> {record.status}",
-                )
-            )
-            parts = [self._summarize_tool_output(first_tool, output, record.status)]
-            more_parts, pause_message = await self._execute_steps(
-                pending.session_id,
-                pending.steps[1:],
-            )
-            parts.extend(more_parts)
-            if pause_message:
-                parts.append(pause_message)
-            if parts:
-                reply = "\n\n".join(parts)
-                session_service.create_message_record(
-                    pending.session_id,
-                    MessageCreate(role="assistant", content=reply),
-                )
-                await self.publish(
-                    TimelineEvent(
-                        session_id=pending.session_id,
-                        type="message.assistant",
-                        content=reply,
-                    )
-                )
+            reply = await self._resume_agent_loop_after_approval(pending.session_id, pending.context)
+            if reply:
+                await self._publish_assistant_reply(pending.session_id, reply)
         return decision
 
     async def create_teammate(self, payload: TeammateCreate):
@@ -190,6 +161,15 @@ class RuntimeManager:
         await self.events.publish(stored)
         return stored
 
+    async def emit_ephemeral(self, event: TimelineEvent) -> TimelineEvent:
+        await self.events.publish(event)
+        return event
+
+    def _start_background_turn(self, session_id: str, content: str) -> None:
+        task = asyncio.create_task(self._run_lead_turn(session_id, content))
+        self.background_tasks.add(task)
+        task.add_done_callback(self.background_tasks.discard)
+
     async def create_session(self, payload: SessionCreate) -> SessionSummary:
         session = session_service.create_session_record(payload)
         await self.publish(
@@ -202,6 +182,8 @@ class RuntimeManager:
         return session
 
     async def append_message(self, session_id: str, payload: MessageCreate) -> None:
+        if payload.role == "user":
+            self._maybe_autoname_session(session_id, payload.content)
         session_service.create_message_record(session_id, payload)
         await self.publish(
             TimelineEvent(
@@ -211,156 +193,237 @@ class RuntimeManager:
             )
         )
         if payload.role == "user":
-            await self._run_lead_turn(session_id, payload.content)
+            self._start_background_turn(session_id, payload.content)
 
     async def _run_lead_turn(self, session_id: str, content: str) -> None:
-        await self.publish(
+        await self.emit_ephemeral(
             TimelineEvent(
                 session_id=session_id,
                 type="runtime.state",
                 content="Lead runtime is evaluating the latest user turn.",
             )
         )
-        steps, guidance = self._plan_steps(content)
-        assistant_parts: list[str] = []
-        executed_parts, pause_message = await self._execute_steps(session_id, steps)
-        assistant_parts.extend(executed_parts)
-        if pause_message:
-            assistant_parts.append(pause_message)
-        if guidance:
-            assistant_parts.append(guidance)
-        if not assistant_parts:
-            assistant_parts.append(
-                "Lead runtime scaffold received your message. Tool routing is active for workspace listing, file reads, file writes, exact file edits, and explicit bash commands."
-            )
-        reply = "\n\n".join(assistant_parts)
-        session_service.create_message_record(session_id, MessageCreate(role="assistant", content=reply))
-        await self.publish(
-            TimelineEvent(
-                session_id=session_id,
-                type="message.assistant",
-                content=reply,
-            )
-        )
+        try:
+            reply = await self._run_agent_task(session_id, content)
+            await self._publish_assistant_reply(session_id, reply)
+            return
+        except Exception as exc:
+            reply = f"Lead runtime failed: {exc}"
 
-    async def _execute_steps(
-        self,
-        session_id: str,
-        steps: list[tuple[str, dict[str, object]]],
-    ) -> tuple[list[str], str | None]:
-        parts: list[str] = []
-        for index, (tool_name, tool_payload) in enumerate(steps):
-            if self._requires_approval(tool_name):
-                approval = approval_service.create_approval(
+        await self._publish_assistant_reply(session_id, reply)
+
+
+
+
+    async def _run_agent_task(self, session_id: str, latest_user_content: str) -> str:
+        workspace = self._resolve_request_workspace(latest_user_content)
+        if workspace is None:
+            return "我没有定位到你指定的目标项目路径。请给我更明确的本地项目名或绝对路径。"
+
+        client = create_client()
+        messages: list[dict[str, object]] = session_service.list_message_records(session_id, limit=12)
+        tools = self._autonomous_tool_schemas()
+        broker_for_workspace = ToolBroker(workspace)
+
+        for _ in range(10):
+            response = client.messages.create(
+                model=settings.model_id,
+                system=self._build_agent_system_prompt(workspace),
+                messages=messages,
+                tools=tools,
+                max_tokens=settings.llm_max_tokens,
+            )
+            messages.append({"role": "assistant", "content": self._serialize_content_blocks(response.content)})
+            tool_calls = [block for block in response.content if getattr(block, "type", "") == "tool_use"]
+            if not tool_calls:
+                text_blocks = [
+                    block.text.strip()
+                    for block in response.content
+                    if isinstance(block, TextBlock) and block.text.strip()
+                ]
+                return "\n\n".join(text_blocks) if text_blocks else "任务已执行，但模型没有返回最终文本说明。"
+
+            results: list[dict[str, str]] = []
+            for block in tool_calls:
+                if block.name == "bash":
+                    approval = approval_service.create_approval(
+                        session_id=session_id,
+                        approval_type="bash",
+                        prompt=f"bash\n{broker_for_workspace.serialize_input(block.input)}",
+                        context={
+                            "mode": "agent_loop",
+                            "workspace": workspace.as_posix(),
+                            "messages": messages,
+                            "tool_use_id": block.id,
+                            "tool_name": block.name,
+                            "tool_input": block.input,
+                        },
+                    )
+                    self.pending_approvals[approval.id] = PendingApproval(
+                        session_id=session_id,
+                        context={
+                            "mode": "agent_loop",
+                            "workspace": workspace.as_posix(),
+                            "messages": messages,
+                            "tool_use_id": block.id,
+                            "tool_name": block.name,
+                            "tool_input": block.input,
+                        },
+                    )
+                    await self.publish(
+                        TimelineEvent(
+                            session_id=session_id,
+                            type="approval.requested",
+                            content=f"Approval #{approval.id} requested for bash.",
+                        )
+                    )
+                    return f"Approval required before running `bash`. Review approval #{approval.id} above the composer."
+
+                status, output = broker_for_workspace.run(block.name, block.input)
+                tool_service.create_tool_execution(
                     session_id=session_id,
-                    approval_type=tool_name,
-                    prompt=f"{tool_name}\n{broker.serialize_input(tool_payload)}",
-                    context=steps[index:],
-                )
-                self.pending_approvals[approval.id] = PendingApproval(
-                    session_id=session_id,
-                    steps=steps[index:],
+                    tool_name=block.name,
+                    status=status,
+                    input_json=broker_for_workspace.serialize_input(block.input),
+                    output_text=output,
                 )
                 await self.publish(
                     TimelineEvent(
                         session_id=session_id,
-                        type="approval.requested",
-                        content=f"Approval #{approval.id} requested for {tool_name}.",
+                        type="tool.execution",
+                        content=f"{block.name} -> {status}",
                     )
                 )
-                return parts, f"Approval required before running `{tool_name}`. Review approval #{approval.id} in the cockpit."
-            status, output = broker.run(tool_name, tool_payload)
-            record = tool_service.create_tool_execution(
-                session_id=session_id,
-                tool_name=tool_name,
-                status=status,
-                input_json=broker.serialize_input(tool_payload),
-                output_text=output,
-            )
-            await self.publish(
-                TimelineEvent(
-                    session_id=session_id,
-                    type="tool.execution",
-                    content=f"{record.tool_name} -> {record.status}",
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": output,
+                    }
                 )
-            )
-            parts.append(self._summarize_tool_output(tool_name, output, record.status))
-        return parts, None
+            messages.append({"role": "user", "content": results})
 
-    def _plan_steps(self, content: str) -> tuple[list[tuple[str, dict[str, object]]], str | None]:
-        blocks = [part.strip() for part in content.split("\n\n") if part.strip()]
-        if len(blocks) <= 1:
-            tool_name, tool_payload, guidance = self._select_tool(content)
-            return ([(tool_name, tool_payload)] if tool_name else []), guidance
-        steps: list[tuple[str, dict[str, object]]] = []
-        for block in blocks:
-            tool_name, tool_payload, guidance = self._select_tool(block)
-            if guidance:
-                return [], guidance
-            if tool_name:
-                steps.append((tool_name, tool_payload))
-        return steps, None
+        return "任务执行达到了安全迭代上限，我先停在这里。你可以让我继续，或告诉我希望收敛到哪一步。"
 
-    def _requires_approval(self, tool_name: str) -> bool:
-        return tool_name in {"bash", "write_file", "edit_file"}
-
-    def _select_tool(self, content: str) -> tuple[str | None, dict[str, object], str | None]:
-        text = content.strip()
-        lowered = text.lower()
-        if lowered.startswith("bash:"):
-            return "bash", {"command": text.split(":", 1)[1].strip()}, None
-        if lowered.startswith("read "):
-            path = text.split(" ", 1)[1].strip()
-            if not path:
-                return None, {}, "Use `read <path>` with a file path, for example `read README.md`."
-            return "read_file", {"path": path}, None
-        if lowered.startswith("write "):
-            parsed = self._parse_write_command(text)
-            return ("write_file", parsed, None) if parsed else (None, {}, self._write_guidance())
-        if lowered.startswith("edit "):
-            parsed = self._parse_edit_command(text)
-            return ("edit_file", parsed, None) if parsed else (None, {}, self._edit_guidance())
-        if any(token in lowered for token in ["list files", "show files", "workspace", "project structure", "目录"]):
-            return "list_files", {}, None
-        return None, {}, None
-
-    def _summarize_tool_output(self, tool_name: str, output: str, status: str) -> str:
-        preview = output[:1000]
-        if status in {"error", "blocked"}:
-            return f"{tool_name} returned status `{status}`.\n\n{preview}"
-        if tool_name == "list_files":
-            return f"Workspace snapshot completed with status `{status}`.\n\n{preview}"
-        if tool_name == "read_file":
-            return f"File read completed with status `{status}`.\n\n{preview}"
-        if tool_name == "write_file":
-            return f"File write completed with status `{status}`.\n\n{preview}"
-        if tool_name == "edit_file":
-            return f"File edit completed with status `{status}`.\n\n{preview}"
-        if tool_name == "bash":
-            return f"Bash command completed with status `{status}`.\n\n{preview}"
-        return preview
-
-    def _parse_write_command(self, text: str) -> dict[str, object] | None:
-        header, marker, body = text.partition("\n<<<\n")
-        if not marker or not body.endswith("\n>>>"):
+    def _resolve_request_workspace(self, content: str) -> Path | None:
+        absolute_match = re.search(r"(/Users/[^\s，。；；!?\n]+)", content)
+        if absolute_match:
+            candidate = Path(absolute_match.group(1)).expanduser().resolve()
+            if candidate.exists() and candidate.is_dir():
+                return candidate
             return None
-        path = header.split(" ", 1)[1].strip()
-        content = body[:-4]
-        return {"path": path, "content": content}
 
-    def _parse_edit_command(self, text: str) -> dict[str, object] | None:
-        header, marker, body = text.partition("\n<<<OLD\n")
-        if not marker or "\n===\n" not in body or not body.endswith("\n>>>"):
-            return None
-        old_text, new_part = body[:-4].split("\n===\n", 1)
-        path = header.split(" ", 1)[1].strip()
-        return {"path": path, "old_text": old_text, "new_text": new_part}
+        candidates = [settings.project_root]
+        projects = settings.codex_config.get("projects")
+        if isinstance(projects, dict):
+            for raw_path in projects.keys():
+                path = Path(str(raw_path)).expanduser()
+                if path.exists() and path.is_dir():
+                    candidates.append(path.resolve())
 
-    def _write_guidance(self) -> str:
-        return "Write commands must use this format:\n\nwrite path/to/file.txt\n<<<\nnew file contents\n>>>"
+        parent = settings.project_root.parent
+        if parent.exists():
+            for child in parent.iterdir():
+                if child.is_dir():
+                    candidates.append(child.resolve())
 
-    def _edit_guidance(self) -> str:
-        return "Edit commands must use this format:\n\nedit path/to/file.txt\n<<<OLD\ntext to replace\n===\nreplacement text\n>>>"
+        normalized = content.lower()
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for path in candidates:
+            key = path.as_posix()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(path)
+
+        for path in sorted(unique, key=lambda item: len(item.name), reverse=True):
+            if path == settings.project_root:
+                continue
+            if path.name.lower() in normalized:
+                return path
+        return settings.project_root
+
+    def _autonomous_tool_schemas(self) -> list[dict[str, object]]:
+        return [
+            {
+                "name": "list_files",
+                "description": "List files in the current target workspace.",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "read_file",
+                "description": "Read a file from the current target workspace.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+            {
+                "name": "write_file",
+                "description": "Create or overwrite a file in the current target workspace.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+            {
+                "name": "edit_file",
+                "description": "Replace exact text in a file in the current target workspace.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "old_text": {"type": "string"},
+                        "new_text": {"type": "string"},
+                    },
+                    "required": ["path", "old_text", "new_text"],
+                },
+            },
+            {
+                "name": "bash",
+                "description": "Run a shell command in the current target workspace. This requires approval before execution.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        ]
+
+    def _maybe_autoname_session(self, session_id: str, content: str) -> None:
+        session = session_service.get_session(session_id)
+        if session is None:
+            return
+        if not session.title.startswith("New Session") and session.title != "New Session":
+            return
+        if session_service.has_user_messages(session_id):
+            return
+        title = self._summarize_session_title(content)
+        if title:
+            session_service.update_session_title(session_id, title)
+
+    def _summarize_session_title(self, content: str) -> str:
+        text = " ".join(content.strip().split())
+        if not text:
+            return "New Session"
+        for prefix in ("请帮我", "帮我", "麻烦", "请", "能不能", "可以帮我", "can you ", "could you ", "please ", "help me "):
+            if text.lower().startswith(prefix.lower()):
+                text = text[len(prefix):].strip()
+                break
+        text = text.strip(" .,!?:;，。！？：；\"'()[]{}")
+        if not text:
+            return "New Session"
+        has_cjk = any("\u4e00" <= char <= "\u9fff" for char in text)
+        if has_cjk:
+            return text[:14]
+        words = text.split()
+        return " ".join(words[:5])[:36]
 
     def _generate_teammate_reply(self, name: str, role: str, content: str) -> str:
         return f"{name} ({role}) acknowledged the request and recommends tackling: {content[:120]}"
@@ -375,3 +438,194 @@ class RuntimeManager:
             if status == "completed":
                 summary_parts.append("README snapshot:\n" + content[:500])
         return "\n\n".join(summary_parts)
+
+    async def _publish_assistant_reply(self, session_id: str, reply: str) -> None:
+        text = reply.strip() or "LLM provider returned no text output."
+        for chunk in self._chunk_text(text):
+            await self.emit_ephemeral(
+                TimelineEvent(
+                    session_id=session_id,
+                    type="message.assistant.delta",
+                    content=chunk,
+                )
+            )
+            await asyncio.sleep(0.02)
+        session_service.create_message_record(session_id, MessageCreate(role="assistant", content=text))
+        await self.publish(
+            TimelineEvent(
+                session_id=session_id,
+                type="message.assistant",
+                content=text,
+            )
+        )
+
+
+    def _build_agent_system_prompt(self, workspace: Path) -> str:
+        return "\n\n".join(
+            [
+                "You are Jarvis, a local desktop coding agent.",
+                f"Target workspace: {workspace}",
+                "You may answer directly when no tool is needed, but you should decide for yourself whether tools are necessary.",
+                "When the user asks about files, directories, paths, project structure, README contents, code contents, or workspace state, inspect the workspace with tools first instead of guessing.",
+                "When the user asks you to create or modify files, do the work directly inside the target workspace when it is safe.",
+                "If the user explicitly writes command-like instructions such as `read ...`, `write ...`, `edit ...`, or `bash: ...`, treat them as direct tool intents.",
+                "Do not ask the user to type explicit tool commands such as read or bash just because you need workspace facts.",
+                "Use bash only when necessary; bash requires approval before execution.",
+                "After using tools, answer the user's request directly.",
+                "Do not mention that you used tools, inspected files, checked the workspace, or can continue using tools unless the user explicitly asks about your method or asks for next steps.",
+                "For read-only questions, give the result directly instead of writing a work-log style summary.",
+                "Do not append extra offers such as 'if you want I can continue...' unless the user asked for options or follow-up help.",
+            ]
+        )
+
+    async def _resume_agent_loop_after_approval(self, session_id: str, context: dict[str, object]) -> str | None:
+        workspace_raw = context.get("workspace")
+        messages = context.get("messages")
+        tool_use_id = context.get("tool_use_id")
+        tool_name = context.get("tool_name")
+        tool_input = context.get("tool_input")
+
+        if not isinstance(workspace_raw, str) or not isinstance(messages, list):
+            return "Approval context is incomplete; unable to resume the pending action."
+        if not isinstance(tool_use_id, str) or not isinstance(tool_name, str) or not isinstance(tool_input, dict):
+            return "Approval context is incomplete; unable to execute the approved tool call."
+
+        workspace = Path(workspace_raw)
+        broker_for_workspace = ToolBroker(workspace)
+        status, output = broker_for_workspace.run(tool_name, tool_input)
+        tool_service.create_tool_execution(
+            session_id=session_id,
+            tool_name=tool_name,
+            status=status,
+            input_json=broker_for_workspace.serialize_input(tool_input),
+            output_text=output,
+        )
+        await self.publish(
+            TimelineEvent(
+                session_id=session_id,
+                type="tool.execution",
+                content=f"{tool_name} -> {status}",
+            )
+        )
+
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": output,
+                    }
+                ],
+            }
+        )
+
+        client = create_client()
+        tools = self._autonomous_tool_schemas()
+        for _ in range(10):
+            response = client.messages.create(
+                model=settings.model_id,
+                system=self._build_agent_system_prompt(workspace),
+                messages=messages,
+                tools=tools,
+                max_tokens=settings.llm_max_tokens,
+            )
+            messages.append({"role": "assistant", "content": self._serialize_content_blocks(response.content)})
+            tool_calls = [block for block in response.content if getattr(block, "type", "") == "tool_use"]
+            if not tool_calls:
+                text_blocks = [
+                    block.text.strip()
+                    for block in response.content
+                    if isinstance(block, TextBlock) and block.text.strip()
+                ]
+                return "\n\n".join(text_blocks) if text_blocks else "任务已继续执行，但模型没有返回最终文本说明。"
+
+            next_results: list[dict[str, str]] = []
+            for block in tool_calls:
+                if block.name == "bash":
+                    approval = approval_service.create_approval(
+                        session_id=session_id,
+                        approval_type="bash",
+                        prompt=f"bash\n{broker_for_workspace.serialize_input(block.input)}",
+                        context={
+                            "mode": "agent_loop",
+                            "workspace": workspace.as_posix(),
+                            "messages": messages,
+                            "tool_use_id": block.id,
+                            "tool_name": block.name,
+                            "tool_input": block.input,
+                        },
+                    )
+                    self.pending_approvals[approval.id] = PendingApproval(
+                        session_id=session_id,
+                        context={
+                            "mode": "agent_loop",
+                            "workspace": workspace.as_posix(),
+                            "messages": messages,
+                            "tool_use_id": block.id,
+                            "tool_name": block.name,
+                            "tool_input": block.input,
+                        },
+                    )
+                    await self.publish(
+                        TimelineEvent(
+                            session_id=session_id,
+                            type="approval.requested",
+                            content=f"Approval #{approval.id} requested for bash.",
+                        )
+                    )
+                    return f"Approval required before running `bash`. Review approval #{approval.id} above the composer."
+
+                status, output = broker_for_workspace.run(block.name, block.input)
+                tool_service.create_tool_execution(
+                    session_id=session_id,
+                    tool_name=block.name,
+                    status=status,
+                    input_json=broker_for_workspace.serialize_input(block.input),
+                    output_text=output,
+                )
+                await self.publish(
+                    TimelineEvent(
+                        session_id=session_id,
+                        type="tool.execution",
+                        content=f"{block.name} -> {status}",
+                    )
+                )
+                next_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": output,
+                    }
+                )
+            messages.append({"role": "user", "content": next_results})
+
+        return "任务继续执行时达到了安全迭代上限，我先停在这里。"
+
+    def _serialize_content_blocks(self, blocks: list[object]) -> list[dict[str, object]]:
+        serialized: list[dict[str, object]] = []
+        for block in blocks:
+            block_type = getattr(block, "type", None)
+            if block_type == "text" and isinstance(getattr(block, "text", None), str):
+                serialized.append({"type": "text", "text": block.text})
+                continue
+            if block_type == "tool_use":
+                serialized.append(
+                    {
+                        "type": "tool_use",
+                        "id": str(getattr(block, "id", "")),
+                        "name": str(getattr(block, "name", "")),
+                        "input": dict(getattr(block, "input", {}) or {}),
+                    }
+                )
+        return serialized
+
+    def _chunk_text(self, text: str) -> list[str]:
+        chunks: list[str] = []
+        cursor = 0
+        while cursor < len(text):
+            next_cursor = min(cursor + 90, len(text))
+            chunks.append(text[cursor:next_cursor])
+            cursor = next_cursor
+        return chunks or [text]
