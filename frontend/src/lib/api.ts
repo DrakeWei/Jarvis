@@ -2,6 +2,7 @@ export type SessionSummary = {
   session_id: string;
   title: string;
   created_at: string;
+  updated_at: string;
 };
 
 export type TimelineEvent = {
@@ -97,6 +98,14 @@ export async function createSession(title: string): Promise<SessionSummary> {
   });
   if (!response.ok) {
     throw new Error("Failed to create session");
+  }
+  return response.json();
+}
+
+export async function fetchSessions(): Promise<SessionSummary[]> {
+  const response = await fetch(`${API_BASE}/sessions`);
+  if (!response.ok) {
+    throw new Error("Failed to load sessions");
   }
   return response.json();
 }

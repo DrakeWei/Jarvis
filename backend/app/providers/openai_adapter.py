@@ -122,6 +122,52 @@ class OpenAIAdapter(BaseAdapter):
                 ) from exc
             raise ProviderRequestError(f"OpenAI-compatible request failed: {reason}") from exc
 
+    def stream_response(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        system: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        max_tokens: int = 8000,
+    ):
+        if not model:
+            raise ProviderConfigError("LLM provider is not configured: missing MODEL_ID.")
+
+        body = _openai_request_body(
+            wire_api=self._settings.wire_api,
+            model=model,
+            messages=messages,
+            system=system,
+            tools=tools,
+            max_tokens=max_tokens,
+        )
+        body["stream"] = True
+        request = urllib.request.Request(
+            self._endpoint,
+            data=json.dumps(body).encode("utf-8"),
+            headers=_openai_headers(self._api_key, self._settings.http_headers),
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=120, context=self._ssl_context) as response:
+                if self._settings.wire_api == "responses":
+                    yield from _stream_responses_events(response)
+                else:
+                    yield from _stream_chat_completions_events(response)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise ProviderRequestError(f"OpenAI-compatible request failed: {exc.code} {detail}") from exc
+        except urllib.error.URLError as exc:
+            reason = exc.reason
+            if isinstance(reason, ssl.SSLError):
+                raise ProviderRequestError(
+                    "OpenAI-compatible TLS verification failed. Install `certifi` in the backend environment, "
+                    "or configure OPENAI_CA_BUNDLE / SSL_CERT_FILE."
+                ) from exc
+            raise ProviderRequestError(f"OpenAI-compatible request failed: {reason}") from exc
+
 
 def _build_ssl_context() -> ssl.SSLContext:
     cafile = None
@@ -508,3 +554,77 @@ def _stream_chat_completions_text(response) -> Any:
         delta = choices[0].get("delta", {}).get("content")
         if delta:
             yield str(delta)
+
+
+def _stream_responses_events(response) -> Any:
+    function_calls: dict[str, dict[str, Any]] = {}
+    for raw in response:
+        line = raw.decode("utf-8", errors="replace").strip()
+        if not line or not line.startswith("data: "):
+            continue
+        payload_text = line[6:]
+        if payload_text == "[DONE]":
+            break
+        payload = json.loads(payload_text)
+        event_type = payload.get("type")
+
+        if event_type == "response.output_text.delta":
+            delta = payload.get("delta")
+            if delta:
+                yield {"type": "text_delta", "delta": str(delta)}
+            continue
+
+        if event_type == "response.output_item.added":
+            item = payload.get("item", {})
+            if item.get("type") == "function_call":
+                function_calls[str(item.get("id"))] = {
+                    "id": str(item.get("call_id") or item.get("id") or ""),
+                    "name": str(item.get("name") or ""),
+                    "arguments": "",
+                }
+            continue
+
+        if event_type == "response.function_call_arguments.delta":
+            item_id = str(payload.get("item_id") or "")
+            if item_id in function_calls:
+                function_calls[item_id]["arguments"] += str(payload.get("delta") or "")
+            continue
+
+        if event_type == "response.output_item.done":
+            item = payload.get("item", {})
+            if item.get("type") == "function_call":
+                raw_args = item.get("arguments") or function_calls.get(str(item.get("id")), {}).get("arguments") or "{}"
+                try:
+                    parsed_args = json.loads(raw_args)
+                except json.JSONDecodeError:
+                    parsed_args = {"_raw": raw_args}
+                yield {
+                    "type": "tool_use",
+                    "id": str(item.get("call_id") or item.get("id") or ""),
+                    "name": str(item.get("name") or ""),
+                    "input": parsed_args if isinstance(parsed_args, dict) else {"value": parsed_args},
+                }
+            continue
+
+        if event_type == "response.completed":
+            yield {"type": "done"}
+            continue
+
+
+def _stream_chat_completions_events(response) -> Any:
+    for raw in response:
+        line = raw.decode("utf-8", errors="replace").strip()
+        if not line or not line.startswith("data: "):
+            continue
+        payload_text = line[6:]
+        if payload_text == "[DONE]":
+            yield {"type": "done"}
+            break
+        payload = json.loads(payload_text)
+        choices = payload.get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta", {})
+        text = delta.get("content")
+        if text:
+            yield {"type": "text_delta", "delta": str(text)}

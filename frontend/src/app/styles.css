@@ -421,11 +421,26 @@ button {
   grid-template-rows: auto auto minmax(0, 1fr);
   gap: 8px;
   overflow: hidden;
+  position: relative;
 }
 
 .timeline-stream {
   height: 100%;
   align-content: start;
+}
+
+.scroll-to-bottom {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 8px 20px rgba(64, 53, 38, 0.1);
+  color: var(--text);
+  font-size: 0.84rem;
 }
 
 .summary-card,
@@ -496,6 +511,70 @@ button {
   white-space: pre-wrap;
   line-height: 1.65;
   color: var(--muted);
+}
+
+.markdown-body {
+  color: var(--muted);
+  line-height: 1.65;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.markdown-body > *:first-child {
+  margin-top: 0;
+}
+
+.markdown-body > *:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol,
+.markdown-body pre,
+.markdown-body blockquote {
+  margin: 0 0 0.7rem;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  margin: 0.15rem 0 0.55rem;
+  color: var(--text);
+  font-size: 0.98rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 1.2rem;
+}
+
+.markdown-body li + li {
+  margin-top: 0.18rem;
+}
+
+.markdown-body code {
+  padding: 0.08rem 0.35rem;
+  border-radius: 6px;
+  background: rgba(56, 48, 39, 0.08);
+  color: #3f342b;
+  font-size: 0.92em;
+}
+
+.markdown-body pre {
+  overflow-x: auto;
+  padding: 0.8rem 0.9rem;
+  border-radius: 10px;
+  background: rgba(56, 48, 39, 0.08);
+}
+
+.markdown-body pre code {
+  padding: 0;
+  background: transparent;
 }
 
 .timeline-card {

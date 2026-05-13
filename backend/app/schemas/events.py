@@ -17,6 +17,7 @@ class SessionSummary(BaseModel):
     session_id: str
     title: str
     created_at: str
+    updated_at: str
 
 
 class TimelineEvent(BaseModel):
