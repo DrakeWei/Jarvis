@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db.session import create_session
 from app.models import EventLogRecord, MessageRecord, SessionRecord
@@ -7,12 +7,24 @@ from app.schemas.events import MessageCreate, SessionCreate, SessionSummary, Tim
 
 def list_sessions() -> list[SessionSummary]:
     with create_session() as db:
-        rows = db.scalars(select(SessionRecord).order_by(SessionRecord.created_at.desc())).all()
+        message_activity = {
+            session_id: updated_at
+            for session_id, updated_at in db.execute(
+                select(MessageRecord.session_id, func.max(MessageRecord.created_at)).group_by(MessageRecord.session_id)
+            ).all()
+        }
+        rows = db.scalars(select(SessionRecord)).all()
+        rows = sorted(
+            rows,
+            key=lambda row: message_activity.get(row.id) or row.created_at,
+            reverse=True,
+        )
         return [
             SessionSummary(
                 session_id=row.id,
                 title=row.title,
                 created_at=row.created_at.isoformat(),
+                updated_at=(message_activity.get(row.id) or row.created_at).isoformat(),
             )
             for row in rows
         ]
@@ -35,6 +47,7 @@ def update_session_title(session_id: str, title: str) -> SessionSummary | None:
             session_id=row.id,
             title=row.title,
             created_at=row.created_at.isoformat(),
+            updated_at=row.created_at.isoformat(),
         )
 
 
@@ -48,6 +61,7 @@ def create_session_record(payload: SessionCreate) -> SessionSummary:
             session_id=row.id,
             title=row.title,
             created_at=row.created_at.isoformat(),
+            updated_at=row.created_at.isoformat(),
         )
 
 

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.config import settings
-from app.providers import TextBlock, create_client
+from app.providers import TextBlock, ToolUseBlock, create_client
 from app.schemas.events import MessageCreate, SessionCreate, SessionSummary, TimelineEvent
 from app.schemas.subagents import SubagentRunCreate
 from app.schemas.teammates import TeammateCreate
@@ -212,98 +212,13 @@ class RuntimeManager:
 
         await self._publish_assistant_reply(session_id, reply)
 
-
-
-
     async def _run_agent_task(self, session_id: str, latest_user_content: str) -> str:
         workspace = self._resolve_request_workspace(latest_user_content)
         if workspace is None:
             return "我没有定位到你指定的目标项目路径。请给我更明确的本地项目名或绝对路径。"
 
-        client = create_client()
         messages: list[dict[str, object]] = session_service.list_message_records(session_id, limit=12)
-        tools = self._autonomous_tool_schemas()
-        broker_for_workspace = ToolBroker(workspace)
-
-        for _ in range(10):
-            response = client.messages.create(
-                model=settings.model_id,
-                system=self._build_agent_system_prompt(workspace),
-                messages=messages,
-                tools=tools,
-                max_tokens=settings.llm_max_tokens,
-            )
-            messages.append({"role": "assistant", "content": self._serialize_content_blocks(response.content)})
-            tool_calls = [block for block in response.content if getattr(block, "type", "") == "tool_use"]
-            if not tool_calls:
-                text_blocks = [
-                    block.text.strip()
-                    for block in response.content
-                    if isinstance(block, TextBlock) and block.text.strip()
-                ]
-                return "\n\n".join(text_blocks) if text_blocks else "任务已执行，但模型没有返回最终文本说明。"
-
-            results: list[dict[str, str]] = []
-            for block in tool_calls:
-                if block.name == "bash":
-                    approval = approval_service.create_approval(
-                        session_id=session_id,
-                        approval_type="bash",
-                        prompt=f"bash\n{broker_for_workspace.serialize_input(block.input)}",
-                        context={
-                            "mode": "agent_loop",
-                            "workspace": workspace.as_posix(),
-                            "messages": messages,
-                            "tool_use_id": block.id,
-                            "tool_name": block.name,
-                            "tool_input": block.input,
-                        },
-                    )
-                    self.pending_approvals[approval.id] = PendingApproval(
-                        session_id=session_id,
-                        context={
-                            "mode": "agent_loop",
-                            "workspace": workspace.as_posix(),
-                            "messages": messages,
-                            "tool_use_id": block.id,
-                            "tool_name": block.name,
-                            "tool_input": block.input,
-                        },
-                    )
-                    await self.publish(
-                        TimelineEvent(
-                            session_id=session_id,
-                            type="approval.requested",
-                            content=f"Approval #{approval.id} requested for bash.",
-                        )
-                    )
-                    return f"Approval required before running `bash`. Review approval #{approval.id} above the composer."
-
-                status, output = broker_for_workspace.run(block.name, block.input)
-                tool_service.create_tool_execution(
-                    session_id=session_id,
-                    tool_name=block.name,
-                    status=status,
-                    input_json=broker_for_workspace.serialize_input(block.input),
-                    output_text=output,
-                )
-                await self.publish(
-                    TimelineEvent(
-                        session_id=session_id,
-                        type="tool.execution",
-                        content=f"{block.name} -> {status}",
-                    )
-                )
-                results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": output,
-                    }
-                )
-            messages.append({"role": "user", "content": results})
-
-        return "任务执行达到了安全迭代上限，我先停在这里。你可以让我继续，或告诉我希望收敛到哪一步。"
+        return await self._continue_agent_loop(session_id, workspace, messages)
 
     def _resolve_request_workspace(self, content: str) -> Path | None:
         absolute_match = re.search(r"(/Users/[^\s，。；；!?\n]+)", content)
@@ -449,7 +364,7 @@ class RuntimeManager:
                     content=chunk,
                 )
             )
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(0.035)
         session_service.create_message_record(session_id, MessageCreate(role="assistant", content=text))
         await self.publish(
             TimelineEvent(
@@ -458,7 +373,6 @@ class RuntimeManager:
                 content=text,
             )
         )
-
 
     def _build_agent_system_prompt(self, workspace: Path) -> str:
         return "\n\n".join(
@@ -477,6 +391,171 @@ class RuntimeManager:
                 "Do not append extra offers such as 'if you want I can continue...' unless the user asked for options or follow-up help.",
             ]
         )
+
+    async def _stream_agent_response(
+        self,
+        *,
+        client,
+        session_id: str,
+        workspace: Path,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]],
+    ) -> list[object] | None:
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[tuple[str, object | None]] = asyncio.Queue()
+
+        def worker() -> None:
+            try:
+                for event in client.stream_response(
+                    model=settings.model_id,
+                    system=self._build_agent_system_prompt(workspace),
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=settings.llm_max_tokens,
+                ):
+                    asyncio.run_coroutine_threadsafe(queue.put((str(event.get("type")), event)), loop).result()
+            except Exception as exc:
+                asyncio.run_coroutine_threadsafe(queue.put(("error", str(exc))), loop).result()
+            finally:
+                asyncio.run_coroutine_threadsafe(queue.put(("done", None)), loop).result()
+
+        worker_task = asyncio.create_task(asyncio.to_thread(worker))
+        text_parts: list[str] = []
+        tool_blocks: list[object] = []
+
+        try:
+            while True:
+                kind, payload = await queue.get()
+                if kind == "text_delta" and isinstance(payload, dict):
+                    delta = str(payload.get("delta") or "")
+                    if delta:
+                        text_parts.append(delta)
+                        await self.emit_ephemeral(
+                            TimelineEvent(
+                                session_id=session_id,
+                                type="message.assistant.delta",
+                                content=delta,
+                            )
+                        )
+                    continue
+                if kind == "tool_use" and isinstance(payload, dict):
+                    tool_blocks.append(
+                        ToolUseBlock(
+                            id=str(payload.get("id") or ""),
+                            name=str(payload.get("name") or ""),
+                            input=dict(payload.get("input", {}) or {}),
+                        )
+                    )
+                    continue
+                if kind == "error":
+                    return [TextBlock(text=str(payload or "LLM provider request failed."))]
+                if kind == "done":
+                    break
+        finally:
+            await worker_task
+
+        blocks: list[object] = []
+        if text_parts:
+            blocks.append(TextBlock(text="".join(text_parts)))
+        blocks.extend(tool_blocks)
+        return blocks
+
+    async def _continue_agent_loop(
+        self,
+        session_id: str,
+        workspace: Path,
+        messages: list[dict[str, object]],
+    ) -> str:
+        client = create_client()
+        tools = self._autonomous_tool_schemas()
+        broker_for_workspace = ToolBroker(workspace)
+
+        for _ in range(10):
+            streamed_blocks = await self._stream_agent_response(
+                client=client,
+                session_id=session_id,
+                workspace=workspace,
+                messages=messages,
+                tools=tools,
+            )
+            if streamed_blocks is None:
+                return "任务执行失败：模型没有返回可用响应。"
+            messages.append({"role": "assistant", "content": self._serialize_content_blocks(streamed_blocks)})
+            tool_calls = [block for block in streamed_blocks if getattr(block, "type", "") == "tool_use"]
+            if not tool_calls:
+                text_blocks = [
+                    block.text.strip()
+                    for block in streamed_blocks
+                    if isinstance(block, TextBlock) and block.text.strip()
+                ]
+                return "\n\n".join(text_blocks) if text_blocks else "任务已执行，但模型没有返回最终文本说明。"
+
+            results: list[dict[str, str]] = []
+            for block in tool_calls:
+                if block.name == "bash":
+                    return await self._queue_bash_approval(session_id, workspace, messages, block.id, block.input)
+
+                status, output = broker_for_workspace.run(block.name, block.input)
+                tool_service.create_tool_execution(
+                    session_id=session_id,
+                    tool_name=block.name,
+                    status=status,
+                    input_json=broker_for_workspace.serialize_input(block.input),
+                    output_text=output,
+                )
+                await self.publish(
+                    TimelineEvent(
+                        session_id=session_id,
+                        type="tool.execution",
+                        content=f"{block.name} -> {status}",
+                    )
+                )
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": output,
+                    }
+                )
+            messages.append({"role": "user", "content": results})
+
+        return "任务执行达到了安全迭代上限，我先停在这里。你可以让我继续，或告诉我希望收敛到哪一步。"
+
+    async def _queue_bash_approval(
+        self,
+        session_id: str,
+        workspace: Path,
+        messages: list[dict[str, object]],
+        tool_use_id: str,
+        tool_input: dict[str, object],
+    ) -> str:
+        broker_for_workspace = ToolBroker(workspace)
+        context = {
+            "mode": "agent_loop",
+            "workspace": workspace.as_posix(),
+            "messages": messages,
+            "tool_use_id": tool_use_id,
+            "tool_name": "bash",
+            "tool_input": tool_input,
+        }
+        approval = approval_service.create_approval(
+            session_id=session_id,
+            approval_type="bash",
+            prompt=f"bash\n{broker_for_workspace.serialize_input(tool_input)}",
+            context=context,
+        )
+        self.pending_approvals[approval.id] = PendingApproval(
+            session_id=session_id,
+            context=context,
+        )
+        await self.publish(
+            TimelineEvent(
+                session_id=session_id,
+                type="approval.requested",
+                content=f"Approval #{approval.id} requested for bash.",
+            )
+        )
+        return f"Approval required before running `bash`. Review approval #{approval.id} above the composer."
 
     async def _resume_agent_loop_after_approval(self, session_id: str, context: dict[str, object]) -> str | None:
         workspace_raw = context.get("workspace")
@@ -520,88 +599,7 @@ class RuntimeManager:
                 ],
             }
         )
-
-        client = create_client()
-        tools = self._autonomous_tool_schemas()
-        for _ in range(10):
-            response = client.messages.create(
-                model=settings.model_id,
-                system=self._build_agent_system_prompt(workspace),
-                messages=messages,
-                tools=tools,
-                max_tokens=settings.llm_max_tokens,
-            )
-            messages.append({"role": "assistant", "content": self._serialize_content_blocks(response.content)})
-            tool_calls = [block for block in response.content if getattr(block, "type", "") == "tool_use"]
-            if not tool_calls:
-                text_blocks = [
-                    block.text.strip()
-                    for block in response.content
-                    if isinstance(block, TextBlock) and block.text.strip()
-                ]
-                return "\n\n".join(text_blocks) if text_blocks else "任务已继续执行，但模型没有返回最终文本说明。"
-
-            next_results: list[dict[str, str]] = []
-            for block in tool_calls:
-                if block.name == "bash":
-                    approval = approval_service.create_approval(
-                        session_id=session_id,
-                        approval_type="bash",
-                        prompt=f"bash\n{broker_for_workspace.serialize_input(block.input)}",
-                        context={
-                            "mode": "agent_loop",
-                            "workspace": workspace.as_posix(),
-                            "messages": messages,
-                            "tool_use_id": block.id,
-                            "tool_name": block.name,
-                            "tool_input": block.input,
-                        },
-                    )
-                    self.pending_approvals[approval.id] = PendingApproval(
-                        session_id=session_id,
-                        context={
-                            "mode": "agent_loop",
-                            "workspace": workspace.as_posix(),
-                            "messages": messages,
-                            "tool_use_id": block.id,
-                            "tool_name": block.name,
-                            "tool_input": block.input,
-                        },
-                    )
-                    await self.publish(
-                        TimelineEvent(
-                            session_id=session_id,
-                            type="approval.requested",
-                            content=f"Approval #{approval.id} requested for bash.",
-                        )
-                    )
-                    return f"Approval required before running `bash`. Review approval #{approval.id} above the composer."
-
-                status, output = broker_for_workspace.run(block.name, block.input)
-                tool_service.create_tool_execution(
-                    session_id=session_id,
-                    tool_name=block.name,
-                    status=status,
-                    input_json=broker_for_workspace.serialize_input(block.input),
-                    output_text=output,
-                )
-                await self.publish(
-                    TimelineEvent(
-                        session_id=session_id,
-                        type="tool.execution",
-                        content=f"{block.name} -> {status}",
-                    )
-                )
-                next_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": output,
-                    }
-                )
-            messages.append({"role": "user", "content": next_results})
-
-        return "任务继续执行时达到了安全迭代上限，我先停在这里。"
+        return await self._continue_agent_loop(session_id, workspace, messages)
 
     def _serialize_content_blocks(self, blocks: list[object]) -> list[dict[str, object]]:
         serialized: list[dict[str, object]] = []
@@ -625,7 +623,7 @@ class RuntimeManager:
         chunks: list[str] = []
         cursor = 0
         while cursor < len(text):
-            next_cursor = min(cursor + 90, len(text))
+            next_cursor = min(cursor + 24, len(text))
             chunks.append(text[cursor:next_cursor])
             cursor = next_cursor
         return chunks or [text]

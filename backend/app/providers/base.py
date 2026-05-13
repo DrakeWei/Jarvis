@@ -64,3 +64,14 @@ class BaseAdapter:
         max_tokens: int = 8000,
     ):
         raise NotImplementedError
+
+    def stream_response(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        system: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        max_tokens: int = 8000,
+    ):
+        raise NotImplementedError

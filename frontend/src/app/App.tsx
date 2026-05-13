@@ -1,4 +1,6 @@
-import { FormEvent, KeyboardEvent, useEffect, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import {
   createSession,
@@ -7,6 +9,7 @@ import {
   decideApproval,
   fetchApprovals,
   fetchBootstrap,
+  fetchSessions,
   fetchSubagents,
   fetchTeammateMessages,
   fetchTeammates,
@@ -27,6 +30,7 @@ import {
 } from "../lib/api";
 
 const ACTIVE_SESSION_KEY = "jarvis.activeSession";
+const DRAFT_SESSION_PREFIX = "draft:";
 const WORKBENCH_TABS = [
   { id: "tasks", label: "Tasks" },
   { id: "approvals", label: "Approvals" },
@@ -36,6 +40,7 @@ const WORKBENCH_TABS = [
 ] as const;
 
 type WorkbenchTabId = (typeof WORKBENCH_TABS)[number]["id"];
+type SessionItem = SessionSummary & { isDraft?: boolean };
 
 type TimelineCard = {
   tone: "user" | "assistant" | "result" | "status";
@@ -52,6 +57,31 @@ function formatSessionStamp(timestamp: string): string {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+function sortSessionsByActivity<T extends { updated_at: string; created_at: string }>(items: T[]): T[] {
+  return [...items].sort(
+    (left, right) => new Date(right.updated_at ?? right.created_at).getTime() - new Date(left.updated_at ?? left.created_at).getTime(),
+  );
+}
+
+function touchSession<T extends { session_id: string; title: string; updated_at: string; created_at: string }>(
+  items: T[],
+  sessionId: string,
+  updatedAt: string,
+  title?: string,
+): T[] {
+  return sortSessionsByActivity(
+    items.map((session) =>
+      session.session_id === sessionId
+        ? {
+            ...session,
+            title: title ?? session.title,
+            updated_at: updatedAt,
+          }
+        : session,
+    ),
+  );
 }
 
 function formatTimelineStamp(timestamp: string): string {
@@ -219,9 +249,9 @@ function summarizeSessionTitle(content: string): string {
 }
 
 export function App() {
-  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [activeSessionId, setActiveSessionId] = useState("");
-  const [events, setEvents] = useState<TimelineEvent[]>([]);
+  const [eventsBySession, setEventsBySession] = useState<Record<string, TimelineEvent[]>>({});
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
   const [teammates, setTeammates] = useState<TeammateSummary[]>([]);
   const [subagents, setSubagents] = useState<SubagentSummary[]>([]);
@@ -233,12 +263,17 @@ export function App() {
   const [executions, setExecutions] = useState<ToolExecutionSummary[]>([]);
   const [selectedExecutionId, setSelectedExecutionId] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
-  const [streamingAssistant, setStreamingAssistant] = useState<{ content: string; created_at: string } | null>(null);
+  const [streamingBySession, setStreamingBySession] = useState<Record<string, { content: string; created_at: string } | null>>({});
   const [connectionState, setConnectionState] = useState("offline");
   const [bootstrapState, setBootstrapState] = useState("booting");
   const [sessionSearch, setSessionSearch] = useState("");
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [activeWorkbenchTab, setActiveWorkbenchTab] = useState<WorkbenchTabId>("approvals");
+  const [autoScrollTimeline, setAutoScrollTimeline] = useState(true);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const timelineRef = useRef<HTMLDivElement | null>(null);
+  const activeSessionRef = useRef("");
+  const sessionSocketsRef = useRef<Record<string, () => void>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -253,7 +288,7 @@ export function App() {
         const nextSessionId = data.sessions.some((session) => session.session_id === storedSessionId)
           ? storedSessionId ?? fallbackSessionId
           : fallbackSessionId;
-        setSessions(data.sessions);
+        setSessions(sortSessionsByActivity(data.sessions));
         setTasks(data.tasks);
         setTeammates(data.teammates);
         setSelectedTeammateId(data.teammates[0]?.id ?? null);
@@ -262,6 +297,7 @@ export function App() {
         setExecutions(data.tool_executions);
         setSelectedExecutionId(data.tool_executions[0]?.id ?? null);
         setActiveSessionId(nextSessionId);
+        activeSessionRef.current = nextSessionId;
         setBootstrapState("ready");
       } catch {
         if (cancelled) return;
@@ -279,17 +315,20 @@ export function App() {
 
   useEffect(() => {
     if (!activeSessionId) return;
+    activeSessionRef.current = activeSessionId;
     window.localStorage.setItem(ACTIVE_SESSION_KEY, activeSessionId);
   }, [activeSessionId]);
 
   async function refreshSessionState(sessionId: string) {
-    const [nextSubagents, nextApprovals, nextExecutions, nextTeammates] = await Promise.all([
+    const [nextSessions, nextSubagents, nextApprovals, nextExecutions, nextTeammates] = await Promise.all([
+      fetchSessions(),
       fetchSubagents(sessionId),
       fetchApprovals(sessionId),
       fetchToolExecutions(sessionId),
       fetchTeammates(sessionId),
     ]);
 
+    setSessions(sortSessionsByActivity(nextSessions));
     setSubagents(nextSubagents);
     setApprovals(nextApprovals);
     setExecutions(nextExecutions);
@@ -304,14 +343,33 @@ export function App() {
 
   useEffect(() => {
     if (!activeSessionId) return;
-    fetchTimeline(activeSessionId).then(setEvents).catch(() => setEvents([]));
-    setStreamingAssistant(null);
+    let cancelled = false;
+    if (eventsBySession[activeSessionId] === undefined && !activeSessionId.startsWith(DRAFT_SESSION_PREFIX)) {
+      fetchTimeline(activeSessionId)
+      .then((items) => {
+        if (cancelled || activeSessionRef.current !== activeSessionId) return;
+        setEventsBySession((current) => ({ ...current, [activeSessionId]: items }));
+      })
+      .catch(() => {
+        if (cancelled || activeSessionRef.current !== activeSessionId) return;
+        setEventsBySession((current) => ({ ...current, [activeSessionId]: [] }));
+      });
+    }
+    setAutoScrollTimeline(true);
+    if (activeSessionId.startsWith(DRAFT_SESSION_PREFIX)) {
+      return () => {
+        cancelled = true;
+      };
+    }
     refreshSessionState(activeSessionId).catch(() => {
       setSubagents([]);
       setTeammates([]);
       setApprovals([]);
       setExecutions([]);
     });
+    return () => {
+      cancelled = true;
+    };
   }, [activeSessionId]);
 
   useEffect(() => {
@@ -322,55 +380,62 @@ export function App() {
   }, [selectedTeammateId]);
 
   useEffect(() => {
-    if (!activeSessionId) return;
-    let disposed = false;
-    let retryTimer: number | undefined;
+    const cleanups = sessionSocketsRef.current;
+    const liveSessionIds = sessions
+      .filter((session) => !session.isDraft)
+      .map((session) => session.session_id);
 
-    const connect = () => {
-      if (disposed) return () => {};
+    for (const sessionId of liveSessionIds) {
+      if (cleanups[sessionId]) continue;
       setConnectionState("connecting");
-      return openSessionEvents(
-        activeSessionId,
+      cleanups[sessionId] = openSessionEvents(
+        sessionId,
         (event) => {
           if (event.type === "message.user") {
-            setEvents((current) => {
-              const localIndex = current.findIndex(
+            setSessions((current) => touchSession(current, event.session_id, event.created_at));
+            setEventsBySession((current) => {
+              const sessionEvents = current[event.session_id] ?? [];
+              const localIndex = sessionEvents.findIndex(
                 (item) => item.type === "message.user.local" && item.content === event.content,
               );
               if (localIndex === -1) {
-                return current.some(
+                const exists = sessionEvents.some(
                   (item) =>
                     item.created_at === event.created_at &&
                     item.type === event.type &&
                     item.content === event.content,
-                )
-                  ? current
-                  : [...current, event];
+                );
+                return exists ? current : { ...current, [event.session_id]: [...sessionEvents, event] };
               }
-              const next = [...current];
+              const next = [...sessionEvents];
               next.splice(localIndex, 1, event);
-              return next;
+              return { ...current, [event.session_id]: next };
             });
             return;
           }
           if (event.type === "message.assistant.delta") {
-            setStreamingAssistant((current) => ({
-              content: `${current?.content ?? ""}${event.content}`,
-              created_at: current?.created_at ?? event.created_at,
+            setStreamingBySession((current) => ({
+              ...current,
+              [event.session_id]: {
+                content: `${current[event.session_id]?.content ?? ""}${event.content}`,
+                created_at: current[event.session_id]?.created_at ?? event.created_at,
+              },
             }));
             return;
           }
           if (event.type === "message.assistant") {
-            setStreamingAssistant(null);
+            setStreamingBySession((current) => ({ ...current, [event.session_id]: null }));
           }
-          setEvents((current) => {
-            const exists = current.some(
+          setSessions((current) => touchSession(current, event.session_id, event.created_at));
+          setEventsBySession((current) => {
+            const sessionEvents = current[event.session_id] ?? [];
+            const exists = sessionEvents.some(
               (item) =>
                 item.created_at === event.created_at &&
                 item.type === event.type &&
                 item.content === event.content,
             );
-            return exists ? current : [...current, event];
+            return exists ? current : { ...current, [event.session_id]: [...sessionEvents, event] };
           });
           if (
             event.type.startsWith("tool.") ||
@@ -387,25 +452,29 @@ export function App() {
         {
           onOpen: () => setConnectionState("live"),
           onError: () => setConnectionState("degraded"),
-          onClose: () => {
-            if (disposed) return;
-            setConnectionState("reconnecting");
-            retryTimer = window.setTimeout(() => {
-              cleanup = connect();
-            }, 1200);
-          },
+          onClose: () => setConnectionState("reconnecting"),
         },
       );
-    };
+    }
 
-    let cleanup = connect();
+    for (const sessionId of Object.keys(cleanups)) {
+      if (liveSessionIds.includes(sessionId)) continue;
+      cleanups[sessionId]?.();
+      delete cleanups[sessionId];
+    }
+
+    return () => undefined;
+  }, [sessions, selectedTeammateId]);
+
+  useEffect(() => {
     return () => {
-      disposed = true;
-      if (retryTimer) window.clearTimeout(retryTimer);
-      cleanup();
+      for (const cleanup of Object.values(sessionSocketsRef.current)) {
+        cleanup();
+      }
+      sessionSocketsRef.current = {};
       setConnectionState("offline");
     };
-  }, [activeSessionId, selectedTeammateId]);
+  }, []);
 
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
@@ -416,43 +485,94 @@ export function App() {
     if (!activeSessionId || !draft.trim()) return;
     const content = draft.trim();
     const nextTitle = summarizeSessionTitle(content);
+    const sourceSessionId = activeSessionId;
+    const isDraftSession = sourceSessionId.startsWith(DRAFT_SESSION_PREFIX);
+    let targetSessionId = sourceSessionId;
     setDraft("");
+    setAutoScrollTimeline(true);
     const optimisticCreatedAt = new Date().toISOString();
-    setSessions((current) =>
-      current.map((session) =>
-        session.session_id === activeSessionId && session.title.startsWith("New Session")
-          ? { ...session, title: nextTitle }
-          : session,
-      ),
-    );
-    setEvents((current) => [
+    setStreamingBySession((current) => ({
       ...current,
-      {
-        session_id: activeSessionId,
-        type: "message.user.local",
-        content,
+      [sourceSessionId]: {
+        content: "",
         created_at: optimisticCreatedAt,
-      } as TimelineEvent,
-    ]);
+      },
+    }));
+    setSessions((current) => touchSession(
+      current,
+      sourceSessionId,
+      optimisticCreatedAt,
+      current.find((session) => session.session_id === sourceSessionId)?.title?.startsWith("New Session") ? nextTitle : undefined,
+    ));
+    setEventsBySession((current) => ({
+      ...current,
+      [sourceSessionId]: [
+        ...(current[sourceSessionId] ?? []),
+        {
+          session_id: sourceSessionId,
+          type: "message.user.local",
+          content,
+          created_at: optimisticCreatedAt,
+        } as TimelineEvent,
+      ],
+    }));
     try {
-      await sendMessage(activeSessionId, content);
-      setStreamingAssistant(null);
+      if (isDraftSession) {
+        const created = await createSession(nextTitle);
+        targetSessionId = created.session_id;
+        setSessions((current) =>
+          sortSessionsByActivity(
+            current.map((session) =>
+              session.session_id === sourceSessionId ? { ...created } : session,
+            ),
+          ),
+        );
+        setEventsBySession((current) => {
+          const draftEvents = current[sourceSessionId] ?? [];
+          const { [sourceSessionId]: _, ...rest } = current;
+          return {
+            ...rest,
+            [targetSessionId]: draftEvents.map((event) => ({ ...event, session_id: targetSessionId })),
+          };
+        });
+        setStreamingBySession((current) => {
+          const draftStreaming = current[sourceSessionId] ?? null;
+          const { [sourceSessionId]: _, ...rest } = current;
+          return { ...rest, [targetSessionId]: draftStreaming };
+        });
+        setActiveSessionId(targetSessionId);
+        activeSessionRef.current = targetSessionId;
+      }
+
+      await sendMessage(targetSessionId, content);
     } catch (error) {
-      setEvents((current) =>
-        current.filter(
+      setStreamingBySession((current) => ({ ...current, [sourceSessionId]: null }));
+      setEventsBySession((current) => ({
+        ...current,
+        [sourceSessionId]: (current[sourceSessionId] ?? []).filter(
           (item) =>
             !(item.type === "message.user.local" && item.content === content && item.created_at === optimisticCreatedAt),
         ),
-      );
+      }));
       throw error;
     }
   }
 
   async function onCreateSession() {
-    const session = await createSession(nextSessionTitle());
-    setSessions((current) => [session, ...current]);
-    setActiveSessionId(session.session_id);
-    setEvents([]);
+    const timestamp = new Date().toISOString();
+    const draftId = `${DRAFT_SESSION_PREFIX}${Date.now()}`;
+    const draftSession: SessionItem = {
+      session_id: draftId,
+      title: nextSessionTitle(),
+      created_at: timestamp,
+      updated_at: timestamp,
+      isDraft: true,
+    };
+    setSessions((current) => sortSessionsByActivity([draftSession, ...current]));
+    setActiveSessionId(draftId);
+    activeSessionRef.current = draftId;
+    setEventsBySession((current) => ({ ...current, [draftId]: [] }));
+    setStreamingBySession((current) => ({ ...current, [draftId]: null }));
     setDraft("");
   }
 
@@ -475,7 +595,11 @@ export function App() {
   async function onDecision(approvalId: number, approve: boolean) {
     await decideApproval(approvalId, approve);
     if (!activeSessionId) return;
-    setEvents(await fetchTimeline(activeSessionId));
+    const timeline = await fetchTimeline(activeSessionId);
+    setEventsBySession((current) => ({
+      ...current,
+      [activeSessionId]: timeline,
+    }));
     await refreshSessionState(activeSessionId);
   }
 
@@ -493,16 +617,48 @@ export function App() {
     await sendTeammateMessage(selectedTeammateId, teammateDraft.trim());
     setTeammateMessages(await fetchTeammateMessages(selectedTeammateId));
     await refreshSessionState(activeSessionId);
-    setEvents(await fetchTimeline(activeSessionId));
+    const timeline = await fetchTimeline(activeSessionId);
+    setEventsBySession((current) => ({
+      ...current,
+      [activeSessionId]: timeline,
+    }));
   }
 
   async function onRunSubagent() {
     if (!activeSessionId || !subagentDraft.trim()) return;
     await runSubagent(activeSessionId, `Explorer ${subagents.length + 1}`, subagentDraft.trim());
     await refreshSessionState(activeSessionId);
-    setEvents(await fetchTimeline(activeSessionId));
+    const timeline = await fetchTimeline(activeSessionId);
+    setEventsBySession((current) => ({
+      ...current,
+      [activeSessionId]: timeline,
+    }));
     setActiveWorkbenchTab("subagents");
     setWorkbenchOpen(true);
+  }
+
+  const events = eventsBySession[activeSessionId] ?? [];
+  const streamingAssistant = streamingBySession[activeSessionId] ?? null;
+
+  useEffect(() => {
+    if (!autoScrollTimeline || !timelineRef.current) return;
+    timelineRef.current.scrollTop = timelineRef.current.scrollHeight;
+    setShowScrollToBottom(false);
+  }, [events, streamingAssistant, autoScrollTimeline]);
+
+  function onTimelineScroll() {
+    if (!timelineRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = timelineRef.current;
+    const nearBottom = scrollHeight - (scrollTop + clientHeight) < 56;
+    setAutoScrollTimeline(nearBottom);
+    setShowScrollToBottom(!nearBottom);
+  }
+
+  function scrollTimelineToBottom() {
+    if (!timelineRef.current) return;
+    timelineRef.current.scrollTop = timelineRef.current.scrollHeight;
+    setAutoScrollTimeline(true);
+    setShowScrollToBottom(false);
   }
 
   const activeSession = sessions.find((session) => session.session_id === activeSessionId) ?? null;
@@ -782,7 +938,7 @@ export function App() {
                 onClick={() => setActiveSessionId(session.session_id)}
               >
                 <strong>{session.title}</strong>
-                <span>{formatSessionStamp(session.created_at)}</span>
+                <span>{formatSessionStamp(session.updated_at ?? session.created_at)}</span>
               </button>
             ))}
             {!filteredSessions.length ? <p className="empty-inline">No matching sessions.</p> : null}
@@ -826,7 +982,7 @@ export function App() {
             </div>
           ) : (
             <div className="conversation-frame">
-              <div className="timeline-stream">
+              <div className="timeline-stream" ref={timelineRef} onScroll={onTimelineScroll}>
                 {[...timelineCards, ...(liveAssistantCard ? [liveAssistantCard] : [])].map(({ event, card }, index) => (
                   <article
                     key={`${event.created_at}-${index}`}
@@ -837,7 +993,15 @@ export function App() {
                       <span>{formatTimelineStamp(event.created_at)}</span>
                     </div>
                     <h3>{card.title}</h3>
-                    <p>{card.content}</p>
+                    {card.tone === "assistant" ? (
+                      <div className="markdown-body">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {card.content}
+                        </ReactMarkdown>
+                      </div>
+                    ) : (
+                      <p>{card.content}</p>
+                    )}
                   </article>
                 ))}
                 {!timelineCards.length ? (
@@ -848,6 +1012,11 @@ export function App() {
                   </div>
                 ) : null}
               </div>
+              {showScrollToBottom ? (
+                <button type="button" className="scroll-to-bottom" onClick={scrollTimelineToBottom}>
+                  回到底部
+                </button>
+              ) : null}
             </div>
           )}
         </section>
