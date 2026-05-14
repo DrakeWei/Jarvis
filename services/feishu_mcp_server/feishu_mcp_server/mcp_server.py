@@ -14,6 +14,7 @@ from feishu_mcp_server.doc_service import (
     get_doc,
     insert_after_heading,
     read_doc,
+    replace_document,
     replace_text,
 )
 from feishu_mcp_server.feishu_client import feishu_client
@@ -61,6 +62,20 @@ TOOL_DEFINITIONS.extend(
                     "document_id": {"type": "string"},
                     "document_url": {"type": "string"},
                     "max_blocks": {"type": "integer"},
+                },
+            },
+        },
+        {
+            "name": "feishu_doc_replace_document",
+            "title": "Replace Feishu Doc Body",
+            "description": "Replace the entire body of a Feishu upgraded doc in one ordered write. This clears existing body blocks and writes the new content back in order while preserving the doc title. Use this when the user wants to rewrite a document or replace old sections wholesale.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "string"},
+                    "document_url": {"type": "string"},
+                    "content": {"type": "string"},
+                    "blocks": {"type": "array", "items": {"type": "object"}},
                 },
             },
         },
@@ -127,6 +142,8 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return read_doc(arguments)
     if name == "feishu_doc_append":
         return append_doc(arguments)
+    if name == "feishu_doc_replace_document":
+        return replace_document(arguments)
     if name == "feishu_doc_insert_after_heading":
         return insert_after_heading(arguments)
     if name == "feishu_doc_replace_text":

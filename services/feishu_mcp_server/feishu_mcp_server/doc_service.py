@@ -103,6 +103,45 @@ def append_doc(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def replace_document(arguments: dict[str, Any]) -> dict[str, Any]:
+    arguments = _normalize_arguments(arguments)
+    document_id = resolve_document_id(arguments)
+    markdown = _resolve_markdown(arguments)
+    raw_blocks = list_all_blocks(document_id)
+    parsed = linearize_blocks(raw_blocks)
+    top_level = [block for block in parsed.get("blocks", []) if block.get("parent_id") == document_id]
+
+    delete_revision = None
+    if top_level:
+        delete_payload = feishu_client.delete_child_range(
+            document_id=document_id,
+            block_id=document_id,
+            start_index=0,
+            end_index=len(top_level),
+        )
+        delete_revision = _extract_revision_from_data(delete_payload)
+
+    converted = feishu_client.convert_markdown_to_blocks(markdown)
+    converted_data = _unwrap_data(converted)
+    children_id, descendants = _converted_descendants(converted_data)
+    create_payload = feishu_client.create_nested_blocks(
+        document_id=document_id,
+        block_id=document_id,
+        children_id=children_id,
+        descendants=descendants,
+        index=0,
+    )
+    return {
+        "document_id": document_id,
+        "url": _doc_url(document_id),
+        "cleared_children_count": len(top_level),
+        "inserted_children_count": len(children_id),
+        "revision_id": _extract_revision_from_data(create_payload) or delete_revision,
+        "markdown": markdown,
+        "executed": True,
+    }
+
+
 def insert_after_heading(arguments: dict[str, Any]) -> dict[str, Any]:
     arguments = _normalize_arguments(arguments)
     document_id = resolve_document_id(arguments)
@@ -432,6 +471,14 @@ def _unwrap_document(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _converted_descendants(data: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+    first_level_ids = data.get("first_level_block_ids", data.get("firstLevelBlockIds", []))
+    blocks = data.get("blocks", [])
+    if isinstance(first_level_ids, list) and isinstance(blocks, list):
+        descendant_items = [item for item in blocks if isinstance(item, dict)]
+        child_ids = [str(item) for item in first_level_ids if str(item).strip()]
+        if child_ids and descendant_items:
+            return child_ids, descendant_items
+
     children_id = data.get("children_id", data.get("childrenIds", []))
     descendants = data.get("descendants", [])
     if isinstance(children_id, list) and isinstance(descendants, list):
