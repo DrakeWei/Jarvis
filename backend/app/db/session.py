@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
@@ -13,7 +13,19 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, futu
 
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
+    _migrate_session_columns()
 
 
 def create_session():
     return SessionLocal()
+
+
+def _migrate_session_columns() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("sessions")}
+    except Exception:
+        return
+    if "hidden" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE sessions ADD COLUMN hidden BOOLEAN NOT NULL DEFAULT 0"))

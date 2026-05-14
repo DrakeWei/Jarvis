@@ -13,7 +13,7 @@ def list_sessions() -> list[SessionSummary]:
                 select(MessageRecord.session_id, func.max(MessageRecord.created_at)).group_by(MessageRecord.session_id)
             ).all()
         }
-        rows = db.scalars(select(SessionRecord)).all()
+        rows = db.scalars(select(SessionRecord).where(SessionRecord.hidden.is_(False))).all()
         rows = sorted(
             rows,
             key=lambda row: message_activity.get(row.id) or row.created_at,
@@ -32,13 +32,16 @@ def list_sessions() -> list[SessionSummary]:
 
 def get_session(session_id: str) -> SessionRecord | None:
     with create_session() as db:
-        return db.get(SessionRecord, session_id)
+        row = db.get(SessionRecord, session_id)
+        if row is None or row.hidden:
+            return None
+        return row
 
 
 def update_session_title(session_id: str, title: str) -> SessionSummary | None:
     with create_session() as db:
         row = db.get(SessionRecord, session_id)
-        if row is None:
+        if row is None or row.hidden:
             return None
         row.title = title
         db.commit()
@@ -63,6 +66,16 @@ def create_session_record(payload: SessionCreate) -> SessionSummary:
             created_at=row.created_at.isoformat(),
             updated_at=row.created_at.isoformat(),
         )
+
+
+def soft_delete_session(session_id: str) -> bool:
+    with create_session() as db:
+        row = db.get(SessionRecord, session_id)
+        if row is None or row.hidden:
+            return False
+        row.hidden = True
+        db.commit()
+        return True
 
 
 def create_message_record(session_id: str, payload: MessageCreate) -> None:

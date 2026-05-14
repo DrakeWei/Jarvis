@@ -8,6 +8,10 @@ class SessionCreate(BaseModel):
     title: str = Field(min_length=1, max_length=120)
 
 
+class SessionRename(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
 class MessageCreate(BaseModel):
     role: Literal["user", "assistant", "system"] = "user"
     content: str = Field(min_length=1)

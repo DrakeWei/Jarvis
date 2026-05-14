@@ -5,9 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.config import settings
-from app.providers import TextBlock, ToolUseBlock, create_client
+from app.providers import ProviderConfigError, ProviderRequestError, TextBlock, ToolUseBlock, create_client
 from app.schemas.events import MessageCreate, SessionCreate, SessionSummary, TimelineEvent
 from app.schemas.subagents import SubagentRunCreate
+from app.schemas.tasks import TaskCreate
 from app.schemas.teammates import TeammateCreate
 from app.services import approval_service, session_service, subagent_service, teammate_service, tool_service
 from app.tools.broker import ToolBroker, broker
@@ -17,6 +18,17 @@ from app.tools.broker import ToolBroker, broker
 class PendingApproval:
     session_id: str
     context: dict[str, object]
+
+
+@dataclass
+class SessionTurn:
+    task: asyncio.Task[None]
+    cancel_event: asyncio.Event
+    partial_text: str = ""
+
+
+class TurnCancelled(RuntimeError):
+    pass
 
 
 class EventBroker:
@@ -43,6 +55,7 @@ class RuntimeManager:
         self.events = EventBroker()
         self.pending_approvals: dict[int, PendingApproval] = {}
         self.background_tasks: set[asyncio.Task[None]] = set()
+        self.session_turns: dict[str, SessionTurn] = {}
 
     def restore_state(self) -> None:
         self.pending_approvals = {}
@@ -56,6 +69,24 @@ class RuntimeManager:
 
     def list_sessions(self) -> list[SessionSummary]:
         return session_service.list_sessions()
+
+    async def rename_session(self, session_id: str, title: str) -> SessionSummary | None:
+        updated = session_service.update_session_title(session_id, title)
+        if updated:
+            await self.publish(
+                TimelineEvent(
+                    session_id=session_id,
+                    type="session.renamed",
+                    content=title,
+                )
+            )
+        return updated
+
+    async def soft_delete_session(self, session_id: str) -> bool:
+        deleted = session_service.soft_delete_session(session_id)
+        if deleted:
+            self.session_turns.pop(session_id, None)
+        return deleted
 
     def session_exists(self, session_id: str) -> bool:
         return session_service.get_session(session_id) is not None
@@ -144,7 +175,7 @@ class RuntimeManager:
                 content=f"Subagent '{payload.name}' started.",
             )
         )
-        summary = self._generate_subagent_summary(payload.prompt)
+        summary = await self._run_subagent_task(payload.session_id, payload.prompt)
         subagent_service.add_subagent_summary(subagent.id, summary)
         completed = subagent_service.complete_subagent(subagent.id)
         await self.publish(
@@ -156,6 +187,19 @@ class RuntimeManager:
         )
         return {"subagent": completed or subagent, "summary": summary}
 
+    async def _run_subagent_task(self, session_id: str, prompt: str) -> str:
+        workspace = self._resolve_request_workspace(prompt) or settings.project_root
+        messages: list[dict[str, object]] = [{"role": "user", "content": prompt}]
+        return await self._continue_agent_loop(
+            session_id,
+            workspace,
+            messages,
+            asyncio.Event(),
+            allow_subagent_tool=False,
+            agent_kind="subagent",
+            emit_stream_events=False,
+        )
+
     async def publish(self, event: TimelineEvent) -> TimelineEvent:
         stored = session_service.create_event_record(event)
         await self.events.publish(stored)
@@ -166,9 +210,39 @@ class RuntimeManager:
         return event
 
     def _start_background_turn(self, session_id: str, content: str) -> None:
-        task = asyncio.create_task(self._run_lead_turn(session_id, content))
+        existing = self.session_turns.get(session_id)
+        if existing and not existing.task.done():
+            existing.cancel_event.set()
+        cancel_event = asyncio.Event()
+        task = asyncio.create_task(self._run_lead_turn(session_id, content, cancel_event))
+        self.session_turns[session_id] = SessionTurn(task=task, cancel_event=cancel_event)
         self.background_tasks.add(task)
         task.add_done_callback(self.background_tasks.discard)
+
+    async def cancel_session_turn(self, session_id: str) -> bool:
+        turn = self.session_turns.get(session_id)
+        if turn is None or turn.task.done():
+            return False
+        turn.cancel_event.set()
+        partial_text = turn.partial_text.strip()
+        if partial_text:
+            session_service.create_message_record(session_id, MessageCreate(role="assistant", content=partial_text))
+            await self.publish(
+                TimelineEvent(
+                    session_id=session_id,
+                    type="message.assistant",
+                    content=partial_text,
+                )
+            )
+        turn.task.cancel()
+        await self.publish(
+            TimelineEvent(
+                session_id=session_id,
+                type="turn.cancelled",
+                content="Stopped the current turn.",
+            )
+        )
+        return True
 
     async def create_session(self, payload: SessionCreate) -> SessionSummary:
         session = session_service.create_session_record(payload)
@@ -182,8 +256,7 @@ class RuntimeManager:
         return session
 
     async def append_message(self, session_id: str, payload: MessageCreate) -> None:
-        if payload.role == "user":
-            self._maybe_autoname_session(session_id, payload.content)
+        should_autoname = payload.role == "user" and self._should_autoname_session(session_id)
         session_service.create_message_record(session_id, payload)
         await self.publish(
             TimelineEvent(
@@ -193,9 +266,11 @@ class RuntimeManager:
             )
         )
         if payload.role == "user":
+            if should_autoname:
+                self._start_autoname_session(session_id, payload.content)
             self._start_background_turn(session_id, payload.content)
 
-    async def _run_lead_turn(self, session_id: str, content: str) -> None:
+    async def _run_lead_turn(self, session_id: str, content: str, cancel_event: asyncio.Event) -> None:
         await self.emit_ephemeral(
             TimelineEvent(
                 session_id=session_id,
@@ -204,21 +279,29 @@ class RuntimeManager:
             )
         )
         try:
-            reply = await self._run_agent_task(session_id, content)
+            reply = await self._run_agent_task(session_id, content, cancel_event)
             await self._publish_assistant_reply(session_id, reply)
+            return
+        except TurnCancelled:
+            return
+        except asyncio.CancelledError:
             return
         except Exception as exc:
             reply = f"Lead runtime failed: {exc}"
+        finally:
+            current = self.session_turns.get(session_id)
+            if current and current.cancel_event is cancel_event:
+                self.session_turns.pop(session_id, None)
 
         await self._publish_assistant_reply(session_id, reply)
 
-    async def _run_agent_task(self, session_id: str, latest_user_content: str) -> str:
+    async def _run_agent_task(self, session_id: str, latest_user_content: str, cancel_event: asyncio.Event) -> str:
         workspace = self._resolve_request_workspace(latest_user_content)
         if workspace is None:
             return "我没有定位到你指定的目标项目路径。请给我更明确的本地项目名或绝对路径。"
 
         messages: list[dict[str, object]] = session_service.list_message_records(session_id, limit=12)
-        return await self._continue_agent_loop(session_id, workspace, messages)
+        return await self._continue_agent_loop(session_id, workspace, messages, cancel_event)
 
     def _resolve_request_workspace(self, content: str) -> Path | None:
         absolute_match = re.search(r"(/Users/[^\s，。；；!?\n]+)", content)
@@ -259,8 +342,8 @@ class RuntimeManager:
                 return path
         return settings.project_root
 
-    def _autonomous_tool_schemas(self) -> list[dict[str, object]]:
-        return [
+    def _autonomous_tool_schemas(self, *, allow_subagent_tool: bool = True) -> list[dict[str, object]]:
+        schemas = [
             {
                 "name": "list_files",
                 "description": "List files in the current target workspace.",
@@ -309,21 +392,140 @@ class RuntimeManager:
                     "required": ["command"],
                 },
             },
+            {
+                "name": "list_skills",
+                "description": "List locally installed skills available to the agent.",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "load_skill",
+                "description": "Load a local skill by name and read its SKILL.md instructions.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                },
+            },
+            {
+                "name": "create_task",
+                "description": "Create a lightweight task in the current session.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "subject": {"type": "string"},
+                        "description": {"type": "string"},
+                    },
+                    "required": ["subject"],
+                },
+            },
+            {
+                "name": "run_subagent",
+                "description": "Run a bounded subagent and return its summary.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "prompt": {"type": "string"},
+                    },
+                    "required": ["prompt"],
+                },
+            },
+            {
+                "name": "create_teammate",
+                "description": "Create a teammate agent for the current session.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "role": {"type": "string"},
+                    },
+                    "required": ["name", "role"],
+                },
+            },
+            {
+                "name": "message_teammate",
+                "description": "Send a message to a teammate agent in the current session.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {"type": "integer"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["agent_id", "content"],
+                },
+            },
         ]
+        if not allow_subagent_tool:
+            schemas = [schema for schema in schemas if schema["name"] != "run_subagent"]
+        return schemas
 
-    def _maybe_autoname_session(self, session_id: str, content: str) -> None:
+    def _should_autoname_session(self, session_id: str) -> bool:
         session = session_service.get_session(session_id)
         if session is None:
-            return
+            return False
         if not session.title.startswith("New Session") and session.title != "New Session":
-            return
+            return False
         if session_service.has_user_messages(session_id):
-            return
-        title = self._summarize_session_title(content)
-        if title:
-            session_service.update_session_title(session_id, title)
+            return False
+        return True
 
-    def _summarize_session_title(self, content: str) -> str:
+    def _start_autoname_session(self, session_id: str, content: str) -> None:
+        task = asyncio.create_task(self._autoname_session(session_id, content))
+        self.background_tasks.add(task)
+        task.add_done_callback(self.background_tasks.discard)
+
+    async def _autoname_session(self, session_id: str, content: str) -> None:
+        title = await asyncio.to_thread(self._generate_session_title, content)
+        if title:
+            updated = session_service.update_session_title(session_id, title)
+            if updated:
+                await self.publish(
+                    TimelineEvent(
+                        session_id=session_id,
+                        type="session.renamed",
+                        content=title,
+                    )
+                )
+
+    def _generate_session_title(self, content: str) -> str:
+        llm_title = self._generate_session_title_with_llm(content)
+        if llm_title:
+            return llm_title
+        return self._summarize_session_title_fallback(content)
+
+    def _generate_session_title_with_llm(self, content: str) -> str | None:
+        if not settings.model_id:
+            return None
+        prompt = (
+            "Summarize the user's first message into a concise session title.\n"
+            "Return only the title.\n"
+            "Keep it under 8 words in English or under 16 Chinese characters.\n"
+            "No quotes. No punctuation unless needed.\n"
+            "Make it specific to the task."
+        )
+        try:
+            response = create_client().messages.create(
+                model=settings.model_id,
+                system=prompt,
+                messages=[{"role": "user", "content": content[:1200]}],
+                max_tokens=32,
+            )
+        except (ProviderConfigError, ProviderRequestError, Exception):
+            return None
+
+        text = " ".join(
+            block.text.strip()
+            for block in response.content
+            if isinstance(block, TextBlock) and block.text.strip()
+        ).strip()
+        if not text:
+            return None
+        text = " ".join(text.split()).strip().strip("\"'` ")
+        if not text:
+            return None
+        return text[:120]
+
+    def _summarize_session_title_fallback(self, content: str) -> str:
         text = " ".join(content.strip().split())
         if not text:
             return "New Session"
@@ -353,6 +555,118 @@ class RuntimeManager:
             if status == "completed":
                 summary_parts.append("README snapshot:\n" + content[:500])
         return "\n\n".join(summary_parts)
+
+    def _skill_roots(self) -> list[Path]:
+        roots = [
+            settings.project_root / "skills",
+            settings.project_root / ".agents" / "skills",
+        ]
+        return [root for root in roots if root.exists() and root.is_dir()]
+
+    def _list_skills(self) -> str:
+        entries: list[str] = []
+        for root in self._skill_roots():
+            for skill_file in sorted(root.glob("*/SKILL.md")):
+                entries.append(f"{skill_file.parent.name} ({skill_file.parent.relative_to(settings.project_root)})")
+        unique = sorted(dict.fromkeys(entries))
+        return "\n".join(unique[:120]) if unique else "(no skills found)"
+
+    def list_local_skills(self) -> list[dict[str, str]]:
+        skills: list[dict[str, str]] = []
+        for root in self._skill_roots():
+            for skill_file in sorted(root.glob("*/SKILL.md")):
+                skills.append(
+                    {
+                        "name": skill_file.parent.name,
+                        "path": skill_file.parent.relative_to(settings.project_root).as_posix(),
+                    }
+                )
+        seen: set[tuple[str, str]] = set()
+        unique: list[dict[str, str]] = []
+        for skill in skills:
+            key = (skill["name"], skill["path"])
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(skill)
+        return unique
+
+    def _load_skill(self, name: str) -> tuple[str, str]:
+        requested = name.strip().lower()
+        if not requested:
+            return "error", "load_skill requires a skill name."
+
+        matches: list[Path] = []
+        for root in self._skill_roots():
+            for skill_file in root.glob("*/SKILL.md"):
+                skill_name = skill_file.parent.name.lower()
+                if requested == skill_name or requested in skill_name:
+                    matches.append(skill_file)
+
+        if not matches:
+            return "error", f"Skill not found: {name}"
+
+        skill_file = sorted(matches)[0]
+        return "completed", skill_file.read_text()[:12000]
+
+    async def _execute_autonomous_tool(
+        self,
+        *,
+        session_id: str,
+        tool_name: str,
+        tool_input: dict[str, object],
+        broker_for_workspace: ToolBroker,
+    ) -> tuple[str, str] | None:
+        if tool_name == "bash":
+            return None
+        if tool_name in {"list_files", "read_file", "write_file", "edit_file"}:
+            return broker_for_workspace.run(tool_name, tool_input)
+        if tool_name == "list_skills":
+            return "completed", self._list_skills()
+        if tool_name == "load_skill":
+            return self._load_skill(str(tool_input.get("name", "")))
+        if tool_name == "create_task":
+            subject = str(tool_input.get("subject", "")).strip()
+            description = str(tool_input.get("description", "")).strip()
+            if not subject:
+                return "error", "create_task requires a non-empty subject."
+            task = task_service.create_task(
+                TaskCreate(session_id=session_id, subject=subject, description=description)
+            )
+            await self.publish(
+                TimelineEvent(
+                    session_id=session_id,
+                    type="task.created",
+                    content=f"Task '{task.subject}' created.",
+                )
+            )
+            return "completed", f"Created task #{task.id}: {task.subject}"
+        if tool_name == "run_subagent":
+            prompt = str(tool_input.get("prompt", "")).strip()
+            name = str(tool_input.get("name", "")).strip() or f"Explorer {len(self.list_subagents(session_id)) + 1}"
+            if not prompt:
+                return "error", "run_subagent requires a non-empty prompt."
+            result = await self.run_subagent(SubagentRunCreate(session_id=session_id, name=name, prompt=prompt))
+            return "completed", result["summary"]
+        if tool_name == "create_teammate":
+            name = str(tool_input.get("name", "")).strip()
+            role = str(tool_input.get("role", "")).strip()
+            if not name or not role:
+                return "error", "create_teammate requires both name and role."
+            teammate = await self.create_teammate(TeammateCreate(session_id=session_id, name=name, role=role))
+            return "completed", f"Created teammate #{teammate.id}: {teammate.name} ({teammate.role})"
+        if tool_name == "message_teammate":
+            agent_id = tool_input.get("agent_id")
+            content = str(tool_input.get("content", "")).strip()
+            if not isinstance(agent_id, int):
+                return "error", "message_teammate requires an integer agent_id."
+            if not content:
+                return "error", "message_teammate requires non-empty content."
+            result = await self.send_teammate_message(agent_id, content)
+            if result is None:
+                return "error", f"Unknown teammate #{agent_id}"
+            return "completed", result["reply"].content
+        return "error", f"Unknown tool '{tool_name}'"
 
     async def _publish_assistant_reply(self, session_id: str, reply: str) -> None:
         text = reply.strip() or "LLM provider returned no text output."
@@ -392,14 +706,28 @@ class RuntimeManager:
             ]
         )
 
+    def _build_subagent_system_prompt(self, workspace: Path) -> str:
+        return "\n\n".join(
+            [
+                "You are Jarvis running as a bounded subagent.",
+                f"Target workspace: {workspace}",
+                "You may use tools to inspect or modify the workspace when needed.",
+                "You must not spawn subagents.",
+                "You should be concise and execution-focused.",
+                "Return a useful summary of what you found or changed.",
+            ]
+        )
+
     async def _stream_agent_response(
         self,
         *,
         client,
         session_id: str,
-        workspace: Path,
+        system_prompt: str,
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
+        cancel_event: asyncio.Event,
+        emit_stream_events: bool,
     ) -> list[object] | None:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[tuple[str, object | None]] = asyncio.Queue()
@@ -408,11 +736,13 @@ class RuntimeManager:
             try:
                 for event in client.stream_response(
                     model=settings.model_id,
-                    system=self._build_agent_system_prompt(workspace),
+                    system=system_prompt,
                     messages=messages,
                     tools=tools,
                     max_tokens=settings.llm_max_tokens,
                 ):
+                    if cancel_event.is_set():
+                        break
                     asyncio.run_coroutine_threadsafe(queue.put((str(event.get("type")), event)), loop).result()
             except Exception as exc:
                 asyncio.run_coroutine_threadsafe(queue.put(("error", str(exc))), loop).result()
@@ -425,18 +755,27 @@ class RuntimeManager:
 
         try:
             while True:
-                kind, payload = await queue.get()
+                if cancel_event.is_set():
+                    raise TurnCancelled
+                try:
+                    kind, payload = await asyncio.wait_for(queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    continue
                 if kind == "text_delta" and isinstance(payload, dict):
                     delta = str(payload.get("delta") or "")
                     if delta:
                         text_parts.append(delta)
-                        await self.emit_ephemeral(
-                            TimelineEvent(
-                                session_id=session_id,
-                                type="message.assistant.delta",
-                                content=delta,
+                        if emit_stream_events:
+                            turn = self.session_turns.get(session_id)
+                            if turn and turn.cancel_event is cancel_event:
+                                turn.partial_text += delta
+                            await self.emit_ephemeral(
+                                TimelineEvent(
+                                    session_id=session_id,
+                                    type="message.assistant.delta",
+                                    content=delta,
+                                )
                             )
-                        )
                     continue
                 if kind == "tool_use" and isinstance(payload, dict):
                     tool_blocks.append(
@@ -452,7 +791,8 @@ class RuntimeManager:
                 if kind == "done":
                     break
         finally:
-            await worker_task
+            if not cancel_event.is_set():
+                await worker_task
 
         blocks: list[object] = []
         if text_parts:
@@ -465,18 +805,32 @@ class RuntimeManager:
         session_id: str,
         workspace: Path,
         messages: list[dict[str, object]],
+        cancel_event: asyncio.Event,
+        *,
+        allow_subagent_tool: bool = True,
+        agent_kind: str = "lead",
+        emit_stream_events: bool = True,
     ) -> str:
         client = create_client()
-        tools = self._autonomous_tool_schemas()
+        tools = self._autonomous_tool_schemas(allow_subagent_tool=allow_subagent_tool)
         broker_for_workspace = ToolBroker(workspace)
+        system_prompt = (
+            self._build_subagent_system_prompt(workspace)
+            if agent_kind == "subagent"
+            else self._build_agent_system_prompt(workspace)
+        )
 
         for _ in range(10):
+            if cancel_event.is_set():
+                raise TurnCancelled
             streamed_blocks = await self._stream_agent_response(
                 client=client,
                 session_id=session_id,
-                workspace=workspace,
+                system_prompt=system_prompt,
                 messages=messages,
                 tools=tools,
+                cancel_event=cancel_event,
+                emit_stream_events=emit_stream_events,
             )
             if streamed_blocks is None:
                 return "任务执行失败：模型没有返回可用响应。"
@@ -493,9 +847,27 @@ class RuntimeManager:
             results: list[dict[str, str]] = []
             for block in tool_calls:
                 if block.name == "bash":
+                    return await self._queue_bash_approval(
+                        session_id,
+                        workspace,
+                        messages,
+                        block.id,
+                        block.input,
+                        allow_subagent_tool=allow_subagent_tool,
+                        agent_kind=agent_kind,
+                        emit_stream_events=emit_stream_events,
+                    )
+
+                executed = await self._execute_autonomous_tool(
+                    session_id=session_id,
+                    tool_name=block.name,
+                    tool_input=block.input,
+                    broker_for_workspace=broker_for_workspace,
+                )
+                if executed is None:
                     return await self._queue_bash_approval(session_id, workspace, messages, block.id, block.input)
 
-                status, output = broker_for_workspace.run(block.name, block.input)
+                status, output = executed
                 tool_service.create_tool_execution(
                     session_id=session_id,
                     tool_name=block.name,
@@ -528,6 +900,10 @@ class RuntimeManager:
         messages: list[dict[str, object]],
         tool_use_id: str,
         tool_input: dict[str, object],
+        *,
+        allow_subagent_tool: bool,
+        agent_kind: str,
+        emit_stream_events: bool,
     ) -> str:
         broker_for_workspace = ToolBroker(workspace)
         context = {
@@ -537,6 +913,9 @@ class RuntimeManager:
             "tool_use_id": tool_use_id,
             "tool_name": "bash",
             "tool_input": tool_input,
+            "allow_subagent_tool": allow_subagent_tool,
+            "agent_kind": agent_kind,
+            "emit_stream_events": emit_stream_events,
         }
         approval = approval_service.create_approval(
             session_id=session_id,
@@ -563,6 +942,9 @@ class RuntimeManager:
         tool_use_id = context.get("tool_use_id")
         tool_name = context.get("tool_name")
         tool_input = context.get("tool_input")
+        allow_subagent_tool = bool(context.get("allow_subagent_tool", True))
+        agent_kind = str(context.get("agent_kind", "lead"))
+        emit_stream_events = bool(context.get("emit_stream_events", True))
 
         if not isinstance(workspace_raw, str) or not isinstance(messages, list):
             return "Approval context is incomplete; unable to resume the pending action."
@@ -599,7 +981,15 @@ class RuntimeManager:
                 ],
             }
         )
-        return await self._continue_agent_loop(session_id, workspace, messages)
+        return await self._continue_agent_loop(
+            session_id,
+            workspace,
+            messages,
+            asyncio.Event(),
+            allow_subagent_tool=allow_subagent_tool,
+            agent_kind=agent_kind,
+            emit_stream_events=emit_stream_events,
+        )
 
     def _serialize_content_blocks(self, blocks: list[object]) -> list[dict[str, object]]:
         serialized: list[dict[str, object]] = []
