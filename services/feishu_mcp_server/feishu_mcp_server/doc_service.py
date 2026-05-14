@@ -20,13 +20,22 @@ def create_doc(arguments: dict[str, Any]) -> dict[str, Any]:
     payload = feishu_client.create_doc(title=title, folder_token=folder_token)
     document = _unwrap_document(payload)
     document_id = _extract_document_id(document)
-    return {
+    result = {
         "document_id": document_id,
         "title": _extract_title(document) or title,
         "revision_id": _extract_revision(document),
         "url": _doc_url(document_id),
-        "note": "initial_blocks is not implemented yet." if arguments.get("initial_blocks") else "",
     }
+    initial_blocks = arguments.get("initial_blocks")
+    if initial_blocks:
+        append_result = append_doc(
+            {
+                "document_id": document_id,
+                "blocks": initial_blocks,
+            }
+        )
+        result["seed_result"] = append_result
+    return result
 
 
 def get_doc(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -44,10 +53,156 @@ def get_doc(arguments: dict[str, Any]) -> dict[str, Any]:
 
 def read_doc(arguments: dict[str, Any]) -> dict[str, Any]:
     document_id = resolve_document_id(arguments)
+    raw_blocks = list_all_blocks(document_id, max_blocks=int(arguments.get("max_blocks") or 0))
+    doc_meta = get_doc(arguments)
+    parsed = linearize_blocks(raw_blocks)
+    return {
+        "document_id": document_id,
+        "title": doc_meta.get("title", ""),
+        "revision_id": doc_meta.get("revision_id"),
+        "url": doc_meta.get("url", ""),
+        **parsed,
+        "truncated": bool(arguments.get("max_blocks") and len(raw_blocks) >= int(arguments["max_blocks"])),
+    }
+
+
+def append_doc(arguments: dict[str, Any]) -> dict[str, Any]:
+    document_id = resolve_document_id(arguments)
+    blocks = _require_blocks(arguments)
+    markdown = render_markdown(blocks)
+    converted = feishu_client.convert_markdown_to_blocks(markdown)
+    converted_data = _unwrap_data(converted)
+    children_id, descendants = _converted_descendants(converted_data)
+    payload = feishu_client.create_nested_blocks(
+        document_id=document_id,
+        block_id=document_id,
+        children_id=children_id,
+        descendants=descendants,
+        index=-1,
+    )
+    return {
+        "document_id": document_id,
+        "url": _doc_url(document_id),
+        "inserted_children_count": len(children_id),
+        "revision_id": _extract_revision_from_data(payload),
+        "markdown": markdown,
+    }
+
+
+def insert_after_heading(arguments: dict[str, Any]) -> dict[str, Any]:
+    document_id = resolve_document_id(arguments)
+    heading_query = str(arguments.get("heading_query") or "").strip()
+    if not heading_query:
+        raise FeishuDocServiceError("heading_query is required.")
+    blocks = _require_blocks(arguments)
+    raw_blocks = list_all_blocks(document_id)
+    parsed = linearize_blocks(raw_blocks)
+    heading = _match_heading(parsed.get("blocks", []), heading_query, document_id=document_id)
+    if heading is None:
+        raise FeishuDocServiceError(f"No heading matched '{heading_query}'.")
+    if heading["parent_id"] != document_id:
+        raise FeishuDocServiceError("Only top-level heading insertion is implemented in this phase.")
+
+    top_level = [block for block in parsed.get("blocks", []) if block.get("parent_id") == document_id]
+    heading_index = _index_of_block(top_level, str(heading["block_id"]))
+    if heading_index < 0:
+        raise FeishuDocServiceError("Unable to determine insertion index for the matched heading.")
+
+    markdown = render_markdown(blocks)
+    converted = feishu_client.convert_markdown_to_blocks(markdown)
+    converted_data = _unwrap_data(converted)
+    children_id, descendants = _converted_descendants(converted_data)
+    payload = feishu_client.create_nested_blocks(
+        document_id=document_id,
+        block_id=document_id,
+        children_id=children_id,
+        descendants=descendants,
+        index=heading_index + 1,
+    )
+    return {
+        "document_id": document_id,
+        "matched_heading": heading,
+        "inserted_children_count": len(children_id),
+        "revision_id": _extract_revision_from_data(payload),
+        "markdown": markdown,
+    }
+
+
+def replace_text(arguments: dict[str, Any]) -> dict[str, Any]:
+    document_id = resolve_document_id(arguments)
+    find_text = str(arguments.get("find_text") or "").strip()
+    replace_with = str(arguments.get("replace_text") or "")
+    scope = str(arguments.get("scope") or "").strip()
+    if not find_text or not scope:
+        raise FeishuDocServiceError("find_text and scope are required.")
+    raw_blocks = list_all_blocks(document_id)
+    parsed = linearize_blocks(raw_blocks)
+    candidates = _matching_text_blocks(
+        parsed.get("blocks", []),
+        find_text,
+        heading_query=str(arguments.get("heading_query") or "").strip(),
+    )
+    if not candidates:
+        raise FeishuDocServiceError(f"No text match found for '{find_text}'.")
+    if scope not in {"first", "all", "heading_scoped"}:
+        raise FeishuDocServiceError("scope must be one of: first, all, heading_scoped.")
+    selected = candidates[:1] if scope == "first" else candidates
+    preview = [
+        {
+            "block_id": block["block_id"],
+            "before": block["text"],
+            "after": block["text"].replace(find_text, replace_with),
+        }
+        for block in selected
+    ]
+    return {
+        "document_id": document_id,
+        "match_count": len(selected),
+        "needs_confirmation": True,
+        "preview": preview,
+        "note": "Patch write is intentionally gated until block-payload round-trip is runtime-verified.",
+    }
+
+
+def delete_blocks(arguments: dict[str, Any]) -> dict[str, Any]:
+    document_id = resolve_document_id(arguments)
+    heading_query = str(arguments.get("heading_query") or "").strip()
+    if not heading_query:
+        raise FeishuDocServiceError("heading_query is required in this phase.")
+    raw_blocks = list_all_blocks(document_id)
+    parsed = linearize_blocks(raw_blocks)
+    heading = _match_heading(parsed.get("blocks", []), heading_query, document_id=document_id)
+    if heading is None:
+        raise FeishuDocServiceError(f"No heading matched '{heading_query}'.")
+    top_level = [block for block in parsed.get("blocks", []) if block.get("parent_id") == document_id]
+    heading_index = _index_of_block(top_level, str(heading["block_id"]))
+    if heading_index < 0:
+        raise FeishuDocServiceError("Unable to determine delete range for the matched heading.")
+
+    next_heading_index = None
+    for index in range(heading_index + 1, len(top_level)):
+        block = top_level[index]
+        if str(block.get("block_type", "")).startswith("heading"):
+            next_heading_index = index
+            break
+    preview = top_level[heading_index:next_heading_index]
+    return {
+        "document_id": document_id,
+        "needs_confirmation": True,
+        "matched_heading": heading,
+        "delete_range": {
+            "parent_block_id": document_id,
+            "start_index": heading_index,
+            "end_index": (next_heading_index - 1) if next_heading_index is not None else len(top_level) - 1,
+        },
+        "preview": preview,
+        "note": "Delete write is intentionally gated until delete body semantics are runtime-verified.",
+    }
+
+
+def list_all_blocks(document_id: str, max_blocks: int = 0) -> list[dict[str, Any]]:
     page_token = ""
     all_blocks: list[dict[str, Any]] = []
-    max_blocks = int(arguments.get("max_blocks") or 0)
-
     while True:
         payload = feishu_client.list_doc_blocks(document_id, page_token=page_token)
         items = payload.get("data", {}).get("items", [])
@@ -56,28 +211,12 @@ def read_doc(arguments: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(item, dict):
                     all_blocks.append(item)
                     if max_blocks and len(all_blocks) >= max_blocks:
-                        break
-        if max_blocks and len(all_blocks) >= max_blocks:
-            break
+                        return all_blocks[:max_blocks]
         page_token = str(payload.get("data", {}).get("page_token") or "")
         has_more = bool(payload.get("data", {}).get("has_more", False))
         if not has_more or not page_token:
             break
-
-    doc_meta = get_doc(arguments)
-    parsed = linearize_blocks(all_blocks[: max_blocks or None])
-    return {
-        "document_id": document_id,
-        "title": doc_meta.get("title", ""),
-        "revision_id": doc_meta.get("revision_id"),
-        "url": doc_meta.get("url", ""),
-        **parsed,
-        "truncated": bool(max_blocks and len(all_blocks) > max_blocks),
-    }
-
-
-def not_implemented(name: str) -> dict[str, Any]:
-    raise FeishuDocServiceError(f"{name} is not implemented yet.")
+    return all_blocks
 
 
 def resolve_document_id(arguments: dict[str, Any]) -> str:
@@ -92,14 +231,72 @@ def resolve_document_id(arguments: dict[str, Any]) -> str:
     raise FeishuDocServiceError("document_id or document_url is required.")
 
 
-def _unwrap_document(payload: dict[str, Any]) -> dict[str, Any]:
+def render_markdown(blocks: list[Any]) -> str:
+    lines: list[str] = []
+    for block in blocks:
+        if isinstance(block, str):
+            lines.append(block.strip())
+            continue
+        if not isinstance(block, dict):
+            lines.append(str(block))
+            continue
+        text = str(block.get("text") or block.get("content") or "").strip()
+        kind = str(block.get("type") or block.get("kind") or "paragraph").strip().lower()
+        if not text:
+            continue
+        if kind.startswith("heading"):
+            level_suffix = kind.replace("heading", "").strip()
+            level = int(level_suffix) if level_suffix.isdigit() else 1
+            level = min(max(level, 1), 6)
+            lines.append(f"{'#' * level} {text}")
+        elif kind in {"bullet", "unordered", "list"}:
+            lines.append(f"- {text}")
+        elif kind in {"ordered", "numbered"}:
+            lines.append(f"1. {text}")
+        elif kind == "quote":
+            lines.append(f"> {text}")
+        elif kind == "code":
+            lines.append(f"```\n{text}\n```")
+        else:
+            lines.append(text)
+    markdown = "\n\n".join(line for line in lines if line).strip()
+    if not markdown:
+        raise FeishuDocServiceError("blocks produced no usable content.")
+    return markdown
+
+
+def _require_blocks(arguments: dict[str, Any]) -> list[Any]:
+    blocks = arguments.get("blocks")
+    if not isinstance(blocks, list) or not blocks:
+        raise FeishuDocServiceError("blocks is required and must be a non-empty array.")
+    return blocks
+
+
+def _unwrap_data(payload: dict[str, Any]) -> dict[str, Any]:
     data = payload.get("data", {})
     if not isinstance(data, dict):
-        raise FeishuDocServiceError("Feishu returned malformed document data.")
+        raise FeishuDocServiceError("Feishu returned malformed data.")
+    return data
+
+
+def _unwrap_document(payload: dict[str, Any]) -> dict[str, Any]:
+    data = _unwrap_data(payload)
     document = data.get("document", data)
     if not isinstance(document, dict):
         raise FeishuDocServiceError("Feishu returned malformed document payload.")
     return document
+
+
+def _converted_descendants(data: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+    children_id = data.get("children_id", data.get("childrenIds", []))
+    descendants = data.get("descendants", [])
+    if not isinstance(children_id, list) or not isinstance(descendants, list):
+        raise FeishuDocServiceError("Converted block payload is missing children_id or descendants.")
+    child_ids = [str(item) for item in children_id if str(item).strip()]
+    descendant_items = [item for item in descendants if isinstance(item, dict)]
+    if not child_ids or not descendant_items:
+        raise FeishuDocServiceError("Converted block payload did not contain usable descendants.")
+    return child_ids, descendant_items
 
 
 def _extract_document_id(document: dict[str, Any]) -> str:
@@ -121,5 +318,78 @@ def _extract_revision(document: dict[str, Any]) -> int | None:
         return None
 
 
+def _extract_revision_from_data(payload: dict[str, Any]) -> int | None:
+    data = payload.get("data", {})
+    if not isinstance(data, dict):
+        return None
+    revision = data.get("revision_id", data.get("revisionId"))
+    try:
+        return int(revision) if revision is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _doc_url(document_id: str) -> str:
     return f"{settings.doc_base_url}/{document_id}"
+
+
+def _normalize_text(value: str) -> str:
+    return " ".join(value.lower().split())
+
+
+def _match_heading(blocks: list[dict[str, Any]], heading_query: str, *, document_id: str) -> dict[str, Any] | None:
+    query = _normalize_text(heading_query)
+    matches = [
+        block
+        for block in blocks
+        if str(block.get("block_type", "")).startswith("heading")
+        and _normalize_text(str(block.get("text", ""))) == query
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        top_level = [block for block in matches if block.get("parent_id") == document_id]
+        if len(top_level) == 1:
+            return top_level[0]
+        raise FeishuDocServiceError(f"Heading query '{heading_query}' matched multiple headings.")
+    partials = [
+        block
+        for block in blocks
+        if str(block.get("block_type", "")).startswith("heading")
+        and query in _normalize_text(str(block.get("text", "")))
+    ]
+    if len(partials) == 1:
+        return partials[0]
+    if len(partials) > 1:
+        raise FeishuDocServiceError(f"Heading query '{heading_query}' is ambiguous.")
+    return None
+
+
+def _index_of_block(blocks: list[dict[str, Any]], block_id: str) -> int:
+    for index, block in enumerate(blocks):
+        if str(block.get("block_id")) == block_id:
+            return index
+    return -1
+
+
+def _matching_text_blocks(blocks: list[dict[str, Any]], find_text: str, heading_query: str = "") -> list[dict[str, Any]]:
+    normalized_find = _normalize_text(find_text)
+    matched = [
+        block
+        for block in blocks
+        if normalized_find and normalized_find in _normalize_text(str(block.get("text", "")))
+    ]
+    if not heading_query:
+        return matched
+    heading = _match_heading(blocks, heading_query, document_id="")
+    if heading is None:
+        return []
+    start = _index_of_block(blocks, str(heading["block_id"]))
+    end = len(blocks)
+    for index in range(start + 1, len(blocks)):
+        block = blocks[index]
+        if str(block.get("block_type", "")).startswith("heading"):
+            end = index
+            break
+    scoped_ids = {str(block.get("block_id")) for block in blocks[start:end]}
+    return [block for block in matched if str(block.get("block_id")) in scoped_ids]

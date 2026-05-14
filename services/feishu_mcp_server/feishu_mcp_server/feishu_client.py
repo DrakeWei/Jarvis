@@ -53,6 +53,52 @@ class FeishuClient:
             query["page_token"] = page_token
         return self._request("GET", f"/open-apis/docx/v1/documents/{document_id}/blocks", query=query)
 
+    def convert_markdown_to_blocks(self, content: str) -> dict[str, Any]:
+        body = {
+            "content_type": "markdown",
+            "content": content,
+        }
+        return self._request("POST", settings.doc_convert_path, body=body)
+
+    def create_nested_blocks(
+        self,
+        *,
+        document_id: str,
+        block_id: str,
+        children_id: list[str],
+        descendants: list[dict[str, Any]],
+        index: int = -1,
+    ) -> dict[str, Any]:
+        body = {
+            "index": index,
+            "children_id": children_id,
+            "descendants": descendants,
+        }
+        path = settings.doc_create_nested_blocks_path_template.format(
+            document_id=document_id,
+            block_id=block_id,
+        )
+        return self._request("POST", path, body=body)
+
+    def update_block(self, *, document_id: str, block_id: str, block_payload: dict[str, Any]) -> dict[str, Any]:
+        path = settings.doc_update_block_path_template.format(document_id=document_id, block_id=block_id)
+        return self._request("PATCH", path, body=block_payload)
+
+    def delete_child_range(
+        self,
+        *,
+        document_id: str,
+        block_id: str,
+        start_index: int,
+        end_index: int,
+    ) -> dict[str, Any]:
+        body = {
+            "start_index": start_index,
+            "end_index": end_index,
+        }
+        path = settings.doc_delete_children_path_template.format(document_id=document_id, block_id=block_id)
+        return self._request("DELETE", path, body=body)
+
     def _request(
         self,
         method: str,

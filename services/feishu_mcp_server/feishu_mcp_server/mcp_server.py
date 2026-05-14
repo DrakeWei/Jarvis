@@ -5,7 +5,16 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException, Response
 
 from feishu_mcp_server.config import settings
-from feishu_mcp_server.doc_service import FeishuDocServiceError, create_doc, get_doc, not_implemented, read_doc
+from feishu_mcp_server.doc_service import (
+    FeishuDocServiceError,
+    append_doc,
+    create_doc,
+    delete_blocks,
+    get_doc,
+    insert_after_heading,
+    read_doc,
+    replace_text,
+)
 from feishu_mcp_server.feishu_client import feishu_client
 
 app = FastAPI(title=settings.app_name)
@@ -115,13 +124,13 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     if name == "feishu_doc_read":
         return read_doc(arguments)
     if name == "feishu_doc_append":
-        return not_implemented(name)
+        return append_doc(arguments)
     if name == "feishu_doc_insert_after_heading":
-        return not_implemented(name)
+        return insert_after_heading(arguments)
     if name == "feishu_doc_replace_text":
-        return not_implemented(name)
+        return replace_text(arguments)
     if name == "feishu_doc_delete_blocks":
-        return not_implemented(name)
+        return delete_blocks(arguments)
     raise FeishuDocServiceError(f"Unknown tool '{name}'.")
 
 

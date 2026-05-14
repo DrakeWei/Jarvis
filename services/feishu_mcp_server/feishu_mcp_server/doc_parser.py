@@ -10,12 +10,17 @@ def linearize_blocks(block_items: list[dict[str, Any]]) -> dict[str, Any]:
 
     for item in block_items:
         block_id = str(item.get("block_id") or item.get("blockId") or "")
+        parent_id = str(item.get("parent_id") or item.get("parentId") or "")
+        children = item.get("children", [])
+        child_count = len(children) if isinstance(children, list) else 0
         block_type = _block_type(item)
         text = _extract_text(item).strip()
         entry = {
             "block_id": block_id,
+            "parent_id": parent_id,
             "block_type": block_type,
             "text": text,
+            "child_count": child_count,
         }
         blocks.append(entry)
         if text:
