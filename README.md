@@ -6,6 +6,7 @@ Local single-user agent cockpit inspired by `learn-claude-code/agents/s_full.py`
 
 - `frontend/`: React + TypeScript cockpit UI
 - `backend/`: Python runtime, API, tools, and agent orchestration
+- `services/feishu_mcp_server/`: standalone HTTP MCP server for Feishu Docs
 - `src-tauri/`: Tauri desktop shell
 - `docs/superpowers/`: design and implementation planning artifacts
 
@@ -29,3 +30,46 @@ The project still needs dependency installation before it can be run locally.
    `cd frontend && npm run tauri:dev`
 
 The Tauri shell now auto-starts the Python backend if `127.0.0.1:8731` is not already in use.
+
+## Feishu MCP Local Prep
+
+For the Feishu Docs MCP integration, there are two local processes:
+
+1. Jarvis backend
+2. Feishu MCP server
+
+### Install
+
+```bash
+./.venv/bin/python -m pip install -e backend
+./.venv/bin/python -m pip install -e services/feishu_mcp_server
+```
+
+### Configure
+
+- Backend sample env: [backend/.env.example](/Users/bytedance/Desktop/python/Jarvis/backend/.env.example:1)
+- Feishu MCP sample env: [services/feishu_mcp_server/.env.example](/Users/bytedance/Desktop/python/Jarvis/services/feishu_mcp_server/.env.example:1)
+
+At minimum, set the same shared bearer token on both sides, then set your Feishu `app_id` and `app_secret` for the MCP server.
+
+### Run The Feishu MCP Server
+
+```bash
+./.venv/bin/python -m feishu_mcp_server.main
+```
+
+By default it serves:
+
+- `GET http://127.0.0.1:8765/health`
+- `POST http://127.0.0.1:8765/mcp`
+
+### Smoke Test The MCP Server
+
+```bash
+./.venv/bin/python services/feishu_mcp_server/scripts/smoke_mcp_http.py \
+  --base-url http://127.0.0.1:8765/mcp \
+  --token replace-with-same-shared-secret \
+  tools
+```
+
+More detail is in [services/feishu_mcp_server/README.md](/Users/bytedance/Desktop/python/Jarvis/services/feishu_mcp_server/README.md:1).
