@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -13,6 +14,7 @@ class FeishuDocServiceError(RuntimeError):
 
 
 def create_doc(arguments: dict[str, Any]) -> dict[str, Any]:
+    arguments = _normalize_arguments(arguments)
     title = str(arguments.get("title") or "").strip()
     if not title:
         raise FeishuDocServiceError("title is required.")
@@ -49,6 +51,7 @@ def create_doc(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def get_doc(arguments: dict[str, Any]) -> dict[str, Any]:
+    arguments = _normalize_arguments(arguments)
     document_id = resolve_document_id(arguments)
     payload = feishu_client.get_doc(document_id)
     document = _unwrap_document(payload)
@@ -62,6 +65,7 @@ def get_doc(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def read_doc(arguments: dict[str, Any]) -> dict[str, Any]:
+    arguments = _normalize_arguments(arguments)
     document_id = resolve_document_id(arguments)
     raw_blocks = list_all_blocks(document_id, max_blocks=int(arguments.get("max_blocks") or 0))
     doc_meta = get_doc(arguments)
@@ -77,6 +81,7 @@ def read_doc(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def append_doc(arguments: dict[str, Any]) -> dict[str, Any]:
+    arguments = _normalize_arguments(arguments)
     document_id = resolve_document_id(arguments)
     markdown = _resolve_markdown(arguments)
     converted = feishu_client.convert_markdown_to_blocks(markdown)
@@ -99,6 +104,7 @@ def append_doc(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def insert_after_heading(arguments: dict[str, Any]) -> dict[str, Any]:
+    arguments = _normalize_arguments(arguments)
     document_id = resolve_document_id(arguments)
     heading_query = str(arguments.get("heading_query") or "").strip()
     if not heading_query:
@@ -137,6 +143,7 @@ def insert_after_heading(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def replace_text(arguments: dict[str, Any]) -> dict[str, Any]:
+    arguments = _normalize_arguments(arguments)
     document_id = resolve_document_id(arguments)
     find_text = str(arguments.get("find_text") or "").strip()
     replace_with = str(arguments.get("replace_text") or "")
@@ -211,6 +218,7 @@ def replace_text(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def delete_blocks(arguments: dict[str, Any]) -> dict[str, Any]:
+    arguments = _normalize_arguments(arguments)
     document_id = resolve_document_id(arguments)
     heading_query = str(arguments.get("heading_query") or "").strip()
     confirm = bool(arguments.get("confirm", False))
@@ -280,6 +288,22 @@ def list_all_blocks(document_id: str, max_blocks: int = 0) -> list[dict[str, Any
         if not has_more or not page_token:
             break
     return all_blocks
+
+
+def _normalize_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    if "_raw" not in arguments:
+        return arguments
+    raw = arguments.get("_raw")
+    if not isinstance(raw, str) or not raw.strip():
+        return arguments
+    parsed = _parse_loose_json_object(raw)
+    if parsed is None:
+        return arguments
+    merged = dict(arguments)
+    merged.pop("_raw", None)
+    for key, value in parsed.items():
+        merged[key] = value
+    return merged
 
 
 def resolve_document_id(arguments: dict[str, Any]) -> str:
@@ -466,6 +490,34 @@ def _extract_revision_from_data(payload: dict[str, Any]) -> int | None:
 
 def _doc_url(document_id: str) -> str:
     return f"{settings.doc_base_url}/{document_id}"
+
+
+def _parse_loose_json_object(raw: str) -> dict[str, Any] | None:
+    candidate = raw.strip()
+    fence_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", candidate, flags=re.S)
+    if fence_match:
+        candidate = fence_match.group(1).strip()
+
+    direct = _try_parse_json_object(candidate)
+    if direct is not None:
+        return direct
+
+    start = candidate.find("{")
+    end = candidate.rfind("}")
+    if start != -1 and end != -1 and start < end:
+        sliced = candidate[start : end + 1]
+        parsed = _try_parse_json_object(sliced)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _try_parse_json_object(candidate: str) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(candidate)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _normalize_text(value: str) -> str:
