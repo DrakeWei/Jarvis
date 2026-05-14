@@ -539,6 +539,74 @@ textarea:focus-visible {
   background: var(--status);
 }
 
+.timeline-collapsible-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.94);
+  padding: 0;
+}
+
+.timeline-collapsible-card details,
+.summary-collapsible {
+  display: grid;
+  gap: 10px;
+}
+
+.timeline-collapsible-card summary,
+.summary-collapsible summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.timeline-collapsible-card summary::-webkit-details-marker,
+.summary-collapsible summary::-webkit-details-marker {
+  display: none;
+}
+
+.timeline-collapsible-card summary {
+  padding: 10px 12px;
+}
+
+.summary-collapsible summary {
+  color: var(--text-soft);
+  line-height: 1.6;
+}
+
+.timeline-collapse-stamp {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.grouped-activity-list {
+  display: grid;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.grouped-activity-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  color: var(--text-soft);
+  font-size: 0.84rem;
+}
+
+.grouped-activity-row span {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.grouped-activity-row p {
+  margin: 0;
+  line-height: 1.5;
+}
+
 .timeline-meta {
   color: var(--text-muted);
 }

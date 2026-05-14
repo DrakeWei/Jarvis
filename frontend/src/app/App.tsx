@@ -36,7 +36,9 @@ import {
 
 const ACTIVE_SESSION_KEY = "jarvis.activeSession";
 const DRAFT_SESSION_PREFIX = "draft:";
+const DISPLAY_LOCALE = "zh-CN";
 const DISPLAY_TIME_ZONE = "Asia/Shanghai";
+const DISPLAY_TIME_ZONE_LABEL = "UTC+8";
 const APP_LOGO_SRC = new URL("../assets/app-logo.png", import.meta.url).href;
 const WORKBENCH_TABS = [
   { id: "tasks", label: "Tasks" },
@@ -75,14 +77,37 @@ type TimelineCard = {
   content: string;
 };
 
+type TimelineRenderItem =
+  | {
+      kind: "single";
+      key: string;
+      event: TimelineEvent;
+      card: TimelineCard;
+    }
+  | {
+      kind: "tool-group";
+      key: string;
+      events: TimelineEvent[];
+    };
+
+const sessionStampFormatter = new Intl.DateTimeFormat(DISPLAY_LOCALE, {
+  timeZone: DISPLAY_TIME_ZONE,
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+const timelineStampFormatter = new Intl.DateTimeFormat(DISPLAY_LOCALE, {
+  timeZone: DISPLAY_TIME_ZONE,
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
 function formatSessionStamp(timestamp: string): string {
-  return new Date(timestamp).toLocaleString(undefined, {
-    timeZone: DISPLAY_TIME_ZONE,
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  return `${sessionStampFormatter.format(new Date(timestamp))} ${DISPLAY_TIME_ZONE_LABEL}`;
 }
 
 function sortSessionsByActivity<T extends { updated_at: string; created_at: string }>(items: T[]): T[] {
@@ -111,11 +136,13 @@ function touchSession<T extends { session_id: string; title: string; updated_at:
 }
 
 function formatTimelineStamp(timestamp: string): string {
-  return new Date(timestamp).toLocaleTimeString(undefined, {
-    timeZone: DISPLAY_TIME_ZONE,
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  return `${timelineStampFormatter.format(new Date(timestamp))} ${DISPLAY_TIME_ZONE_LABEL}`;
+}
+
+function previewText(content: string, maxLength = 180): string {
+  const text = content.trim().replace(/\s+/g, " ");
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}…`;
 }
 
 function summarizeExecution(content: string): string {
@@ -256,6 +283,49 @@ function buildTimelineCard(event: TimelineEvent): TimelineCard {
   };
 }
 
+function groupTimelineItems(
+  entries: Array<{ event: TimelineEvent; card: TimelineCard }>,
+): TimelineRenderItem[] {
+  const grouped: TimelineRenderItem[] = [];
+  let index = 0;
+  while (index < entries.length) {
+    const current = entries[index];
+    if (current.event.type !== "tool.execution") {
+      grouped.push({
+        kind: "single",
+        key: `${current.event.created_at}-${index}`,
+        event: current.event,
+        card: current.card,
+      });
+      index += 1;
+      continue;
+    }
+
+    const toolEvents = [current.event];
+    let cursor = index + 1;
+    while (cursor < entries.length && entries[cursor].event.type === "tool.execution") {
+      toolEvents.push(entries[cursor].event);
+      cursor += 1;
+    }
+    if (toolEvents.length === 1) {
+      grouped.push({
+        kind: "single",
+        key: `${current.event.created_at}-${index}`,
+        event: current.event,
+        card: current.card,
+      });
+    } else {
+      grouped.push({
+        kind: "tool-group",
+        key: `${toolEvents[0].created_at}-${toolEvents.length}-${index}`,
+        events: toolEvents,
+      });
+    }
+    index = cursor;
+  }
+  return grouped;
+}
+
 function nextSessionTitle(): string {
   return "New Session";
 }
@@ -267,7 +337,7 @@ export function App() {
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
   const [teammates, setTeammates] = useState<TeammateSummary[]>([]);
   const [subagents, setSubagents] = useState<SubagentSummary[]>([]);
-  const [subagentDraft, setSubagentDraft] = useState("Scan the workspace and summarize the next technical priorities.");
+  const [subagentDraft, setSubagentDraft] = useState("Investigate the current workspace, collect evidence, and return a concise summary with the next technical actions.");
   const [selectedTeammateId, setSelectedTeammateId] = useState<number | null>(null);
   const [teammateMessages, setTeammateMessages] = useState<TeammateMessageSummary[]>([]);
   const [teammateDraft, setTeammateDraft] = useState("Review the latest runtime activity.");
@@ -795,7 +865,10 @@ export function App() {
         },
       }
     : null;
-  const timelineItems = [...timelineCards, ...(liveAssistantCard ? [liveAssistantCard] : [])];
+  const timelineItems = groupTimelineItems([
+    ...timelineCards,
+    ...(liveAssistantCard ? [liveAssistantCard] : []),
+  ]);
   const activeSessionStamp = activeSession ? formatSessionStamp(activeSession.updated_at ?? activeSession.created_at) : null;
   const statusRailCards: Array<{
     tab: WorkbenchTabId;
@@ -962,7 +1035,7 @@ export function App() {
               <p className="micro-label">Parallel Work</p>
               <h3>Subagents</h3>
             </div>
-            <button type="button" className="secondary-button" onClick={onRunSubagent}>Run explorer</button>
+            <button type="button" className="secondary-button" onClick={onRunSubagent}>Run subagent</button>
           </div>
           <textarea
             value={subagentDraft}
@@ -1171,43 +1244,81 @@ export function App() {
           ) : (
             <div className="conversation-frame">
               <div className="timeline-stream" ref={timelineRef} onScroll={onTimelineScroll}>
-                {timelineItems.map(({ event, card }, index) => (
-                  <article
-                    key={`${event.created_at}-${index}`}
-                    className={
-                      card.layout === "inline"
-                        ? `timeline-inline-row ${card.tone}`
-                        : `timeline-card ${card.kind} ${card.tone}`
-                    }
-                  >
-                    {card.layout === "inline" ? (
-                      <>
-                        <div className="timeline-inline-meta">
-                          <span>{card.label}</span>
-                          <span>{formatTimelineStamp(event.created_at)}</span>
-                        </div>
-                        <p>{card.content}</p>
-                      </>
-                    ) : (
-                      <>
-                        <div className="timeline-meta">
-                          <span className="mini-pill">{card.label}</span>
-                          <span>{formatTimelineStamp(event.created_at)}</span>
-                        </div>
-                        <h3>{card.title}</h3>
-                        {card.tone === "assistant" ? (
-                          <div className="markdown-body">
-                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                              {card.content}
-                            </ReactMarkdown>
+                {timelineItems.map((item) => {
+                  if (item.kind === "tool-group") {
+                    const startedAt = item.events[0]?.created_at ?? "";
+                    return (
+                      <article key={item.key} className="timeline-collapsible-card status">
+                        <details>
+                          <summary>
+                            <div className="timeline-inline-meta">
+                              <span>Tool Activity</span>
+                              <span>{item.events.length} events</span>
+                            </div>
+                            <span className="timeline-collapse-stamp">{formatTimelineStamp(startedAt)}</span>
+                          </summary>
+                          <div className="grouped-activity-list">
+                            {item.events.map((event, index) => (
+                              <div key={`${event.created_at}-${index}`} className="grouped-activity-row">
+                                <span>{formatTimelineStamp(event.created_at)}</span>
+                                <p>{summarizeExecution(event.content)}</p>
+                              </div>
+                            ))}
                           </div>
-                        ) : (
+                        </details>
+                      </article>
+                    );
+                  }
+
+                  const { event, card } = item;
+                  const isSubagentSummary = event.type === "subagent.summary";
+                  return (
+                    <article
+                      key={item.key}
+                      className={
+                        card.layout === "inline"
+                          ? `timeline-inline-row ${card.tone}`
+                          : `timeline-card ${card.kind} ${card.tone}`
+                      }
+                    >
+                      {card.layout === "inline" ? (
+                        <>
+                          <div className="timeline-inline-meta">
+                            <span>{card.label}</span>
+                            <span>{formatTimelineStamp(event.created_at)}</span>
+                          </div>
                           <p>{card.content}</p>
-                        )}
-                      </>
-                    )}
-                  </article>
-                ))}
+                        </>
+                      ) : (
+                        <>
+                          <div className="timeline-meta">
+                            <span className="mini-pill">{card.label}</span>
+                            <span>{formatTimelineStamp(event.created_at)}</span>
+                          </div>
+                          <h3>{card.title}</h3>
+                          {isSubagentSummary ? (
+                            <details className="summary-collapsible">
+                              <summary>{previewText(card.content)}</summary>
+                              <div className="markdown-body">
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                  {card.content}
+                                </ReactMarkdown>
+                              </div>
+                            </details>
+                          ) : card.tone === "assistant" ? (
+                            <div className="markdown-body">
+                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                {card.content}
+                              </ReactMarkdown>
+                            </div>
+                          ) : (
+                            <p>{card.content}</p>
+                          )}
+                        </>
+                      )}
+                    </article>
+                  );
+                })}
                 {!timelineItems.length ? (
                   <div className="empty-state compact-state">
                     <p className="micro-label">Ready</p>

@@ -93,6 +93,8 @@ class Settings:
         self.jarvis_mcp_feishu_bearer_token = os.getenv("JARVIS_MCP_FEISHU_BEARER_TOKEN", "").strip()
         self.jarvis_mcp_feishu_timeout_ms = int(os.getenv("JARVIS_MCP_FEISHU_TIMEOUT_MS", "10000"))
         self.jarvis_mcp_cache_ttl_seconds = float(os.getenv("JARVIS_MCP_CACHE_TTL_SECONDS", "15"))
+        self.jarvis_agent_iteration_limit = int(os.getenv("JARVIS_AGENT_ITERATION_LIMIT", "24"))
+        self.jarvis_subagent_iteration_limit = int(os.getenv("JARVIS_SUBAGENT_ITERATION_LIMIT", "18"))
 
     def _load_codex_config(self) -> dict[str, object]:
         config_path = Path.home() / ".codex" / "config.toml"

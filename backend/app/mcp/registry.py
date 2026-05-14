@@ -125,7 +125,7 @@ def local_tool_definitions(*, allow_subagent_tool: bool = True) -> list[ToolDefi
         tools.append(
             ToolDefinition(
                 name="run_subagent",
-                description="Run a bounded subagent and return its summary.",
+                description="Delegate a bounded investigation or implementation subtask to a subagent. Use this for complex tasks, long investigations, or independent subproblems. The subagent returns a written summary of what it found or changed.",
                 input_schema={
                     "type": "object",
                     "properties": {

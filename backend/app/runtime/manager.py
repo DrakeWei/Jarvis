@@ -422,7 +422,7 @@ class RuntimeManager:
             },
             {
                 "name": "run_subagent",
-                "description": "Run a bounded subagent and return its summary.",
+                "description": "Delegate a bounded investigation or implementation subtask to a subagent. Use this for complex tasks, long investigations, or independent subproblems. The subagent returns a written summary of what it found or changed.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -731,6 +731,7 @@ class RuntimeManager:
                 "You may answer directly when no tool is needed, but you should decide for yourself whether tools are necessary.",
                 "When the user asks about files, directories, paths, project structure, README contents, code contents, or workspace state, inspect the workspace with tools first instead of guessing.",
                 "When the user asks you to create or modify files, do the work directly inside the target workspace when it is safe.",
+                "For complex tasks, large investigations, or multiple mostly-independent subproblems, you should proactively use run_subagent to delegate bounded side work and then integrate the result.",
                 "If the user explicitly writes command-like instructions such as `read ...`, `write ...`, `edit ...`, or `bash: ...`, treat them as direct tool intents.",
                 "Do not ask the user to type explicit tool commands such as read or bash just because you need workspace facts.",
                 "Use bash only when necessary; bash requires approval before execution.",
@@ -749,7 +750,7 @@ class RuntimeManager:
                 "You may use tools to inspect or modify the workspace when needed.",
                 "You must not spawn subagents.",
                 "You should be concise and execution-focused.",
-                "Return a useful summary of what you found or changed.",
+                "Return a useful summary of what you found or changed. Keep it focused on the outcome, key evidence, and any remaining blocker.",
             ]
         )
 
@@ -857,7 +858,13 @@ class RuntimeManager:
             else self._build_agent_system_prompt(workspace)
         )
 
-        for _ in range(10):
+        iteration_limit = (
+            settings.jarvis_subagent_iteration_limit
+            if agent_kind == "subagent"
+            else settings.jarvis_agent_iteration_limit
+        )
+
+        for _ in range(iteration_limit):
             if cancel_event.is_set():
                 raise TurnCancelled
             streamed_blocks = await self._stream_agent_response(
@@ -953,7 +960,7 @@ class RuntimeManager:
                 )
             messages.append({"role": "user", "content": results})
 
-        return "任务执行达到了安全迭代上限，我先停在这里。你可以让我继续，或告诉我希望收敛到哪一步。"
+        return f"任务执行达到了安全迭代上限（{iteration_limit} 轮），我先停在这里。你可以让我继续，或告诉我希望收敛到哪一步。"
 
     async def _queue_bash_approval(
         self,
