@@ -32,8 +32,8 @@ TOOL_DEFINITIONS.extend(
                 "properties": {
                     "title": {"type": "string"},
                     "folder_token": {"type": "string"},
-                    "initial_blocks": {"type": "array"},
-                    "share_with": {"type": "array"},
+                    "initial_blocks": {"type": "array", "items": {"type": "object"}},
+                    "share_with": {"type": "array", "items": {"type": "object"}},
                 },
                 "required": ["title"],
             },
@@ -241,7 +241,7 @@ TOOL_DEFINITIONS.extend(
                     "document_id": {"type": "string"},
                     "document_url": {"type": "string"},
                     "heading_query": {"type": "string"},
-                    "block_refs": {"type": "array"},
+                    "block_refs": {"type": "array", "items": {"type": "object"}},
                 },
             },
         },
@@ -253,30 +253,31 @@ TOOL_DEFINITIONS.extend(
         {
             "name": "feishu_doc_append",
             "title": "Append Feishu Doc Content",
-            "description": "Append text-like blocks to the end of a Feishu upgraded doc.",
+            "description": "Append content to the end of a Feishu upgraded doc. Prefer passing content as a simple string when possible.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "document_id": {"type": "string"},
                     "document_url": {"type": "string"},
-                    "blocks": {"type": "array"},
+                    "content": {"type": "string"},
+                    "blocks": {"type": "array", "items": {"type": "object"}},
                 },
-                "required": ["blocks"],
             },
         },
         {
             "name": "feishu_doc_insert_after_heading",
             "title": "Insert Content After Heading",
-            "description": "Insert content after a matched heading inside a Feishu upgraded doc.",
+            "description": "Insert content after a matched heading inside a Feishu upgraded doc. Prefer passing content as a simple string when possible.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "document_id": {"type": "string"},
                     "document_url": {"type": "string"},
                     "heading_query": {"type": "string"},
-                    "blocks": {"type": "array"},
+                    "content": {"type": "string"},
+                    "blocks": {"type": "array", "items": {"type": "object"}},
                 },
-                "required": ["heading_query", "blocks"],
+                "required": ["heading_query"],
             },
         },
     ]

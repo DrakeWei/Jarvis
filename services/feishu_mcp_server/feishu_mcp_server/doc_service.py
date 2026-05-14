@@ -78,8 +78,7 @@ def read_doc(arguments: dict[str, Any]) -> dict[str, Any]:
 
 def append_doc(arguments: dict[str, Any]) -> dict[str, Any]:
     document_id = resolve_document_id(arguments)
-    blocks = _require_blocks(arguments)
-    markdown = render_markdown(blocks)
+    markdown = _resolve_markdown(arguments)
     converted = feishu_client.convert_markdown_to_blocks(markdown)
     converted_data = _unwrap_data(converted)
     children_id, descendants = _converted_descendants(converted_data)
@@ -104,7 +103,6 @@ def insert_after_heading(arguments: dict[str, Any]) -> dict[str, Any]:
     heading_query = str(arguments.get("heading_query") or "").strip()
     if not heading_query:
         raise FeishuDocServiceError("heading_query is required.")
-    blocks = _require_blocks(arguments)
     raw_blocks = list_all_blocks(document_id)
     parsed = linearize_blocks(raw_blocks)
     heading = _match_heading(parsed.get("blocks", []), heading_query, document_id=document_id)
@@ -118,7 +116,7 @@ def insert_after_heading(arguments: dict[str, Any]) -> dict[str, Any]:
     if heading_index < 0:
         raise FeishuDocServiceError("Unable to determine insertion index for the matched heading.")
 
-    markdown = render_markdown(blocks)
+    markdown = _resolve_markdown(arguments)
     converted = feishu_client.convert_markdown_to_blocks(markdown)
     converted_data = _unwrap_data(converted)
     children_id, descendants = _converted_descendants(converted_data)
@@ -280,6 +278,16 @@ def _require_blocks(arguments: dict[str, Any]) -> list[Any]:
     if not isinstance(blocks, list) or not blocks:
         raise FeishuDocServiceError("blocks is required and must be a non-empty array.")
     return blocks
+
+
+def _resolve_markdown(arguments: dict[str, Any]) -> str:
+    content = arguments.get("content")
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    blocks = arguments.get("blocks")
+    if isinstance(blocks, list) and blocks:
+        return render_markdown(blocks)
+    raise FeishuDocServiceError("Either content or blocks is required.")
 
 
 def _share_targets(arguments: dict[str, Any]) -> list[dict[str, Any]]:
