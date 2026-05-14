@@ -4,6 +4,32 @@ import tomllib
 from pathlib import Path
 
 
+def _load_dotenv_file(path: Path) -> None:
+    if not path.exists() or not path.is_file():
+        return
+    try:
+        lines = path.read_text().splitlines()
+    except Exception:
+        return
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or key in os.environ:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ[key] = value
+
+
+def _load_local_env(project_root: Path) -> None:
+    _load_dotenv_file(project_root / ".env")
+    _load_dotenv_file(project_root / "backend" / ".env")
+
+
 def _as_str(value: object) -> str:
     return str(value).strip() if value is not None else ""
 
@@ -28,6 +54,7 @@ def _env_json_map(name: str) -> dict[str, str]:
 class Settings:
     def __init__(self) -> None:
         root = Path(__file__).resolve().parents[3]
+        _load_local_env(root)
         self.project_root = root
         self.data_dir = root / "data"
         self.database_url = os.getenv(
@@ -61,6 +88,13 @@ class Settings:
             self.codex_provider_config.get("http_headers")
         )
         self.llm_max_tokens = int(os.getenv("JARVIS_LLM_MAX_TOKENS", "1200"))
+        self.jarvis_mcp_feishu_enabled = os.getenv("JARVIS_MCP_FEISHU_ENABLED", "").strip() in {"1", "true", "TRUE", "yes", "YES"}
+        self.jarvis_mcp_feishu_base_url = os.getenv("JARVIS_MCP_FEISHU_BASE_URL", "").strip()
+        self.jarvis_mcp_feishu_bearer_token = os.getenv("JARVIS_MCP_FEISHU_BEARER_TOKEN", "").strip()
+        self.jarvis_mcp_feishu_timeout_ms = int(os.getenv("JARVIS_MCP_FEISHU_TIMEOUT_MS", "10000"))
+        self.jarvis_mcp_cache_ttl_seconds = float(os.getenv("JARVIS_MCP_CACHE_TTL_SECONDS", "15"))
+        self.jarvis_agent_iteration_limit = int(os.getenv("JARVIS_AGENT_ITERATION_LIMIT", "24"))
+        self.jarvis_subagent_iteration_limit = int(os.getenv("JARVIS_SUBAGENT_ITERATION_LIMIT", "18"))
 
     def _load_codex_config(self) -> dict[str, object]:
         config_path = Path.home() / ".codex" / "config.toml"

@@ -14,6 +14,7 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, futu
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _migrate_session_columns()
+    _migrate_tool_execution_columns()
 
 
 def create_session():
@@ -29,3 +30,26 @@ def _migrate_session_columns() -> None:
     if "hidden" not in columns:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE sessions ADD COLUMN hidden BOOLEAN NOT NULL DEFAULT 0"))
+
+
+def _migrate_tool_execution_columns() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("tool_executions")}
+    except Exception:
+        return
+
+    statements: list[str] = []
+    if "tool_source" not in columns:
+        statements.append("ALTER TABLE tool_executions ADD COLUMN tool_source VARCHAR(20) NOT NULL DEFAULT 'local'")
+    if "server_name" not in columns:
+        statements.append("ALTER TABLE tool_executions ADD COLUMN server_name VARCHAR(80)")
+    if "latency_ms" not in columns:
+        statements.append("ALTER TABLE tool_executions ADD COLUMN latency_ms INTEGER")
+    if "remote_request_id" not in columns:
+        statements.append("ALTER TABLE tool_executions ADD COLUMN remote_request_id VARCHAR(80)")
+
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))

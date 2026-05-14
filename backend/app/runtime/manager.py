@@ -1,10 +1,12 @@
 import asyncio
 import re
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.config import settings
+from app.mcp import ToolDefinition, ToolExecutionResult, tool_registry
 from app.providers import ProviderConfigError, ProviderRequestError, TextBlock, ToolUseBlock, create_client
 from app.schemas.events import MessageCreate, SessionCreate, SessionSummary, TimelineEvent
 from app.schemas.subagents import SubagentRunCreate
@@ -420,7 +422,7 @@ class RuntimeManager:
             },
             {
                 "name": "run_subagent",
-                "description": "Run a bounded subagent and return its summary.",
+                "description": "Delegate a bounded investigation or implementation subtask to a subagent. Use this for complex tasks, long investigations, or independent subproblems. The subagent returns a written summary of what it found or changed.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -458,6 +460,19 @@ class RuntimeManager:
         if not allow_subagent_tool:
             schemas = [schema for schema in schemas if schema["name"] != "run_subagent"]
         return schemas
+
+    async def _autonomous_tool_definitions(self, *, allow_subagent_tool: bool = True) -> list[ToolDefinition]:
+        return await tool_registry.list_tools(allow_subagent_tool=allow_subagent_tool)
+
+    def _tool_schemas_from_definitions(self, definitions: list[ToolDefinition]) -> list[dict[str, object]]:
+        return [
+            {
+                "name": definition.name,
+                "description": definition.description,
+                "input_schema": definition.input_schema,
+            }
+            for definition in definitions
+        ]
 
     def _should_autoname_session(self, session_id: str) -> bool:
         session = session_service.get_session(session_id)
@@ -668,6 +683,26 @@ class RuntimeManager:
             return "completed", result["reply"].content
         return "error", f"Unknown tool '{tool_name}'"
 
+    async def _execute_tool_definition(
+        self,
+        *,
+        session_id: str,
+        tool: ToolDefinition,
+        tool_input: dict[str, object],
+        broker_for_workspace: ToolBroker,
+    ) -> ToolExecutionResult | None:
+        if tool.name == "bash":
+            return None
+        if tool.source == "mcp":
+            return await tool_registry.call_tool(tool, tool_input)
+        status, output = await self._execute_autonomous_tool(
+            session_id=session_id,
+            tool_name=tool.name,
+            tool_input=tool_input,
+            broker_for_workspace=broker_for_workspace,
+        ) or ("error", f"Tool '{tool.name}' returned no execution result.")
+        return ToolExecutionResult(status=status, output=output)
+
     async def _publish_assistant_reply(self, session_id: str, reply: str) -> None:
         text = reply.strip() or "LLM provider returned no text output."
         for chunk in self._chunk_text(text):
@@ -696,6 +731,7 @@ class RuntimeManager:
                 "You may answer directly when no tool is needed, but you should decide for yourself whether tools are necessary.",
                 "When the user asks about files, directories, paths, project structure, README contents, code contents, or workspace state, inspect the workspace with tools first instead of guessing.",
                 "When the user asks you to create or modify files, do the work directly inside the target workspace when it is safe.",
+                "For complex tasks, large investigations, or multiple mostly-independent subproblems, you should proactively use run_subagent to delegate bounded side work and then integrate the result.",
                 "If the user explicitly writes command-like instructions such as `read ...`, `write ...`, `edit ...`, or `bash: ...`, treat them as direct tool intents.",
                 "Do not ask the user to type explicit tool commands such as read or bash just because you need workspace facts.",
                 "Use bash only when necessary; bash requires approval before execution.",
@@ -714,7 +750,7 @@ class RuntimeManager:
                 "You may use tools to inspect or modify the workspace when needed.",
                 "You must not spawn subagents.",
                 "You should be concise and execution-focused.",
-                "Return a useful summary of what you found or changed.",
+                "Return a useful summary of what you found or changed. Keep it focused on the outcome, key evidence, and any remaining blocker.",
             ]
         )
 
@@ -812,7 +848,9 @@ class RuntimeManager:
         emit_stream_events: bool = True,
     ) -> str:
         client = create_client()
-        tools = self._autonomous_tool_schemas(allow_subagent_tool=allow_subagent_tool)
+        tool_definitions = await self._autonomous_tool_definitions(allow_subagent_tool=allow_subagent_tool)
+        tools = self._tool_schemas_from_definitions(tool_definitions)
+        tool_map = {tool.name: tool for tool in tool_definitions}
         broker_for_workspace = ToolBroker(workspace)
         system_prompt = (
             self._build_subagent_system_prompt(workspace)
@@ -820,7 +858,13 @@ class RuntimeManager:
             else self._build_agent_system_prompt(workspace)
         )
 
-        for _ in range(10):
+        iteration_limit = (
+            settings.jarvis_subagent_iteration_limit
+            if agent_kind == "subagent"
+            else settings.jarvis_agent_iteration_limit
+        )
+
+        for _ in range(iteration_limit):
             if cancel_event.is_set():
                 raise TurnCancelled
             streamed_blocks = await self._stream_agent_response(
@@ -846,7 +890,28 @@ class RuntimeManager:
 
             results: list[dict[str, str]] = []
             for block in tool_calls:
-                if block.name == "bash":
+                tool_definition = tool_map.get(block.name)
+                if tool_definition is None:
+                    output = f"Unknown tool '{block.name}'"
+                    tool_service.create_tool_execution(
+                        session_id=session_id,
+                        tool_name=block.name,
+                        tool_source="local",
+                        server_name=None,
+                        status="error",
+                        input_json=broker_for_workspace.serialize_input(block.input),
+                        output_text=output,
+                    )
+                    results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": output,
+                        }
+                    )
+                    continue
+
+                if tool_definition.name == "bash":
                     return await self._queue_bash_approval(
                         session_id,
                         workspace,
@@ -858,40 +923,44 @@ class RuntimeManager:
                         emit_stream_events=emit_stream_events,
                     )
 
-                executed = await self._execute_autonomous_tool(
+                started_at = time.perf_counter()
+                executed = await self._execute_tool_definition(
                     session_id=session_id,
-                    tool_name=block.name,
+                    tool=tool_definition,
                     tool_input=block.input,
                     broker_for_workspace=broker_for_workspace,
                 )
                 if executed is None:
                     return await self._queue_bash_approval(session_id, workspace, messages, block.id, block.input)
-
-                status, output = executed
+                latency_ms = int((time.perf_counter() - started_at) * 1000)
                 tool_service.create_tool_execution(
                     session_id=session_id,
-                    tool_name=block.name,
-                    status=status,
+                    tool_name=tool_definition.name,
+                    tool_source=tool_definition.source,
+                    server_name=tool_definition.server_name,
+                    status=executed.status,
                     input_json=broker_for_workspace.serialize_input(block.input),
-                    output_text=output,
+                    output_text=executed.output,
+                    latency_ms=latency_ms,
+                    remote_request_id=executed.remote_request_id,
                 )
                 await self.publish(
                     TimelineEvent(
                         session_id=session_id,
                         type="tool.execution",
-                        content=f"{block.name} -> {status}",
+                        content=f"{tool_definition.name} -> {executed.status}",
                     )
                 )
                 results.append(
                     {
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": output,
+                        "content": executed.output,
                     }
                 )
             messages.append({"role": "user", "content": results})
 
-        return "任务执行达到了安全迭代上限，我先停在这里。你可以让我继续，或告诉我希望收敛到哪一步。"
+        return f"任务执行达到了安全迭代上限（{iteration_limit} 轮），我先停在这里。你可以让我继续，或告诉我希望收敛到哪一步。"
 
     async def _queue_bash_approval(
         self,
@@ -957,6 +1026,8 @@ class RuntimeManager:
         tool_service.create_tool_execution(
             session_id=session_id,
             tool_name=tool_name,
+            tool_source="local",
+            server_name=None,
             status=status,
             input_json=broker_for_workspace.serialize_input(tool_input),
             output_text=output,

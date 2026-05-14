@@ -42,9 +42,13 @@ class ToolExecutionRecord(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
     tool_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    tool_source: Mapped[str] = mapped_column(String(20), default="local", nullable=False)
+    server_name: Mapped[str | None] = mapped_column(String(80))
     status: Mapped[str] = mapped_column(String(40), default="pending", nullable=False)
     input_json: Mapped[str | None] = mapped_column(Text)
     output_text: Mapped[str | None] = mapped_column(Text)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    remote_request_id: Mapped[str | None] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
