@@ -69,6 +69,11 @@ export type ToolExecutionSummary = {
   created_at: string;
 };
 
+export type SkillSummary = {
+  name: string;
+  path: string;
+};
+
 const API_BASE = "http://127.0.0.1:8731/api";
 
 export async function fetchBootstrap(): Promise<{
@@ -84,6 +89,14 @@ export async function fetchBootstrap(): Promise<{
   const response = await fetch(`${API_BASE}/bootstrap`);
   if (!response.ok) {
     throw new Error("Failed to load bootstrap state");
+  }
+  return response.json();
+}
+
+export async function fetchSkills(): Promise<SkillSummary[]> {
+  const response = await fetch(`${API_BASE}/skills`);
+  if (!response.ok) {
+    throw new Error("Failed to load skills");
   }
   return response.json();
 }
@@ -110,6 +123,29 @@ export async function fetchSessions(): Promise<SessionSummary[]> {
   return response.json();
 }
 
+export async function renameSession(sessionId: string, title: string): Promise<SessionSummary> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ title }),
+  });
+  if (!response.ok) {
+    throw new Error("Failed to rename session");
+  }
+  return response.json();
+}
+
+export async function deleteSession(sessionId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    throw new Error("Failed to delete session");
+  }
+}
+
 export async function sendMessage(
   sessionId: string,
   content: string,
@@ -127,6 +163,17 @@ export async function sendMessage(
   if (!response.ok) {
     throw new Error("Failed to send message");
   }
+}
+
+export async function stopSessionTurn(sessionId: string): Promise<boolean> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/stop`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error("Failed to stop session turn");
+  }
+  const payload = await response.json();
+  return Boolean(payload.stopped);
 }
 
 export async function fetchTimeline(sessionId: string): Promise<TimelineEvent[]> {
@@ -300,11 +347,19 @@ export function openSessionEvents(
   },
 ): () => void {
   const socket = new WebSocket(`ws://127.0.0.1:8731/api/sessions/${sessionId}/events`);
+  let manuallyClosed = false;
   socket.onopen = () => handlers?.onOpen?.();
   socket.onmessage = (message) => {
     onEvent(JSON.parse(message.data) as TimelineEvent);
   };
   socket.onerror = () => handlers?.onError?.();
-  socket.onclose = () => handlers?.onClose?.();
-  return () => socket.close();
+  socket.onclose = () => {
+    if (!manuallyClosed) {
+      handlers?.onClose?.();
+    }
+  };
+  return () => {
+    manuallyClosed = true;
+    socket.close();
+  };
 }

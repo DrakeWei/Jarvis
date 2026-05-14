@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 
 from app.schemas.approvals import ApprovalDecision
-from app.schemas.events import MessageCreate, SessionCreate
+from app.schemas.events import MessageCreate, SessionCreate, SessionRename
 from app.schemas.subagents import SubagentRunCreate
 from app.schemas.tasks import TaskCreate
 from app.schemas.teammates import TeammateCreate, TeammateMessageCreate
@@ -30,6 +30,11 @@ async def bootstrap() -> dict[str, object]:
     }
 
 
+@router.get("/skills")
+async def list_skills():
+    return runtime.list_local_skills()
+
+
 @router.post("/sessions")
 async def create_session(payload: SessionCreate):
     return await runtime.create_session(payload)
@@ -38,6 +43,22 @@ async def create_session(payload: SessionCreate):
 @router.get("/sessions")
 async def list_sessions():
     return runtime.list_sessions()
+
+
+@router.patch("/sessions/{session_id}")
+async def rename_session(session_id: str, payload: SessionRename):
+    result = await runtime.rename_session(session_id, payload.title)
+    if not result:
+        raise HTTPException(status_code=404, detail="Unknown session")
+    return result
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_session(session_id: str) -> dict[str, bool]:
+    deleted = await runtime.soft_delete_session(session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Unknown session")
+    return {"deleted": True}
 
 
 @router.get("/sessions/{session_id}/timeline")
@@ -53,6 +74,14 @@ async def post_message(session_id: str, payload: MessageCreate) -> dict[str, str
         raise HTTPException(status_code=404, detail="Unknown session")
     await runtime.append_message(session_id, payload)
     return {"status": "accepted"}
+
+
+@router.post("/sessions/{session_id}/stop")
+async def stop_session_turn(session_id: str) -> dict[str, bool]:
+    if not runtime.session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Unknown session")
+    stopped = await runtime.cancel_session_turn(session_id)
+    return {"stopped": stopped}
 
 
 @router.get("/tasks")

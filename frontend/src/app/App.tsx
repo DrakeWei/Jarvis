@@ -10,17 +10,22 @@ import {
   fetchApprovals,
   fetchBootstrap,
   fetchSessions,
+  fetchSkills,
   fetchSubagents,
   fetchTeammateMessages,
   fetchTeammates,
   fetchTimeline,
   fetchToolExecutions,
   openSessionEvents,
+  renameSession,
   runSubagent,
   sendMessage,
   sendTeammateMessage,
+  stopSessionTurn,
+  deleteSession,
   type ApprovalSummary,
   type SessionSummary,
+  type SkillSummary,
   type SubagentSummary,
   type TaskSummary,
   type TeammateMessageSummary,
@@ -31,6 +36,8 @@ import {
 
 const ACTIVE_SESSION_KEY = "jarvis.activeSession";
 const DRAFT_SESSION_PREFIX = "draft:";
+const DISPLAY_TIME_ZONE = "Asia/Shanghai";
+const APP_LOGO_SRC = new URL("../assets/app-logo.png", import.meta.url).href;
 const WORKBENCH_TABS = [
   { id: "tasks", label: "Tasks" },
   { id: "approvals", label: "Approvals" },
@@ -40,11 +47,29 @@ const WORKBENCH_TABS = [
 ] as const;
 
 type WorkbenchTabId = (typeof WORKBENCH_TABS)[number]["id"];
+type SidePanelMode = "workbench" | "skills";
 type SessionItem = SessionSummary & { isDraft?: boolean };
+type SessionContextMenuState = {
+  sessionId: string;
+  x: number;
+  y: number;
+} | null;
+type SessionDialogState =
+  | {
+      mode: "rename";
+      sessionId: string;
+      value: string;
+    }
+  | {
+      mode: "hide";
+      sessionId: string;
+    }
+  | null;
 
 type TimelineCard = {
   tone: "user" | "assistant" | "result" | "status";
   kind: "message" | "result" | "status";
+  layout?: "card" | "inline";
   label: string;
   title: string;
   content: string;
@@ -52,6 +77,7 @@ type TimelineCard = {
 
 function formatSessionStamp(timestamp: string): string {
   return new Date(timestamp).toLocaleString(undefined, {
+    timeZone: DISPLAY_TIME_ZONE,
     month: "short",
     day: "numeric",
     hour: "numeric",
@@ -86,6 +112,7 @@ function touchSession<T extends { session_id: string; title: string; updated_at:
 
 function formatTimelineStamp(timestamp: string): string {
   return new Date(timestamp).toLocaleTimeString(undefined, {
+    timeZone: DISPLAY_TIME_ZONE,
     hour: "numeric",
     minute: "2-digit",
   });
@@ -151,6 +178,7 @@ function buildTimelineCard(event: TimelineEvent): TimelineCard {
     return {
       tone: "status",
       kind: "status",
+      layout: "inline",
       label: "Tool Activity",
       title: "Execution summary",
       content: summarizeExecution(event.content),
@@ -161,6 +189,7 @@ function buildTimelineCard(event: TimelineEvent): TimelineCard {
     return {
       tone: "status",
       kind: "status",
+      layout: "inline",
       label: "Approval",
       title: "Approval requested",
       content: event.content,
@@ -171,6 +200,7 @@ function buildTimelineCard(event: TimelineEvent): TimelineCard {
     return {
       tone: "status",
       kind: "status",
+      layout: "inline",
       label: "Approval",
       title: "Approval resolved",
       content: event.content,
@@ -207,6 +237,16 @@ function buildTimelineCard(event: TimelineEvent): TimelineCard {
     };
   }
 
+  if (event.type === "turn.cancelled") {
+    return {
+      tone: "status",
+      kind: "status",
+      label: "Runtime",
+      title: "Turn stopped",
+      content: event.content,
+    };
+  }
+
   return {
     tone: "status",
     kind: "status",
@@ -218,34 +258,6 @@ function buildTimelineCard(event: TimelineEvent): TimelineCard {
 
 function nextSessionTitle(): string {
   return "New Session";
-}
-
-function summarizeSessionTitle(content: string): string {
-  let text = content.trim().replace(/\s+/g, " ");
-  if (!text) return "New Session";
-  const prefixes = [
-    "请帮我",
-    "帮我",
-    "麻烦",
-    "请",
-    "能不能",
-    "可以帮我",
-    "can you ",
-    "could you ",
-    "please ",
-    "help me ",
-  ];
-  for (const prefix of prefixes) {
-    if (text.toLowerCase().startsWith(prefix.toLowerCase())) {
-      text = text.slice(prefix.length).trim();
-      break;
-    }
-  }
-  text = text.replace(/^[\s.,!?:;，。！？：；"'()[\]{}]+|[\s.,!?:;，。！？：；"'()[\]{}]+$/g, "");
-  if (!text) return "New Session";
-  const hasCjk = /[\u4e00-\u9fff]/.test(text);
-  if (hasCjk) return text.slice(0, 14);
-  return text.split(" ").slice(0, 5).join(" ").slice(0, 36);
 }
 
 export function App() {
@@ -262,16 +274,21 @@ export function App() {
   const [approvals, setApprovals] = useState<ApprovalSummary[]>([]);
   const [executions, setExecutions] = useState<ToolExecutionSummary[]>([]);
   const [selectedExecutionId, setSelectedExecutionId] = useState<number | null>(null);
+  const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [draft, setDraft] = useState("");
   const [streamingBySession, setStreamingBySession] = useState<Record<string, { content: string; created_at: string } | null>>({});
   const [connectionState, setConnectionState] = useState("offline");
   const [bootstrapState, setBootstrapState] = useState("booting");
   const [sessionSearch, setSessionSearch] = useState("");
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
+  const [sidePanelMode, setSidePanelMode] = useState<SidePanelMode>("workbench");
   const [activeWorkbenchTab, setActiveWorkbenchTab] = useState<WorkbenchTabId>("approvals");
   const [autoScrollTimeline, setAutoScrollTimeline] = useState(true);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [sessionContextMenu, setSessionContextMenu] = useState<SessionContextMenuState>(null);
+  const [sessionDialog, setSessionDialog] = useState<SessionDialogState>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
+  const sessionContextMenuRef = useRef<HTMLDivElement | null>(null);
   const activeSessionRef = useRef("");
   const sessionSocketsRef = useRef<Record<string, () => void>>({});
 
@@ -426,6 +443,13 @@ export function App() {
           if (event.type === "message.assistant") {
             setStreamingBySession((current) => ({ ...current, [event.session_id]: null }));
           }
+          if (event.type === "turn.cancelled") {
+            setStreamingBySession((current) => ({ ...current, [event.session_id]: null }));
+          }
+          if (event.type === "session.renamed") {
+            setSessions((current) => touchSession(current, event.session_id, event.created_at, event.content));
+            return;
+          }
           setSessions((current) => touchSession(current, event.session_id, event.created_at));
           setEventsBySession((current) => {
             const sessionEvents = current[event.session_id] ?? [];
@@ -440,10 +464,11 @@ export function App() {
           if (
             event.type.startsWith("tool.") ||
             event.type.startsWith("approval.") ||
+            event.type.startsWith("task.") ||
             event.type.startsWith("teammate.") ||
             event.type.startsWith("subagent.")
           ) {
-            refreshSessionState(activeSessionId).catch(() => undefined);
+            refreshSessionState(event.session_id).catch(() => undefined);
           }
           if (event.type.startsWith("teammate.") && selectedTeammateId) {
             fetchTeammateMessages(selectedTeammateId).then(setTeammateMessages).catch(() => undefined);
@@ -476,15 +501,40 @@ export function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!sessionContextMenu) return;
+    const closeMenu = () => setSessionContextMenu(null);
+    const closeOnPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && sessionContextMenuRef.current?.contains(target)) return;
+      closeMenu();
+    };
+    const closeOnKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") closeMenu();
+    };
+    window.addEventListener("pointerdown", closeOnPointerDown);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("keydown", closeOnKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", closeOnPointerDown);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("keydown", closeOnKeyDown);
+    };
+  }, [sessionContextMenu]);
+
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
     await submitDraft();
   }
 
+  async function onStopTurn() {
+    if (!activeSessionId || !isActiveTurnRunning) return;
+    await stopSessionTurn(activeSessionId);
+  }
+
   async function submitDraft() {
-    if (!activeSessionId || !draft.trim()) return;
+    if (!activeSessionId || !draft.trim() || isActiveTurnRunning) return;
     const content = draft.trim();
-    const nextTitle = summarizeSessionTitle(content);
     const sourceSessionId = activeSessionId;
     const isDraftSession = sourceSessionId.startsWith(DRAFT_SESSION_PREFIX);
     let targetSessionId = sourceSessionId;
@@ -502,7 +552,6 @@ export function App() {
       current,
       sourceSessionId,
       optimisticCreatedAt,
-      current.find((session) => session.session_id === sourceSessionId)?.title?.startsWith("New Session") ? nextTitle : undefined,
     ));
     setEventsBySession((current) => ({
       ...current,
@@ -518,7 +567,7 @@ export function App() {
     }));
     try {
       if (isDraftSession) {
-        const created = await createSession(nextTitle);
+        const created = await createSession(nextSessionTitle());
         targetSessionId = created.session_id;
         setSessions((current) =>
           sortSessionsByActivity(
@@ -574,6 +623,59 @@ export function App() {
     setEventsBySession((current) => ({ ...current, [draftId]: [] }));
     setStreamingBySession((current) => ({ ...current, [draftId]: null }));
     setDraft("");
+  }
+
+  function onRenameSession(sessionId: string) {
+    const target = sessions.find((session) => session.session_id === sessionId);
+    if (!target) return;
+    setSessionContextMenu(null);
+    setSessionDialog({
+      mode: "rename",
+      sessionId,
+      value: target.title,
+    });
+  }
+
+  function onDeleteSession(sessionId: string) {
+    setSessionContextMenu(null);
+    setSessionDialog({
+      mode: "hide",
+      sessionId,
+    });
+  }
+
+  async function confirmSessionDialog() {
+    if (!sessionDialog) return;
+    if (sessionDialog.mode === "rename") {
+      const nextTitle = sessionDialog.value.trim();
+      const target = sessions.find((session) => session.session_id === sessionDialog.sessionId);
+      if (!target || !nextTitle || nextTitle === target.title) {
+        setSessionDialog(null);
+        return;
+      }
+      const updated = await renameSession(sessionDialog.sessionId, nextTitle);
+      setSessions((current) => touchSession(current, updated.session_id, updated.updated_at, updated.title));
+      setSessionDialog(null);
+      return;
+    }
+
+    await deleteSession(sessionDialog.sessionId);
+    const remaining = sessions.filter((session) => session.session_id !== sessionDialog.sessionId);
+    setSessions(remaining);
+    setEventsBySession((current) => {
+      const { [sessionDialog.sessionId]: _, ...rest } = current;
+      return rest;
+    });
+    setStreamingBySession((current) => {
+      const { [sessionDialog.sessionId]: _, ...rest } = current;
+      return rest;
+    });
+    if (activeSessionId === sessionDialog.sessionId) {
+      const nextActive = remaining[0]?.session_id ?? "";
+      setActiveSessionId(nextActive);
+      activeSessionRef.current = nextActive;
+    }
+    setSessionDialog(null);
   }
 
   async function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -639,6 +741,7 @@ export function App() {
 
   const events = eventsBySession[activeSessionId] ?? [];
   const streamingAssistant = streamingBySession[activeSessionId] ?? null;
+  const isActiveTurnRunning = Boolean(activeSessionId && streamingAssistant);
 
   useEffect(() => {
     if (!autoScrollTimeline || !timelineRef.current) return;
@@ -669,7 +772,7 @@ export function App() {
   const selectedExecution = executions.find((item) => item.id === selectedExecutionId) ?? null;
   const selectedTeammate = teammates.find((item) => item.id === selectedTeammateId) ?? null;
   const timelineCards = events
-    .filter((event) => event.type !== "runtime.state")
+    .filter((event) => event.type !== "runtime.state" && event.type !== "session.renamed")
     .map((event) => ({
       event,
       card: buildTimelineCard(event),
@@ -685,12 +788,64 @@ export function App() {
         card: {
           tone: "assistant" as const,
           kind: "message" as const,
+          layout: "card" as const,
           label: "Response",
           title: "Jarvis",
           content: streamingAssistant.content,
         },
       }
     : null;
+  const timelineItems = [...timelineCards, ...(liveAssistantCard ? [liveAssistantCard] : [])];
+  const activeSessionStamp = activeSession ? formatSessionStamp(activeSession.updated_at ?? activeSession.created_at) : null;
+  const statusRailCards: Array<{
+    tab: WorkbenchTabId;
+    label: string;
+    value: string;
+    emphasis?: "default" | "alert";
+  }> = [
+    {
+      tab: "approvals",
+      label: "Approvals",
+      value: String(pendingApprovals.length),
+      emphasis: pendingApprovals.length ? "alert" : "default",
+    },
+    {
+      tab: "tasks",
+      label: "Tasks",
+      value: String(tasks.length),
+    },
+    {
+      tab: "logs",
+      label: "Runtime",
+      value: String(executions.length),
+    },
+    {
+      tab: "subagents",
+      label: "Agents",
+      value: String(subagents.length),
+    },
+    {
+      tab: "teammates",
+      label: "Scouts",
+      value: String(teammates.length),
+    },
+  ];
+
+  function openWorkbenchTab(tab: WorkbenchTabId) {
+    setSidePanelMode("workbench");
+    setActiveWorkbenchTab(tab);
+    setWorkbenchOpen(true);
+  }
+
+  async function openSkillsPanel() {
+    setSidePanelMode("skills");
+    setWorkbenchOpen(true);
+    try {
+      setSkills(await fetchSkills());
+    } catch {
+      setSkills([]);
+    }
+  }
 
   function renderWorkbenchPanel() {
     if (activeWorkbenchTab === "tasks") {
@@ -884,51 +1039,69 @@ export function App() {
     );
   }
 
+  function renderSkillsPanel() {
+    return (
+      <section className="workbench-section">
+        <div className="section-heading">
+          <div>
+            <p className="micro-label">Project local</p>
+            <h3>Skills</h3>
+          </div>
+          <span className="section-count">{skills.length}</span>
+        </div>
+        <div className="workbench-list">
+          {skills.map((skill) => (
+            <article key={`${skill.name}:${skill.path}`} className="workbench-card">
+              <div className="workbench-card-header">
+                <strong>{skill.name}</strong>
+              </div>
+              <p>{skill.path}</p>
+            </article>
+          ))}
+          {!skills.length ? <p className="empty-inline">No project-local skills found.</p> : null}
+        </div>
+      </section>
+    );
+  }
+
   return (
     <div className="app-shell">
       <aside className="left-rail">
-        <div className="brand-block">
-          <div className="brand-mark">J</div>
-          <div>
-            <p className="micro-label">Jarvis</p>
-            <h1>Sessions</h1>
+        <div className="left-rail-top">
+          <div className="brand-block">
+            <div className="brand-mark">
+              <img src={APP_LOGO_SRC} alt="Jarvis logo" className="brand-logo" />
+            </div>
+            <div className="brand-copy">
+              <p className="micro-label">Local coding agent</p>
+              <h1>Jarvis</h1>
+            </div>
           </div>
-        </div>
 
-        <button type="button" className="primary-button full-width" onClick={onCreateSession}>
-          New Session
-        </button>
-
-        <label className="search-block">
-          <span className="micro-label">Search</span>
-          <input
-            value={sessionSearch}
-            onChange={(e) => setSessionSearch(e.target.value)}
-            placeholder="Find a conversation"
-          />
-        </label>
-
-        <div className="rail-meta">
-          <button type="button" className="rail-link active-link" onClick={() => setWorkbenchOpen(false)}>
-            Sessions
+          <button type="button" className="primary-button full-width" onClick={onCreateSession}>
+            New Session
           </button>
-          <button type="button" className="rail-link" onClick={() => setWorkbenchOpen(true)}>
-            Workbench
-          </button>
-          <span className="rail-hint">Skills</span>
-          <span className="rail-hint">Plugins</span>
-          <span className="rail-hint">Automations</span>
+
+          <label className="search-block">
+            <input
+              value={sessionSearch}
+              onChange={(e) => setSessionSearch(e.target.value)}
+              placeholder="Search conversations"
+            />
+          </label>
+
+          <div className="rail-meta">
+            <button
+              type="button"
+              className={workbenchOpen && sidePanelMode === "skills" ? "rail-link active-link" : "rail-link"}
+              onClick={openSkillsPanel}
+            >
+              Skills
+            </button>
+          </div>
         </div>
 
         <div className="session-column">
-          <div className="section-heading compact">
-            <div>
-              <p className="micro-label">Recent</p>
-              <h2>Sessions</h2>
-            </div>
-            <span className="section-count">{sessions.length}</span>
-          </div>
-
           <div className="session-list">
             {filteredSessions.map((session) => (
               <button
@@ -936,6 +1109,15 @@ export function App() {
                 type="button"
                 className={session.session_id === activeSessionId ? "session-card active-card" : "session-card"}
                 onClick={() => setActiveSessionId(session.session_id)}
+                onContextMenu={(event) => {
+                  if (session.isDraft) return;
+                  event.preventDefault();
+                  setSessionContextMenu({
+                    sessionId: session.session_id,
+                    x: event.clientX,
+                    y: event.clientY,
+                  });
+                }}
               >
                 <strong>{session.title}</strong>
                 <span>{formatSessionStamp(session.updated_at ?? session.created_at)}</span>
@@ -944,24 +1126,30 @@ export function App() {
             {!filteredSessions.length ? <p className="empty-inline">No matching sessions.</p> : null}
           </div>
         </div>
+
+        <div className="left-rail-footer">
+          <span className={`connection-pill ${connectionState}`}>{connectionState}</span>
+          <span className="rail-hint">{executions.length} runtime events</span>
+        </div>
       </aside>
 
       <main className="workspace-shell">
+        <section className="workspace-panel">
         <header className="workspace-header">
           <div className="workspace-title">
             <h2 className="session-heading">{activeSession?.title ?? "Jarvis"}</h2>
+            <p className="workspace-subtitle">
+              {activeSessionStamp ? `Updated ${activeSessionStamp}` : "Choose a session or create a new one to begin."}
+            </p>
           </div>
           <div className="header-actions">
-            <span className={`connection-pill ${connectionState}`}>{connectionState}</span>
+            {pendingApprovals.length ? <span className="header-chip alert">{pendingApprovals.length} pending</span> : null}
             <button
               type="button"
               className="secondary-button"
-              onClick={() => {
-                setActiveWorkbenchTab(pendingApprovals.length ? "approvals" : "logs");
-                setWorkbenchOpen((current) => !current);
-              }}
+              onClick={() => openWorkbenchTab(pendingApprovals.length ? "approvals" : "logs")}
             >
-              Workbench
+              Open Workbench
               {pendingApprovals.length ? <span className="button-count">{pendingApprovals.length}</span> : null}
             </button>
           </div>
@@ -970,41 +1158,57 @@ export function App() {
         <section className="workspace-body">
           {bootstrapState !== "ready" ? (
             <div className="empty-state offline-state">
-              <p className="micro-label">Backend offline</p>
+              <p className="micro-label">Runtime</p>
               <h3>Waiting for Jarvis runtime</h3>
               <p>The frontend is ready, but the local backend has not connected yet. Keep this window open while the service starts.</p>
             </div>
           ) : !activeSession ? (
             <div className="empty-state">
-              <p className="micro-label">No session selected</p>
+              <p className="micro-label">Workspace ready</p>
               <h3>Start a fresh thread</h3>
               <p>Create a new session from the left rail to begin a focused agent conversation.</p>
             </div>
           ) : (
             <div className="conversation-frame">
               <div className="timeline-stream" ref={timelineRef} onScroll={onTimelineScroll}>
-                {[...timelineCards, ...(liveAssistantCard ? [liveAssistantCard] : [])].map(({ event, card }, index) => (
+                {timelineItems.map(({ event, card }, index) => (
                   <article
                     key={`${event.created_at}-${index}`}
-                    className={`timeline-card ${card.kind} ${card.tone}`}
+                    className={
+                      card.layout === "inline"
+                        ? `timeline-inline-row ${card.tone}`
+                        : `timeline-card ${card.kind} ${card.tone}`
+                    }
                   >
-                    <div className="timeline-meta">
-                      <span className="mini-pill">{card.label}</span>
-                      <span>{formatTimelineStamp(event.created_at)}</span>
-                    </div>
-                    <h3>{card.title}</h3>
-                    {card.tone === "assistant" ? (
-                      <div className="markdown-body">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                          {card.content}
-                        </ReactMarkdown>
-                      </div>
+                    {card.layout === "inline" ? (
+                      <>
+                        <div className="timeline-inline-meta">
+                          <span>{card.label}</span>
+                          <span>{formatTimelineStamp(event.created_at)}</span>
+                        </div>
+                        <p>{card.content}</p>
+                      </>
                     ) : (
-                      <p>{card.content}</p>
+                      <>
+                        <div className="timeline-meta">
+                          <span className="mini-pill">{card.label}</span>
+                          <span>{formatTimelineStamp(event.created_at)}</span>
+                        </div>
+                        <h3>{card.title}</h3>
+                        {card.tone === "assistant" ? (
+                          <div className="markdown-body">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {card.content}
+                            </ReactMarkdown>
+                          </div>
+                        ) : (
+                          <p>{card.content}</p>
+                        )}
+                      </>
                     )}
                   </article>
                 ))}
-                {!timelineCards.length ? (
+                {!timelineItems.length ? (
                   <div className="empty-state compact-state">
                     <p className="micro-label">Ready</p>
                     <h3>This session is empty</h3>
@@ -1044,45 +1248,66 @@ export function App() {
         ) : null}
 
         <form className="composer-shell" onSubmit={onSubmit}>
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={onComposerKeyDown}
-            placeholder="Message Jarvis"
-            rows={5}
-            disabled={!activeSessionId}
-          />
+          <div className="composer-frame">
+            <textarea
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={onComposerKeyDown}
+              placeholder="Message Jarvis"
+              rows={3}
+              disabled={!activeSessionId}
+            />
+          </div>
           <div className="composer-footer simple-footer">
-            <button type="submit" className="primary-button" disabled={!activeSessionId || !draft.trim()}>
-              Send
-            </button>
+            <span>Enter to send</span>
+            {isActiveTurnRunning ? (
+              <button
+                type="button"
+                className="primary-button composer-action-button stop"
+                onClick={onStopTurn}
+                aria-label="Stop current turn"
+                title="Stop current turn"
+              >
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                  <rect x="5.5" y="5.5" width="9" height="9" rx="1.5" />
+                </svg>
+              </button>
+            ) : (
+              <button
+                type="submit"
+                className="primary-button composer-action-button"
+                disabled={!activeSessionId || !draft.trim()}
+                aria-label="Send message"
+                title="Send message"
+              >
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                  <path d="M3.5 10.5 15.5 4l-3 12-2.2-4.2z" />
+                  <path d="M7.8 11.2 12.4 8" />
+                </svg>
+              </button>
+            )}
           </div>
         </form>
+        </section>
       </main>
 
       <aside className="status-rail">
         <div className="status-rail-header">
-          <p className="micro-label">Overview</p>
-          <button type="button" className="secondary-button compact-button" onClick={() => setWorkbenchOpen(true)}>
-            Workbench
-          </button>
+          <p className="micro-label">Signals</p>
         </div>
         <div className="status-rail-list">
-          <article className="status-rail-card">
-            <p className="micro-label">Approvals</p>
-            <strong>{pendingApprovals.length}</strong>
-            <span>{pendingApprovals.length ? "Pending review" : "No pending review"}</span>
-          </article>
-          <article className="status-rail-card">
-            <p className="micro-label">Tools</p>
-            <strong>{executions.length}</strong>
-            <span>Recent executions</span>
-          </article>
-          <article className="status-rail-card">
-            <p className="micro-label">Scouts</p>
-            <strong>{teammates.length}</strong>
-            <span>Active teammates</span>
-          </article>
+          {statusRailCards.map((card) => (
+            <button
+              key={card.tab}
+              type="button"
+              className={card.emphasis === "alert" ? "status-rail-card alert" : "status-rail-card"}
+              onClick={() => openWorkbenchTab(card.tab)}
+              aria-label={`${card.label}: ${card.value}`}
+            >
+              <span className="status-rail-card-label">{card.label}</span>
+              <strong>{card.value}</strong>
+            </button>
+          ))}
         </div>
       </aside>
 
@@ -1090,31 +1315,102 @@ export function App() {
         className={workbenchOpen ? "workbench-backdrop open" : "workbench-backdrop"}
         onClick={() => setWorkbenchOpen(false)}
       />
+      {sessionContextMenu ? (
+        <div
+          ref={sessionContextMenuRef}
+          className="session-context-menu"
+          style={{ left: sessionContextMenu.x, top: sessionContextMenu.y }}
+        >
+          <button
+            type="button"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              void onRenameSession(sessionContextMenu.sessionId);
+            }}
+          >
+            Rename
+          </button>
+          <button
+            type="button"
+            className="danger"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              void onDeleteSession(sessionContextMenu.sessionId);
+            }}
+          >
+            Hide
+          </button>
+        </div>
+      ) : null}
+      {sessionDialog ? (
+        <div className="dialog-backdrop" onClick={() => setSessionDialog(null)}>
+          <div className="session-dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="session-dialog-header">
+              <h3>{sessionDialog.mode === "rename" ? "Rename Session" : "Hide Session"}</h3>
+            </div>
+            {sessionDialog.mode === "rename" ? (
+              <div className="session-dialog-body">
+                <input
+                  value={sessionDialog.value}
+                  onChange={(event) =>
+                    setSessionDialog((current) =>
+                      current && current.mode === "rename"
+                        ? {
+                            ...current,
+                            value: event.target.value,
+                          }
+                        : current,
+                    )
+                  }
+                  placeholder="Session title"
+                  autoFocus
+                />
+              </div>
+            ) : (
+              <div className="session-dialog-body">
+                <p>Hide this session from the left rail? It will remain in the local database.</p>
+              </div>
+            )}
+            <div className="session-dialog-actions">
+              <button type="button" className="secondary-button" onClick={() => setSessionDialog(null)}>
+                Cancel
+              </button>
+              <button type="button" className="primary-button" onClick={() => void confirmSessionDialog()}>
+                {sessionDialog.mode === "rename" ? "Save" : "Hide"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       <aside className={workbenchOpen ? "workbench-drawer open" : "workbench-drawer"}>
         <div className="drawer-header">
           <div>
-            <p className="micro-label">Operational depth</p>
-            <h2>Workbench</h2>
+            <p className="micro-label">{sidePanelMode === "skills" ? "Project local" : "Operational depth"}</p>
+            <h2>{sidePanelMode === "skills" ? "Skills" : "Workbench"}</h2>
           </div>
           <button type="button" className="secondary-button" onClick={() => setWorkbenchOpen(false)}>
             Close
           </button>
         </div>
 
-        <div className="workbench-tabs">
-          {WORKBENCH_TABS.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              className={tab.id === activeWorkbenchTab ? "tab-button active-tab" : "tab-button"}
-              onClick={() => setActiveWorkbenchTab(tab.id)}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
+        {sidePanelMode === "workbench" ? (
+          <div className="workbench-tabs">
+            {WORKBENCH_TABS.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                className={tab.id === activeWorkbenchTab ? "tab-button active-tab" : "tab-button"}
+                onClick={() => setActiveWorkbenchTab(tab.id)}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
 
-        <div className="drawer-body">{renderWorkbenchPanel()}</div>
+        <div className="drawer-body">{sidePanelMode === "skills" ? renderSkillsPanel() : renderWorkbenchPanel()}</div>
       </aside>
     </div>
   );
