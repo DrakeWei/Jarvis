@@ -217,7 +217,7 @@ TOOL_DEFINITIONS.extend(
         {
             "name": "feishu_doc_replace_text",
             "title": "Replace Text In Feishu Doc",
-            "description": "Replace matched text in a bounded scope within a Feishu upgraded doc.",
+            "description": "Replace matched text in a bounded scope within a Feishu upgraded doc. Return a preview first; set confirm=true to execute.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -227,6 +227,7 @@ TOOL_DEFINITIONS.extend(
                     "replace_text": {"type": "string"},
                     "scope": {"type": "string"},
                     "heading_query": {"type": "string"},
+                    "confirm": {"type": "boolean"},
                 },
                 "required": ["find_text", "replace_text", "scope"],
             },
@@ -234,7 +235,7 @@ TOOL_DEFINITIONS.extend(
         {
             "name": "feishu_doc_delete_blocks",
             "title": "Delete Feishu Doc Blocks",
-            "description": "Delete a server-resolved heading section or server-resolved block set.",
+            "description": "Delete a server-resolved heading section. Return a preview first; set confirm=true to execute.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -242,6 +243,7 @@ TOOL_DEFINITIONS.extend(
                     "document_url": {"type": "string"},
                     "heading_query": {"type": "string"},
                     "block_refs": {"type": "array", "items": {"type": "object"}},
+                    "confirm": {"type": "boolean"},
                 },
             },
         },

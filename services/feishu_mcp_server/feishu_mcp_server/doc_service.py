@@ -141,10 +141,12 @@ def replace_text(arguments: dict[str, Any]) -> dict[str, Any]:
     find_text = str(arguments.get("find_text") or "").strip()
     replace_with = str(arguments.get("replace_text") or "")
     scope = str(arguments.get("scope") or "").strip()
+    confirm = bool(arguments.get("confirm", False))
     if not find_text or not scope:
         raise FeishuDocServiceError("find_text and scope are required.")
     raw_blocks = list_all_blocks(document_id)
     parsed = linearize_blocks(raw_blocks)
+    top_level = [block for block in parsed.get("blocks", []) if block.get("parent_id") == document_id]
     candidates = _matching_text_blocks(
         parsed.get("blocks", []),
         find_text,
@@ -163,18 +165,55 @@ def replace_text(arguments: dict[str, Any]) -> dict[str, Any]:
         }
         for block in selected
     ]
+    if not confirm:
+        return {
+            "document_id": document_id,
+            "match_count": len(selected),
+            "needs_confirmation": True,
+            "preview": preview,
+        }
+
+    for block in selected:
+        if block.get("parent_id") != document_id:
+            raise FeishuDocServiceError("replace_text execution currently supports top-level blocks only.")
+
+    revisions: list[int | None] = []
+    for block in reversed(selected):
+        new_text = str(block["text"]).replace(find_text, replace_with)
+        replacement_markdown = _markdown_for_existing_block(block, new_text)
+        index = _index_of_block(top_level, str(block["block_id"]))
+        if index < 0:
+            raise FeishuDocServiceError("Unable to determine block index during replace_text execution.")
+        delete_payload = feishu_client.delete_child_range(
+            document_id=document_id,
+            block_id=document_id,
+            start_index=index,
+            end_index=index + 1,
+        )
+        converted = feishu_client.convert_markdown_to_blocks(replacement_markdown)
+        converted_data = _unwrap_data(converted)
+        children_id, descendants = _converted_descendants(converted_data)
+        create_payload = feishu_client.create_nested_blocks(
+            document_id=document_id,
+            block_id=document_id,
+            children_id=children_id,
+            descendants=descendants,
+            index=index,
+        )
+        revisions.append(_extract_revision_from_data(create_payload) or _extract_revision_from_data(delete_payload))
     return {
         "document_id": document_id,
         "match_count": len(selected),
-        "needs_confirmation": True,
         "preview": preview,
-        "note": "Patch write is intentionally gated until block-payload round-trip is runtime-verified.",
+        "executed": True,
+        "revision_id": revisions[-1] if revisions else None,
     }
 
 
 def delete_blocks(arguments: dict[str, Any]) -> dict[str, Any]:
     document_id = resolve_document_id(arguments)
     heading_query = str(arguments.get("heading_query") or "").strip()
+    confirm = bool(arguments.get("confirm", False))
     if not heading_query:
         raise FeishuDocServiceError("heading_query is required in this phase.")
     raw_blocks = list_all_blocks(document_id)
@@ -194,17 +233,33 @@ def delete_blocks(arguments: dict[str, Any]) -> dict[str, Any]:
             next_heading_index = index
             break
     preview = top_level[heading_index:next_heading_index]
+    delete_range = {
+        "parent_block_id": document_id,
+        "start_index": heading_index,
+        "end_index": next_heading_index if next_heading_index is not None else len(top_level),
+    }
+    if not confirm:
+        return {
+            "document_id": document_id,
+            "needs_confirmation": True,
+            "matched_heading": heading,
+            "delete_range": delete_range,
+            "preview": preview,
+        }
+
+    payload = feishu_client.delete_child_range(
+        document_id=document_id,
+        block_id=document_id,
+        start_index=delete_range["start_index"],
+        end_index=delete_range["end_index"],
+    )
     return {
         "document_id": document_id,
-        "needs_confirmation": True,
         "matched_heading": heading,
-        "delete_range": {
-            "parent_block_id": document_id,
-            "start_index": heading_index,
-            "end_index": (next_heading_index - 1) if next_heading_index is not None else len(top_level) - 1,
-        },
+        "delete_range": delete_range,
         "preview": preview,
-        "note": "Delete write is intentionally gated until delete body semantics are runtime-verified.",
+        "executed": True,
+        "revision_id": _extract_revision_from_data(payload),
     }
 
 
@@ -473,3 +528,22 @@ def _matching_text_blocks(blocks: list[dict[str, Any]], find_text: str, heading_
             break
     scoped_ids = {str(block.get("block_id")) for block in blocks[start:end]}
     return [block for block in matched if str(block.get("block_id")) in scoped_ids]
+
+
+def _markdown_for_existing_block(block: dict[str, Any], new_text: str) -> str:
+    block_type = str(block.get("block_type", "")).strip().lower()
+    text = new_text.strip()
+    if block_type.startswith("heading"):
+        suffix = block_type.replace("heading", "").strip()
+        level = int(suffix) if suffix.isdigit() else 1
+        level = min(max(level, 1), 6)
+        return f"{'#' * level} {text}"
+    if block_type == "bullet":
+        return f"- {text}"
+    if block_type == "ordered":
+        return f"1. {text}"
+    if block_type == "quote":
+        return f"> {text}"
+    if block_type == "code":
+        return f"```\n{text}\n```"
+    return text
