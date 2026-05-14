@@ -18,10 +18,15 @@ python3 -m venv .venv
 
 ## Configure
 
-1. Copy [`.env.example`](/Users/bytedance/Desktop/python/Jarvis/services/feishu_mcp_server/.env.example:1) into your local shell environment.
-2. Set `FEISHU_APP_ID` and `FEISHU_APP_SECRET` from your Feishu custom app.
-3. Set `FEISHU_MCP_BEARER_TOKEN` to a local shared secret.
+1. Copy [`.env.example`](/Users/bytedance/Desktop/python/Jarvis/services/feishu_mcp_server/.env.example:1) to `services/feishu_mcp_server/.env`.
+2. Fill `FEISHU_APP_ID` and `FEISHU_APP_SECRET` from your Feishu custom app.
+3. Fill `FEISHU_MCP_BEARER_TOKEN` with a local shared secret.
 4. Give the Feishu app access to target docs before testing existing documents.
+
+You do not need to paste these secrets into chat. The server now auto-loads:
+
+- repo root `.env`
+- `services/feishu_mcp_server/.env`
 
 Recommended minimum Feishu scopes for the current implementation:
 
@@ -32,9 +37,6 @@ Recommended minimum Feishu scopes for the current implementation:
 ## Run
 
 ```bash
-export FEISHU_MCP_BEARER_TOKEN=replace-with-local-shared-secret
-export FEISHU_APP_ID=cli_xxx
-export FEISHU_APP_SECRET=xxx
 ./.venv/bin/python -m feishu_mcp_server.main
 ```
 

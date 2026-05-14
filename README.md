@@ -50,7 +50,14 @@ For the Feishu Docs MCP integration, there are two local processes:
 - Backend sample env: [backend/.env.example](/Users/bytedance/Desktop/python/Jarvis/backend/.env.example:1)
 - Feishu MCP sample env: [services/feishu_mcp_server/.env.example](/Users/bytedance/Desktop/python/Jarvis/services/feishu_mcp_server/.env.example:1)
 
-At minimum, set the same shared bearer token on both sides, then set your Feishu `app_id` and `app_secret` for the MCP server.
+Recommended local setup:
+
+1. Copy `backend/.env.example` to `backend/.env`
+2. Copy `services/feishu_mcp_server/.env.example` to `services/feishu_mcp_server/.env`
+3. Put the same shared bearer token on both sides
+4. Put your Feishu `app_id` and `app_secret` only in `services/feishu_mcp_server/.env`
+
+The backend and Feishu MCP server now auto-load local `.env` files, so you do not need to export secrets manually or send them in chat.
 
 ### Run The Feishu MCP Server
 

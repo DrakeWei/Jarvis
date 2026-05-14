@@ -4,6 +4,32 @@ import tomllib
 from pathlib import Path
 
 
+def _load_dotenv_file(path: Path) -> None:
+    if not path.exists() or not path.is_file():
+        return
+    try:
+        lines = path.read_text().splitlines()
+    except Exception:
+        return
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or key in os.environ:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ[key] = value
+
+
+def _load_local_env(project_root: Path) -> None:
+    _load_dotenv_file(project_root / ".env")
+    _load_dotenv_file(project_root / "backend" / ".env")
+
+
 def _as_str(value: object) -> str:
     return str(value).strip() if value is not None else ""
 
@@ -28,6 +54,7 @@ def _env_json_map(name: str) -> dict[str, str]:
 class Settings:
     def __init__(self) -> None:
         root = Path(__file__).resolve().parents[3]
+        _load_local_env(root)
         self.project_root = root
         self.data_dir = root / "data"
         self.database_url = os.getenv(
