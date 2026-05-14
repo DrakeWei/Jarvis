@@ -61,6 +61,11 @@ class Settings:
             self.codex_provider_config.get("http_headers")
         )
         self.llm_max_tokens = int(os.getenv("JARVIS_LLM_MAX_TOKENS", "1200"))
+        self.jarvis_mcp_feishu_enabled = os.getenv("JARVIS_MCP_FEISHU_ENABLED", "").strip() in {"1", "true", "TRUE", "yes", "YES"}
+        self.jarvis_mcp_feishu_base_url = os.getenv("JARVIS_MCP_FEISHU_BASE_URL", "").strip()
+        self.jarvis_mcp_feishu_bearer_token = os.getenv("JARVIS_MCP_FEISHU_BEARER_TOKEN", "").strip()
+        self.jarvis_mcp_feishu_timeout_ms = int(os.getenv("JARVIS_MCP_FEISHU_TIMEOUT_MS", "10000"))
+        self.jarvis_mcp_cache_ttl_seconds = float(os.getenv("JARVIS_MCP_CACHE_TTL_SECONDS", "15"))
 
     def _load_codex_config(self) -> dict[str, object]:
         config_path = Path.home() / ".codex" / "config.toml"

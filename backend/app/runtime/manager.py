@@ -1,10 +1,12 @@
 import asyncio
 import re
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.config import settings
+from app.mcp import ToolDefinition, ToolExecutionResult, tool_registry
 from app.providers import ProviderConfigError, ProviderRequestError, TextBlock, ToolUseBlock, create_client
 from app.schemas.events import MessageCreate, SessionCreate, SessionSummary, TimelineEvent
 from app.schemas.subagents import SubagentRunCreate
@@ -459,6 +461,19 @@ class RuntimeManager:
             schemas = [schema for schema in schemas if schema["name"] != "run_subagent"]
         return schemas
 
+    async def _autonomous_tool_definitions(self, *, allow_subagent_tool: bool = True) -> list[ToolDefinition]:
+        return await tool_registry.list_tools(allow_subagent_tool=allow_subagent_tool)
+
+    def _tool_schemas_from_definitions(self, definitions: list[ToolDefinition]) -> list[dict[str, object]]:
+        return [
+            {
+                "name": definition.name,
+                "description": definition.description,
+                "input_schema": definition.input_schema,
+            }
+            for definition in definitions
+        ]
+
     def _should_autoname_session(self, session_id: str) -> bool:
         session = session_service.get_session(session_id)
         if session is None:
@@ -668,6 +683,26 @@ class RuntimeManager:
             return "completed", result["reply"].content
         return "error", f"Unknown tool '{tool_name}'"
 
+    async def _execute_tool_definition(
+        self,
+        *,
+        session_id: str,
+        tool: ToolDefinition,
+        tool_input: dict[str, object],
+        broker_for_workspace: ToolBroker,
+    ) -> ToolExecutionResult | None:
+        if tool.name == "bash":
+            return None
+        if tool.source == "mcp":
+            return await tool_registry.call_tool(tool, tool_input)
+        status, output = await self._execute_autonomous_tool(
+            session_id=session_id,
+            tool_name=tool.name,
+            tool_input=tool_input,
+            broker_for_workspace=broker_for_workspace,
+        ) or ("error", f"Tool '{tool.name}' returned no execution result.")
+        return ToolExecutionResult(status=status, output=output)
+
     async def _publish_assistant_reply(self, session_id: str, reply: str) -> None:
         text = reply.strip() or "LLM provider returned no text output."
         for chunk in self._chunk_text(text):
@@ -812,7 +847,9 @@ class RuntimeManager:
         emit_stream_events: bool = True,
     ) -> str:
         client = create_client()
-        tools = self._autonomous_tool_schemas(allow_subagent_tool=allow_subagent_tool)
+        tool_definitions = await self._autonomous_tool_definitions(allow_subagent_tool=allow_subagent_tool)
+        tools = self._tool_schemas_from_definitions(tool_definitions)
+        tool_map = {tool.name: tool for tool in tool_definitions}
         broker_for_workspace = ToolBroker(workspace)
         system_prompt = (
             self._build_subagent_system_prompt(workspace)
@@ -846,7 +883,28 @@ class RuntimeManager:
 
             results: list[dict[str, str]] = []
             for block in tool_calls:
-                if block.name == "bash":
+                tool_definition = tool_map.get(block.name)
+                if tool_definition is None:
+                    output = f"Unknown tool '{block.name}'"
+                    tool_service.create_tool_execution(
+                        session_id=session_id,
+                        tool_name=block.name,
+                        tool_source="local",
+                        server_name=None,
+                        status="error",
+                        input_json=broker_for_workspace.serialize_input(block.input),
+                        output_text=output,
+                    )
+                    results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": output,
+                        }
+                    )
+                    continue
+
+                if tool_definition.name == "bash":
                     return await self._queue_bash_approval(
                         session_id,
                         workspace,
@@ -858,35 +916,39 @@ class RuntimeManager:
                         emit_stream_events=emit_stream_events,
                     )
 
-                executed = await self._execute_autonomous_tool(
+                started_at = time.perf_counter()
+                executed = await self._execute_tool_definition(
                     session_id=session_id,
-                    tool_name=block.name,
+                    tool=tool_definition,
                     tool_input=block.input,
                     broker_for_workspace=broker_for_workspace,
                 )
                 if executed is None:
                     return await self._queue_bash_approval(session_id, workspace, messages, block.id, block.input)
-
-                status, output = executed
+                latency_ms = int((time.perf_counter() - started_at) * 1000)
                 tool_service.create_tool_execution(
                     session_id=session_id,
-                    tool_name=block.name,
-                    status=status,
+                    tool_name=tool_definition.name,
+                    tool_source=tool_definition.source,
+                    server_name=tool_definition.server_name,
+                    status=executed.status,
                     input_json=broker_for_workspace.serialize_input(block.input),
-                    output_text=output,
+                    output_text=executed.output,
+                    latency_ms=latency_ms,
+                    remote_request_id=executed.remote_request_id,
                 )
                 await self.publish(
                     TimelineEvent(
                         session_id=session_id,
                         type="tool.execution",
-                        content=f"{block.name} -> {status}",
+                        content=f"{tool_definition.name} -> {executed.status}",
                     )
                 )
                 results.append(
                     {
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": output,
+                        "content": executed.output,
                     }
                 )
             messages.append({"role": "user", "content": results})
@@ -957,6 +1019,8 @@ class RuntimeManager:
         tool_service.create_tool_execution(
             session_id=session_id,
             tool_name=tool_name,
+            tool_source="local",
+            server_name=None,
             status=status,
             input_json=broker_for_workspace.serialize_input(tool_input),
             output_text=output,

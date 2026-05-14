@@ -1,0 +1,56 @@
+from __future__ import annotations
+
+from typing import Any
+
+
+def linearize_blocks(block_items: list[dict[str, Any]]) -> dict[str, Any]:
+    headings: list[dict[str, Any]] = []
+    blocks: list[dict[str, Any]] = []
+    plain_parts: list[str] = []
+
+    for item in block_items:
+        block_id = str(item.get("block_id") or item.get("blockId") or "")
+        block_type = _block_type(item)
+        text = _extract_text(item).strip()
+        entry = {
+            "block_id": block_id,
+            "block_type": block_type,
+            "text": text,
+        }
+        blocks.append(entry)
+        if text:
+            plain_parts.append(text)
+        if block_type.startswith("heading"):
+            headings.append(entry)
+
+    return {
+        "plain_text": "\n".join(part for part in plain_parts if part).strip(),
+        "headings": headings,
+        "blocks": blocks,
+    }
+
+
+def _block_type(block: dict[str, Any]) -> str:
+    raw = block.get("block_type") or block.get("blockType") or block.get("type") or "unknown"
+    return str(raw)
+
+
+def _extract_text(block: dict[str, Any]) -> str:
+    texts: list[str] = []
+    _collect_text(block, texts)
+    return " ".join(part.strip() for part in texts if part and part.strip())
+
+
+def _collect_text(value: Any, texts: list[str]) -> None:
+    if isinstance(value, str):
+        texts.append(value)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"block_id", "blockId", "parent_id", "children"}:
+                continue
+            _collect_text(item, texts)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _collect_text(item, texts)
