@@ -61,6 +61,13 @@ class Settings:
         "FEISHU_DOC_DELETE_CHILDREN_PATH_TEMPLATE",
         "/open-apis/docx/v1/documents/{document_id}/blocks/{block_id}/children/batch_delete",
     ).strip()
+    doc_permission_members_batch_create_path_template: str = os.getenv(
+        "FEISHU_DOC_PERMISSION_MEMBERS_BATCH_CREATE_PATH_TEMPLATE",
+        "/open-apis/drive/v1/permissions/{token}/members/batch_create",
+    ).strip()
+    default_editor_member_type: str = os.getenv("FEISHU_DEFAULT_EDITOR_MEMBER_TYPE", "").strip()
+    default_editor_member_id: str = os.getenv("FEISHU_DEFAULT_EDITOR_MEMBER_ID", "").strip()
+    default_editor_perm: str = os.getenv("FEISHU_DEFAULT_EDITOR_PERM", "edit").strip()
     token_refresh_skew_seconds: int = int(os.getenv("FEISHU_TOKEN_REFRESH_SKEW_SECONDS", "1800"))
     max_retries: int = int(os.getenv("FEISHU_MAX_RETRIES", "3"))
 

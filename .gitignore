@@ -23,6 +23,8 @@ backend/.mypy_cache/
 backend/.ruff_cache/
 backend/.coverage
 backend/*.egg-info/
+services/*.egg-info/
+services/**/*.egg-info/
 backend/data/
 
 data/

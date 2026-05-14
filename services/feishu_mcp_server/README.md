@@ -28,11 +28,26 @@ You do not need to paste these secrets into chat. The server now auto-loads:
 - repo root `.env`
 - `services/feishu_mcp_server/.env`
 
+If your company network injects a self-signed or enterprise TLS certificate, also set:
+
+- `FEISHU_CA_BUNDLE=/absolute/path/to/your/ca-bundle.pem`
+
+If `FEISHU_CA_BUNDLE` is empty, the server will try `SSL_CERT_FILE`, then `certifi`.
+
 Recommended minimum Feishu scopes for the current implementation:
 
 - create and edit upgraded docs
 - view upgraded docs
 - convert text content into doc blocks
+- document sharing / collaborator permission management if you want auto-share after create
+
+Optional auto-share after create:
+
+- `FEISHU_DEFAULT_EDITOR_MEMBER_TYPE=openid`
+- `FEISHU_DEFAULT_EDITOR_MEMBER_ID=你的open_id`
+- `FEISHU_DEFAULT_EDITOR_PERM=edit`
+
+If these are set, `feishu_doc_create` will try to add you as a collaborator right after creating the doc. You can also pass `share_with` explicitly when calling the tool.
 
 ## Run
 

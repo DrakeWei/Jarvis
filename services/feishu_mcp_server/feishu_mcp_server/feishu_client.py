@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -9,6 +10,7 @@ from typing import Any
 
 from feishu_mcp_server.auth import FeishuAuthError, auth_manager
 from feishu_mcp_server.config import settings
+from feishu_mcp_server.tls import build_ssl_context
 
 
 class FeishuAPIError(RuntimeError):
@@ -23,6 +25,9 @@ class FeishuAuthStatus:
 
 
 class FeishuClient:
+    def __init__(self) -> None:
+        self._ssl_context = build_ssl_context()
+
     def auth_status(self) -> FeishuAuthStatus:
         try:
             token = auth_manager.get_tenant_access_token()
@@ -99,6 +104,18 @@ class FeishuClient:
         path = settings.doc_delete_children_path_template.format(document_id=document_id, block_id=block_id)
         return self._request("DELETE", path, body=body)
 
+    def add_permission_members(
+        self,
+        *,
+        token: str,
+        members: list[dict[str, Any]],
+        file_type: str = "docx",
+    ) -> dict[str, Any]:
+        path = settings.doc_permission_members_batch_create_path_template.format(token=token)
+        body = {"members": members}
+        query = {"type": file_type}
+        return self._request("POST", path, body=body, query=query)
+
     def _request(
         self,
         method: str,
@@ -125,12 +142,16 @@ class FeishuClient:
         data = json.dumps(body).encode("utf-8") if body is not None else None
         request = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
         try:
-            with urllib.request.urlopen(request, timeout=20) as response:
+            with urllib.request.urlopen(request, timeout=20, context=self._ssl_context) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise FeishuAPIError(f"Feishu API request failed: {exc.code} {detail}") from exc
         except urllib.error.URLError as exc:
+            if isinstance(exc.reason, ssl.SSLError):
+                raise FeishuAPIError(
+                    "Feishu TLS verification failed. Set FEISHU_CA_BUNDLE or SSL_CERT_FILE to your trusted CA bundle."
+                ) from exc
             raise FeishuAPIError(f"Feishu API request failed: {exc.reason}") from exc
         except json.JSONDecodeError as exc:
             raise FeishuAPIError("Feishu API returned invalid JSON.") from exc

@@ -33,6 +33,7 @@ TOOL_DEFINITIONS.extend(
                     "title": {"type": "string"},
                     "folder_token": {"type": "string"},
                     "initial_blocks": {"type": "array"},
+                    "share_with": {"type": "array"},
                 },
                 "required": ["title"],
             },
@@ -134,12 +135,12 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     raise FeishuDocServiceError(f"Unknown tool '{name}'.")
 
 
-@app.post("/mcp")
+@app.post("/mcp", response_model=None)
 async def mcp_endpoint(
     payload: dict[str, Any],
     response: Response,
     authorization: str | None = Header(default=None),
-) -> dict[str, Any] | Response:
+) -> Any:
     _authorize(authorization)
 
     request_id = payload.get("id")

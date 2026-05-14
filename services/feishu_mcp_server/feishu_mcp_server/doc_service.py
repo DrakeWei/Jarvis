@@ -26,6 +26,16 @@ def create_doc(arguments: dict[str, Any]) -> dict[str, Any]:
         "revision_id": _extract_revision(document),
         "url": _doc_url(document_id),
     }
+    share_targets = _share_targets(arguments)
+    if share_targets:
+        try:
+            share_payload = feishu_client.add_permission_members(token=document_id, members=share_targets, file_type="docx")
+            result["share_result"] = {
+                "requested_members": share_targets,
+                "raw": share_payload.get("data", share_payload),
+            }
+        except Exception as exc:
+            result["share_error"] = str(exc)
     initial_blocks = arguments.get("initial_blocks")
     if initial_blocks:
         append_result = append_doc(
@@ -272,6 +282,53 @@ def _require_blocks(arguments: dict[str, Any]) -> list[Any]:
     return blocks
 
 
+def _share_targets(arguments: dict[str, Any]) -> list[dict[str, Any]]:
+    explicit = arguments.get("share_with")
+    targets: list[dict[str, Any]] = []
+    if isinstance(explicit, list):
+        for item in explicit:
+            normalized = _normalize_share_target(item)
+            if normalized:
+                targets.append(normalized)
+    if targets:
+        return targets
+
+    if settings.default_editor_member_type and settings.default_editor_member_id:
+        default_target = _normalize_share_target(
+            {
+                "member_type": settings.default_editor_member_type,
+                "member_id": settings.default_editor_member_id,
+                "perm": settings.default_editor_perm,
+            }
+        )
+        if default_target:
+            return [default_target]
+    return []
+
+
+def _normalize_share_target(item: Any) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    member_type = str(item.get("member_type") or item.get("type") or "").strip()
+    member_id = str(item.get("member_id") or item.get("id") or "").strip()
+    perm = str(item.get("perm") or settings.default_editor_perm or "edit").strip()
+    if not member_type or not member_id:
+        return None
+    if member_type == "open_id":
+        member_type = "openid"
+    if perm == "editable":
+        perm = "edit"
+    if perm == "readable":
+        perm = "view"
+    if perm == "manage":
+        perm = "full_access"
+    return {
+        "member_type": member_type,
+        "member_id": member_id,
+        "perm": perm,
+    }
+
+
 def _unwrap_data(payload: dict[str, Any]) -> dict[str, Any]:
     data = payload.get("data", {})
     if not isinstance(data, dict):
@@ -290,13 +347,28 @@ def _unwrap_document(payload: dict[str, Any]) -> dict[str, Any]:
 def _converted_descendants(data: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
     children_id = data.get("children_id", data.get("childrenIds", []))
     descendants = data.get("descendants", [])
-    if not isinstance(children_id, list) or not isinstance(descendants, list):
-        raise FeishuDocServiceError("Converted block payload is missing children_id or descendants.")
-    child_ids = [str(item) for item in children_id if str(item).strip()]
-    descendant_items = [item for item in descendants if isinstance(item, dict)]
-    if not child_ids or not descendant_items:
-        raise FeishuDocServiceError("Converted block payload did not contain usable descendants.")
-    return child_ids, descendant_items
+    if isinstance(children_id, list) and isinstance(descendants, list):
+        child_ids = [str(item) for item in children_id if str(item).strip()]
+        descendant_items = [item for item in descendants if isinstance(item, dict)]
+        if child_ids and descendant_items:
+            return child_ids, descendant_items
+
+    for candidate_key in ("items", "blocks"):
+        candidate = data.get(candidate_key)
+        if not isinstance(candidate, list):
+            continue
+        candidate_items = [item for item in candidate if isinstance(item, dict)]
+        child_ids = [
+            str(item.get("block_id") or item.get("blockId") or item.get("id") or "").strip()
+            for item in candidate_items
+        ]
+        child_ids = [item for item in child_ids if item]
+        if child_ids and candidate_items:
+            return child_ids, candidate_items
+
+    raise FeishuDocServiceError(
+        f"Converted block payload did not contain usable descendants. data keys={sorted(data.keys())}"
+    )
 
 
 def _extract_document_id(document: dict[str, Any]) -> str:

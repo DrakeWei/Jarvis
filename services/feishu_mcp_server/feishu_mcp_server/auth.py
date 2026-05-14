@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ssl
 import threading
 import time
 import urllib.error
@@ -8,6 +9,7 @@ import urllib.request
 from dataclasses import dataclass
 
 from feishu_mcp_server.config import settings
+from feishu_mcp_server.tls import build_ssl_context
 
 
 class FeishuAuthError(RuntimeError):
@@ -24,6 +26,7 @@ class FeishuAuthManager:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._cached: CachedToken | None = None
+        self._ssl_context = build_ssl_context()
 
     def get_tenant_access_token(self) -> str:
         if not settings.credentials_configured():
@@ -51,12 +54,16 @@ class FeishuAuthManager:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=15) as response:
+            with urllib.request.urlopen(request, timeout=15, context=self._ssl_context) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise FeishuAuthError(f"Feishu token request failed: {exc.code} {detail}") from exc
         except urllib.error.URLError as exc:
+            if isinstance(exc.reason, ssl.SSLError):
+                raise FeishuAuthError(
+                    "Feishu TLS verification failed. Set FEISHU_CA_BUNDLE or SSL_CERT_FILE to your trusted CA bundle."
+                ) from exc
             raise FeishuAuthError(f"Feishu token request failed: {exc.reason}") from exc
         except json.JSONDecodeError as exc:
             raise FeishuAuthError("Feishu token request returned invalid JSON.") from exc
