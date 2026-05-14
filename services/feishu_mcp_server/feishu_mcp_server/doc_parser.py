@@ -2,6 +2,25 @@ from __future__ import annotations
 
 from typing import Any
 
+NUMERIC_BLOCK_TYPES = {
+    "1": "page",
+    "2": "text",
+    "3": "heading1",
+    "4": "heading2",
+    "5": "heading3",
+    "6": "heading4",
+    "7": "heading5",
+    "8": "heading6",
+    "9": "heading7",
+    "10": "heading8",
+    "11": "heading9",
+    "12": "bullet",
+    "13": "ordered",
+    "14": "code",
+    "15": "quote",
+    "16": "todo",
+}
+
 
 def linearize_blocks(block_items: list[dict[str, Any]]) -> dict[str, Any]:
     headings: list[dict[str, Any]] = []
@@ -37,7 +56,8 @@ def linearize_blocks(block_items: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _block_type(block: dict[str, Any]) -> str:
     raw = block.get("block_type") or block.get("blockType") or block.get("type") or "unknown"
-    return str(raw)
+    text = str(raw)
+    return NUMERIC_BLOCK_TYPES.get(text, text)
 
 
 def _extract_text(block: dict[str, Any]) -> str:
