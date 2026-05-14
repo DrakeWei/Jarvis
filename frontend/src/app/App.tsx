@@ -106,13 +106,21 @@ const timelineStampFormatter = new Intl.DateTimeFormat(DISPLAY_LOCALE, {
   hour12: false,
 });
 
+function parseTimestamp(timestamp: string): Date {
+  const hasZone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(timestamp);
+  const normalized = hasZone ? timestamp : `${timestamp}Z`;
+  return new Date(normalized);
+}
+
 function formatSessionStamp(timestamp: string): string {
-  return `${sessionStampFormatter.format(new Date(timestamp))} ${DISPLAY_TIME_ZONE_LABEL}`;
+  return `${sessionStampFormatter.format(parseTimestamp(timestamp))} ${DISPLAY_TIME_ZONE_LABEL}`;
 }
 
 function sortSessionsByActivity<T extends { updated_at: string; created_at: string }>(items: T[]): T[] {
   return [...items].sort(
-    (left, right) => new Date(right.updated_at ?? right.created_at).getTime() - new Date(left.updated_at ?? left.created_at).getTime(),
+    (left, right) =>
+      parseTimestamp(right.updated_at ?? right.created_at).getTime() -
+      parseTimestamp(left.updated_at ?? left.created_at).getTime(),
   );
 }
 
@@ -136,7 +144,7 @@ function touchSession<T extends { session_id: string; title: string; updated_at:
 }
 
 function formatTimelineStamp(timestamp: string): string {
-  return `${timelineStampFormatter.format(new Date(timestamp))} ${DISPLAY_TIME_ZONE_LABEL}`;
+  return `${timelineStampFormatter.format(parseTimestamp(timestamp))} ${DISPLAY_TIME_ZONE_LABEL}`;
 }
 
 function previewText(content: string, maxLength = 180): string {

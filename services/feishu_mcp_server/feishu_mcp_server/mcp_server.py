@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Response
@@ -41,7 +42,7 @@ TOOL_DEFINITIONS.extend(
         {
             "name": "feishu_doc_get",
             "title": "Get Feishu Doc Metadata",
-            "description": "Resolve a Feishu document by document_id or document_url and return metadata.",
+            "description": "Resolve a Feishu document by document_id or document_url and return metadata. Reuse the returned document_id or document_url for later writes to the same doc.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -53,7 +54,7 @@ TOOL_DEFINITIONS.extend(
         {
             "name": "feishu_doc_read",
             "title": "Read Feishu Doc",
-            "description": "Read a Feishu upgraded doc and return a linearized text-friendly representation.",
+            "description": "Read a Feishu upgraded doc and return a linearized text-friendly representation. Reuse the returned document_id or document_url when the user later says to write back to this same doc.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -194,7 +195,7 @@ async def mcp_endpoint(
                     "content": [
                         {
                             "type": "text",
-                            "text": str(result),
+                            "text": json.dumps(result, ensure_ascii=False),
                         }
                     ],
                     "structuredContent": result,
@@ -255,7 +256,7 @@ TOOL_DEFINITIONS.extend(
         {
             "name": "feishu_doc_append",
             "title": "Append Feishu Doc Content",
-            "description": "Append content to the end of a Feishu upgraded doc. Prefer passing content as a simple string when possible.",
+            "description": "Append content to the end of a Feishu upgraded doc. You must provide document_id or document_url. Prefer passing content as a simple string; only use blocks when content is not enough.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -269,7 +270,7 @@ TOOL_DEFINITIONS.extend(
         {
             "name": "feishu_doc_insert_after_heading",
             "title": "Insert Content After Heading",
-            "description": "Insert content after a matched heading inside a Feishu upgraded doc. Prefer passing content as a simple string when possible.",
+            "description": "Insert content after a matched heading inside a Feishu upgraded doc. You must provide document_id or document_url. Prefer passing content as a simple string; only use blocks when content is not enough.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
