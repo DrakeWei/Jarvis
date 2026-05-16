@@ -1,11 +1,14 @@
 from app.models.entities import (
+    AssetChunkRecord,
     AgentMessageRecord,
     AgentRecord,
     ApprovalRecord,
     BackgroundJobRecord,
     EventLogRecord,
+    MessageAssetRecord,
     MessageRecord,
     SessionRecord,
+    SessionAssetRecord,
     SessionMemoryRecord,
     TaskDependencyRecord,
     TaskRecord,
@@ -15,13 +18,16 @@ from app.models.entities import (
 )
 
 __all__ = [
+    "AssetChunkRecord",
     "AgentMessageRecord",
     "AgentRecord",
     "ApprovalRecord",
     "BackgroundJobRecord",
     "EventLogRecord",
+    "MessageAssetRecord",
     "MessageRecord",
     "SessionRecord",
+    "SessionAssetRecord",
     "SessionMemoryRecord",
     "TaskDependencyRecord",
     "TaskRecord",

@@ -5,6 +5,7 @@ from app.core import workspace as workspace_utils
 from app.db.session import create_session
 from app.models import EventLogRecord, MessageRecord, SessionRecord
 from app.schemas.events import MessageCreate, SessionCreate, SessionSummary, TimelineEvent
+import app.services.asset_service as asset_service
 
 
 def _to_session_summary(row: SessionRecord, updated_at: str) -> SessionSummary:
@@ -90,14 +91,21 @@ def soft_delete_session(session_id: str) -> bool:
 
 def create_message_record(session_id: str, payload: MessageCreate) -> MessageRecord:
     with create_session() as db:
-        row = MessageRecord(session_id=session_id, role=payload.role, content=payload.content)
-        db.add(row)
-        db.commit()
-        db.refresh(row)
-        return row
+        try:
+            row = MessageRecord(session_id=session_id, role=payload.role, content=payload.content)
+            db.add(row)
+            db.flush()
+            if payload.asset_ids:
+                asset_service.link_message_assets(row.id, session_id, payload.asset_ids, db=db)
+            db.commit()
+            db.refresh(row)
+            return row
+        except Exception:
+            db.rollback()
+            raise
 
 
-def list_message_records(session_id: str, limit: int | None = None) -> list[dict[str, str]]:
+def list_message_records(session_id: str, limit: int | None = None) -> list[dict[str, object]]:
     with create_session() as db:
         rows = db.scalars(
             select(MessageRecord)
@@ -106,13 +114,41 @@ def list_message_records(session_id: str, limit: int | None = None) -> list[dict
         ).all()
         if limit is not None and limit > 0:
             rows = rows[-limit:]
-        return [
-            {
-                "role": row.role,
-                "content": row.content,
-            }
-            for row in rows
-        ]
+        messages: list[dict[str, object]] = []
+        for row in rows:
+            asset_ids = asset_service.list_message_asset_ids(row.id)
+            if not asset_ids:
+                messages.append(
+                    {
+                        "role": row.role,
+                        "content": row.content,
+                    }
+                )
+                continue
+
+            content_parts: list[dict[str, object]] = []
+            if row.content.strip():
+                content_parts.append({"type": "text", "text": row.content})
+            for asset_id in asset_ids:
+                asset = asset_service.get_asset(asset_id, session_id=session_id)
+                if asset is None:
+                    continue
+                content_parts.append(
+                    {
+                        "type": "asset_ref",
+                        "asset_id": asset.id,
+                        "filename": asset.filename,
+                        "kind": asset.kind,
+                        "status": asset.status,
+                    }
+                )
+            messages.append(
+                {
+                    "role": row.role,
+                    "content": content_parts or row.content,
+                }
+            )
+        return messages
 
 
 def has_user_messages(session_id: str) -> bool:

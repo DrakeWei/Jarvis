@@ -9,6 +9,8 @@ import app.services.context_budget as context_budget
 import app.services.conversation_search_service as conversation_search_service
 import app.services.memory_retriever as memory_retriever
 import app.services.memory_search_service as memory_search_service
+import app.services.asset_service as asset_service
+import app.providers.openai_adapter as openai_adapter
 
 
 class ContextBudgetTests(TestCase):
@@ -210,3 +212,96 @@ class ContextAssemblerTests(TestCase):
         )
         self.assertIn("Compacted bash result", tool_result_part["content"])
         self.assertEqual(assembled.debug_meta["summarized_tool_results"], 1)
+
+    def test_assemble_context_expands_document_asset_reference(self) -> None:
+        retrieval = memory_retriever.RetrievalResult(stable=[], dynamic=[], counts_by_kind={})
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Summarize the attached plan."},
+                    {"type": "asset_ref", "asset_id": "asset-1", "filename": "plan.docx", "kind": "docx", "status": "ready"},
+                ],
+            }
+        ]
+        asset = SimpleNamespace(
+            id="asset-1",
+            filename="plan.docx",
+            kind="docx",
+            status="ready",
+            error_message=None,
+            storage_path="/tmp/plan.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        chunks = [
+            SimpleNamespace(
+                id=1,
+                asset_id="asset-1",
+                chunk_index=0,
+                page_number=None,
+                sheet_name=None,
+                slide_number=None,
+                section_path="Status",
+                content="The runtime is now asset aware.",
+                summary="The runtime is now asset aware.",
+                char_count=31,
+                created_at="2026-05-16T00:00:00+00:00",
+            )
+        ]
+        with patch.object(
+            context_assembler.session_service,
+            "get_session",
+            return_value=SimpleNamespace(workspace_mode="bound", workspace_label="Jarvis"),
+        ), patch.object(
+            context_assembler.memory_retriever,
+            "retrieve_context_memories",
+            return_value=retrieval,
+        ), patch.object(
+            asset_service,
+            "get_asset",
+            return_value=asset,
+        ), patch.object(
+            asset_service,
+            "search_asset_chunks",
+            return_value=chunks,
+        ):
+            assembled = context_assembler.assemble_context(
+                session_id="session-1",
+                workspace=SimpleNamespace(as_posix=lambda: "/tmp/workspace"),
+                messages=messages,
+                base_system_prompt="You are Jarvis.",
+                allowed_external_reads=[],
+                max_tokens=4000,
+        )
+        first_user = assembled.messages[0]
+        self.assertEqual(first_user["role"], "user")
+        text_blocks = [
+            part["text"]
+            for part in first_user["content"]
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        self.assertTrue(any("Attached file: plan.docx" in block for block in text_blocks))
+
+
+class OpenAIAdapterFormattingTests(TestCase):
+    def test_responses_input_supports_input_image_parts(self) -> None:
+        with patch.object(openai_adapter.Path, "read_bytes", return_value=b"fake-image"):
+            items = openai_adapter._responses_input(
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Inspect this screenshot."},
+                            {
+                                "type": "input_image",
+                                "path": "/tmp/screenshot.png",
+                                "mime_type": "image/png",
+                            },
+                        ],
+                    }
+                ]
+            )
+        self.assertEqual(items[0]["role"], "user")
+        self.assertEqual(items[0]["content"][0]["type"], "input_text")
+        self.assertEqual(items[0]["content"][1]["type"], "input_image")
+        self.assertTrue(str(items[0]["content"][1]["image_url"]).startswith("data:image/png;base64,"))

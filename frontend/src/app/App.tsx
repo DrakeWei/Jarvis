@@ -1,4 +1,4 @@
-import { FormEvent, KeyboardEvent, type Dispatch, type MutableRefObject, type SetStateAction, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, type ChangeEvent, type Dispatch, type MutableRefObject, type SetStateAction, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -11,6 +11,7 @@ import {
   fetchApprovals,
   fetchBootstrap,
   resolveWorkspace,
+  fetchSessionAssets,
   fetchSessionState,
   fetchSessionMemory,
   fetchSessions,
@@ -25,11 +26,14 @@ import {
   renameSession,
   resumeTurn,
   runSubagent,
+  uploadSessionAssets,
   sendMessage,
   sendTeammateMessage,
   stopSessionTurn,
+  deleteSessionAsset,
   deleteSession,
   type ApprovalSummary,
+  type SessionAssetSummary,
   type SessionSummary,
   type SessionStateSummary,
   type SessionMemorySummary,
@@ -47,7 +51,6 @@ const ACTIVE_SESSION_KEY = "jarvis.activeSession";
 const DRAFT_SESSION_PREFIX = "draft:";
 const DISPLAY_LOCALE = "zh-CN";
 const DISPLAY_TIME_ZONE = "Asia/Shanghai";
-const DISPLAY_TIME_ZONE_LABEL = "UTC+8";
 const APP_LOGO_SRC = new URL("../assets/app-logo.png", import.meta.url).href;
 const WORKBENCH_TABS = [
   { id: "tasks", label: "Tasks" },
@@ -127,7 +130,7 @@ function parseTimestamp(timestamp: string): Date {
 }
 
 function formatSessionStamp(timestamp: string): string {
-  return `${sessionStampFormatter.format(parseTimestamp(timestamp))} ${DISPLAY_TIME_ZONE_LABEL}`;
+  return sessionStampFormatter.format(parseTimestamp(timestamp));
 }
 
 function sortSessionsByActivity<T extends { updated_at: string; created_at: string }>(items: T[]): T[] {
@@ -141,12 +144,10 @@ function sortSessionsByActivity<T extends { updated_at: string; created_at: stri
 function groupSessionsByWorkspace(items: SessionItem[]): Array<{ key: string; label: string; sessions: SessionItem[] }> {
   const groups = new Map<string, { key: string; label: string; sessions: SessionItem[] }>();
   for (const session of sortSessionsByActivity(items)) {
-    const label = session.isDraft
-      ? "Default Conversations"
-      : session.workspace_mode === "default"
+    const label = session.workspace_mode === "default"
         ? "Default Conversations"
         : session.workspace_label;
-    const key = session.isDraft ? "default" : session.workspace_mode === "default" ? "default" : session.workspace_fingerprint;
+    const key = session.workspace_mode === "default" ? "default" : session.workspace_fingerprint;
     const group = groups.get(key);
     if (group) {
       group.sessions.push(session);
@@ -212,8 +213,16 @@ function touchSession<T extends { session_id: string; title: string; updated_at:
   );
 }
 
+function sortAssets(items: SessionAssetSummary[]): SessionAssetSummary[] {
+  return [...items].sort(
+    (left, right) =>
+      parseTimestamp(right.updated_at ?? right.created_at).getTime() -
+      parseTimestamp(left.updated_at ?? left.created_at).getTime(),
+  );
+}
+
 function formatTimelineStamp(timestamp: string): string {
-  return `${timelineStampFormatter.format(parseTimestamp(timestamp))} ${DISPLAY_TIME_ZONE_LABEL}`;
+  return timelineStampFormatter.format(parseTimestamp(timestamp));
 }
 
 function previewText(content: string, maxLength = 180): string {
@@ -410,6 +419,8 @@ function nextSessionTitle(): string {
 export function App() {
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [activeSessionId, setActiveSessionId] = useState("");
+  const [assetsBySession, setAssetsBySession] = useState<Record<string, SessionAssetSummary[]>>({});
+  const [selectedAssetIdsBySession, setSelectedAssetIdsBySession] = useState<Record<string, string[]>>({});
   const [sessionStateBySession, setSessionStateBySession] = useState<Record<string, SessionStateSummary>>({});
   const [memoryBySession, setMemoryBySession] = useState<Record<string, SessionMemorySummary[]>>({});
   const [turnsBySession, setTurnsBySession] = useState<Record<string, TurnSummary[]>>({});
@@ -436,9 +447,12 @@ export function App() {
   const [autoScrollTimeline, setAutoScrollTimeline] = useState(true);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [createSessionError, setCreateSessionError] = useState("");
+  const [assetUploadError, setAssetUploadError] = useState("");
+  const [isUploadingAssets, setIsUploadingAssets] = useState(false);
   const [sessionContextMenu, setSessionContextMenu] = useState<SessionContextMenuState>(null);
   const [sessionDialog, setSessionDialog] = useState<SessionDialogState>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
+  const composerFileInputRef = useRef<HTMLInputElement | null>(null);
   const sessionContextMenuRef = useRef<HTMLDivElement | null>(null);
   const activeSessionRef = useRef("");
   const sessionSocketsRef = useRef<Record<string, () => void>>({});
@@ -488,7 +502,7 @@ export function App() {
   }, [activeSessionId]);
 
   async function refreshSessionState(sessionId: string) {
-    const [nextSessions, nextSubagents, nextApprovals, nextExecutions, nextTeammates, nextSessionState, nextTurns, nextMemory] = await Promise.all([
+    const [nextSessions, nextSubagents, nextApprovals, nextExecutions, nextTeammates, nextSessionState, nextTurns, nextMemory, nextAssets] = await Promise.all([
       fetchSessions(),
       fetchSubagents(sessionId),
       fetchApprovals(sessionId),
@@ -497,6 +511,7 @@ export function App() {
       fetchSessionState(sessionId),
       fetchTurns(sessionId),
       fetchSessionMemory(sessionId),
+      fetchSessionAssets(sessionId),
     ]);
 
     setSessions(sortSessionsByActivity(nextSessions));
@@ -513,6 +528,11 @@ export function App() {
     setSessionStateBySession((current) => ({ ...current, [sessionId]: nextSessionState }));
     setTurnsBySession((current) => ({ ...current, [sessionId]: nextTurns }));
     setMemoryBySession((current) => ({ ...current, [sessionId]: nextMemory }));
+    setAssetsBySession((current) => ({ ...current, [sessionId]: nextAssets }));
+    setSelectedAssetIdsBySession((current) => ({
+      ...current,
+      [sessionId]: (current[sessionId] ?? []).filter((assetId) => nextAssets.some((asset) => asset.id === assetId)),
+    }));
   }
 
   useEffect(() => {
@@ -540,6 +560,7 @@ export function App() {
       setTeammates([]);
       setApprovals([]);
       setExecutions([]);
+      setAssetsBySession((current) => ({ ...current, [activeSessionId]: [] }));
     });
     return () => {
       cancelled = true;
@@ -619,6 +640,7 @@ export function App() {
             return exists ? current : { ...current, [event.session_id]: [...sessionEvents, event] };
           });
           if (
+            event.type.startsWith("asset.") ||
             event.type.startsWith("tool.") ||
             event.type.startsWith("approval.") ||
             event.type.startsWith("turn.") ||
@@ -690,16 +712,73 @@ export function App() {
     await stopSessionTurn(activeSessionId);
   }
 
+  async function realizeDraftSession(sourceSessionId: string, preferredContent = ""): Promise<string> {
+    if (!sourceSessionId.startsWith(DRAFT_SESSION_PREFIX)) {
+      return sourceSessionId;
+    }
+    const draftSession = sessions.find((session) => session.session_id === sourceSessionId) ?? null;
+    const resolvedWorkspace =
+      draftSession?.workspace_mode === "bound" && draftSession.canonical_workspace_path
+        ? {
+            workspace_path: draftSession.canonical_workspace_path,
+            workspace_label: draftSession.workspace_label,
+            workspace_fingerprint: draftSession.workspace_fingerprint,
+          }
+        : preferredContent.trim()
+          ? await resolveWorkspace(preferredContent).catch(() => null)
+          : null;
+    const created = resolvedWorkspace
+      ? await createSession(nextSessionTitle(), resolvedWorkspace.workspace_path)
+      : await createSession(nextSessionTitle(), undefined);
+    setSessions((current) =>
+      sortSessionsByActivity(
+        current.map((session) =>
+          session.session_id === sourceSessionId ? { ...created } : session,
+        ),
+      ),
+    );
+    setEventsBySession((current) => {
+      const draftEvents = current[sourceSessionId] ?? [];
+      const { [sourceSessionId]: _, ...rest } = current;
+      return {
+        ...rest,
+        [created.session_id]: draftEvents.map((event) => ({ ...event, session_id: created.session_id })),
+      };
+    });
+    setStreamingBySession((current) => {
+      const draftStreaming = current[sourceSessionId] ?? null;
+      const { [sourceSessionId]: _, ...rest } = current;
+      return { ...rest, [created.session_id]: draftStreaming };
+    });
+    setAssetsBySession((current) => {
+      const draftAssets = current[sourceSessionId] ?? [];
+      const { [sourceSessionId]: _, ...rest } = current;
+      return { ...rest, [created.session_id]: draftAssets };
+    });
+    setSelectedAssetIdsBySession((current) => {
+      const draftAssetIds = current[sourceSessionId] ?? [];
+      const { [sourceSessionId]: _, ...rest } = current;
+      return { ...rest, [created.session_id]: draftAssetIds };
+    });
+    setActiveSessionId(created.session_id);
+    activeSessionRef.current = created.session_id;
+    return created.session_id;
+  }
+
   async function submitDraft() {
-    if (!activeSessionId || !draft.trim() || isActiveTurnRunning) return;
+    const selectedAssetIds = selectedAssetIdsBySession[activeSessionId] ?? [];
+    const selectedAssets = (assetsBySession[activeSessionId] ?? []).filter((asset) => selectedAssetIds.includes(asset.id));
+    if (!activeSessionId || (!draft.trim() && !selectedAssetIds.length) || isActiveTurnRunning) return;
     const content = draft.trim();
     const sourceSessionId = activeSessionId;
-    const isDraftSession = sourceSessionId.startsWith(DRAFT_SESSION_PREFIX);
-    const draftSession = sessions.find((session) => session.session_id === sourceSessionId) ?? null;
     let targetSessionId = sourceSessionId;
     setDraft("");
     setAutoScrollTimeline(true);
     const optimisticCreatedAt = new Date().toISOString();
+    const attachmentSummary = selectedAssets.length
+      ? selectedAssets.map((asset) => asset.filename).join(", ")
+      : `${selectedAssetIds.length} attachment(s)`;
+    const optimisticContent = content || attachmentSummary;
     setStreamingBySession((current) => ({
       ...current,
       [sourceSessionId]: {
@@ -719,57 +798,26 @@ export function App() {
         {
           session_id: sourceSessionId,
           type: "message.user.local",
-          content,
+          content: optimisticContent,
           created_at: optimisticCreatedAt,
         } as TimelineEvent,
       ],
     }));
     try {
-      if (isDraftSession) {
-        const resolvedWorkspace =
-          draftSession?.workspace_mode === "bound" && draftSession.canonical_workspace_path
-            ? {
-                workspace_path: draftSession.canonical_workspace_path,
-                workspace_label: draftSession.workspace_label,
-                workspace_fingerprint: draftSession.workspace_fingerprint,
-              }
-            : await resolveWorkspace(content).catch(() => null);
-        const created = resolvedWorkspace
-          ? await createSession(nextSessionTitle(), resolvedWorkspace.workspace_path)
-          : await createSession(nextSessionTitle(), undefined);
-        targetSessionId = created.session_id;
-        setSessions((current) =>
-          sortSessionsByActivity(
-            current.map((session) =>
-              session.session_id === sourceSessionId ? { ...created } : session,
-            ),
-          ),
-        );
-        setEventsBySession((current) => {
-          const draftEvents = current[sourceSessionId] ?? [];
-          const { [sourceSessionId]: _, ...rest } = current;
-          return {
-            ...rest,
-            [targetSessionId]: draftEvents.map((event) => ({ ...event, session_id: targetSessionId })),
-          };
-        });
-        setStreamingBySession((current) => {
-          const draftStreaming = current[sourceSessionId] ?? null;
-          const { [sourceSessionId]: _, ...rest } = current;
-          return { ...rest, [targetSessionId]: draftStreaming };
-        });
-        setActiveSessionId(targetSessionId);
-        activeSessionRef.current = targetSessionId;
+      if (sourceSessionId.startsWith(DRAFT_SESSION_PREFIX)) {
+        targetSessionId = await realizeDraftSession(sourceSessionId, content);
       }
 
-      await sendMessage(targetSessionId, content);
+      await sendMessage(targetSessionId, content, selectedAssetIds);
+      setSelectedAssetIdsBySession((current) => ({ ...current, [targetSessionId]: [] }));
     } catch (error) {
-      setStreamingBySession((current) => ({ ...current, [sourceSessionId]: null }));
+      const rollbackSessionId = targetSessionId;
+      setStreamingBySession((current) => ({ ...current, [rollbackSessionId]: null }));
       setEventsBySession((current) => ({
         ...current,
-        [sourceSessionId]: (current[sourceSessionId] ?? []).filter(
+        [rollbackSessionId]: (current[rollbackSessionId] ?? []).filter(
           (item) =>
-            !(item.type === "message.user.local" && item.content === content && item.created_at === optimisticCreatedAt),
+            !(item.type === "message.user.local" && item.content === optimisticContent && item.created_at === optimisticCreatedAt),
         ),
       }));
       throw error;
@@ -832,6 +880,68 @@ export function App() {
     }
   }
 
+  async function uploadComposerFiles(fileList: FileList | File[]) {
+    const files = Array.from(fileList);
+    if (!files.length || !activeSessionId) return;
+    setAssetUploadError("");
+    setIsUploadingAssets(true);
+    try {
+      const sourceSessionId = activeSessionId;
+      const targetSessionId = sourceSessionId.startsWith(DRAFT_SESSION_PREFIX)
+        ? await realizeDraftSession(sourceSessionId, draft)
+        : sourceSessionId;
+      const uploaded = await uploadSessionAssets(targetSessionId, files);
+      setAssetsBySession((current) => ({
+        ...current,
+        [targetSessionId]: sortAssets([...(current[targetSessionId] ?? []), ...uploaded]),
+      }));
+      setSelectedAssetIdsBySession((current) => ({
+        ...current,
+        [targetSessionId]: [...new Set([...(current[targetSessionId] ?? []), ...uploaded.map((asset) => asset.id)])],
+      }));
+    } catch (error) {
+      setAssetUploadError(error instanceof Error ? error.message : "Failed to upload attachments.");
+    } finally {
+      setIsUploadingAssets(false);
+      if (composerFileInputRef.current) {
+        composerFileInputRef.current.value = "";
+      }
+    }
+  }
+
+  function onComposerPickFiles() {
+    composerFileInputRef.current?.click();
+  }
+
+  function onComposerFilesSelected(event: ChangeEvent<HTMLInputElement>) {
+    if (!event.target.files?.length) return;
+    void uploadComposerFiles(event.target.files);
+  }
+
+  function onToggleAssetSelection(assetId: string) {
+    if (!activeSessionId) return;
+    setSelectedAssetIdsBySession((current) => {
+      const existing = current[activeSessionId] ?? [];
+      const next = existing.includes(assetId)
+        ? existing.filter((id) => id !== assetId)
+        : [...existing, assetId];
+      return { ...current, [activeSessionId]: next };
+    });
+  }
+
+  async function onDeleteAsset(assetId: string) {
+    if (!activeSessionId || activeSessionId.startsWith(DRAFT_SESSION_PREFIX)) return;
+    await deleteSessionAsset(activeSessionId, assetId);
+    setAssetsBySession((current) => ({
+      ...current,
+      [activeSessionId]: (current[activeSessionId] ?? []).filter((asset) => asset.id !== assetId),
+    }));
+    setSelectedAssetIdsBySession((current) => ({
+      ...current,
+      [activeSessionId]: (current[activeSessionId] ?? []).filter((id) => id !== assetId),
+    }));
+  }
+
   function onRenameSession(sessionId: string) {
     const target = sessions.find((session) => session.session_id === sessionId);
     if (!target) return;
@@ -878,6 +988,14 @@ export function App() {
       return rest;
     });
     setStreamingBySession((current) => {
+      const { [sessionDialog.sessionId]: _, ...rest } = current;
+      return rest;
+    });
+    setAssetsBySession((current) => {
+      const { [sessionDialog.sessionId]: _, ...rest } = current;
+      return rest;
+    });
+    setSelectedAssetIdsBySession((current) => {
       const { [sessionDialog.sessionId]: _, ...rest } = current;
       return rest;
     });
@@ -960,6 +1078,9 @@ export function App() {
     setWorkbenchOpen(true);
   }
 
+  const sessionAssets = activeSessionId ? assetsBySession[activeSessionId] ?? [] : [];
+  const selectedAssetIds = activeSessionId ? selectedAssetIdsBySession[activeSessionId] ?? [] : [];
+  const selectedComposerAssets = sessionAssets.filter((asset) => selectedAssetIds.includes(asset.id));
   const events = eventsBySession[activeSessionId] ?? [];
   const streamingAssistant = streamingBySession[activeSessionId] ?? null;
   const isActiveTurnRunning = Boolean(activeSessionId && streamingAssistant);
@@ -997,7 +1118,17 @@ export function App() {
   const selectedExecution = executions.find((item) => item.id === selectedExecutionId) ?? null;
   const selectedTeammate = teammates.find((item) => item.id === selectedTeammateId) ?? null;
   const timelineCards = events
-    .filter((event) => event.type !== "runtime.state" && event.type !== "session.renamed")
+    .filter(
+      (event) =>
+        event.type !== "runtime.state"
+        && event.type !== "session.renamed"
+        && event.type !== "turn.started"
+        && event.type !== "turn.completed"
+        && event.type !== "asset.uploaded"
+        && event.type !== "asset.processing"
+        && event.type !== "asset.ready"
+        && event.type !== "asset.removed"
+    )
     .map((event) => ({
       event,
       card: buildTimelineCard(event),
@@ -1622,7 +1753,73 @@ export function App() {
         ) : null}
 
         <form className="composer-shell" onSubmit={onSubmit}>
-          <div className="composer-frame">
+          <input
+            ref={composerFileInputRef}
+            type="file"
+            multiple
+            className="hidden-file-input"
+            onChange={onComposerFilesSelected}
+          />
+          <div
+            className="composer-frame"
+            onDragOver={(event) => {
+              event.preventDefault();
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              if (event.dataTransfer.files?.length) {
+                void uploadComposerFiles(event.dataTransfer.files);
+              }
+            }}
+          >
+            {selectedComposerAssets.length ? (
+              <div className="attachment-tray">
+                {selectedComposerAssets.map((asset) => {
+                  const isSelected = selectedAssetIds.includes(asset.id);
+                  return (
+                    <div
+                      key={asset.id}
+                      className={isSelected ? "attachment-chip selected" : "attachment-chip"}
+                      onClick={() => onToggleAssetSelection(asset.id)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          onToggleAssetSelection(asset.id);
+                        }
+                      }}
+                    >
+                      <div className="attachment-chip-main">
+                        {asset.preview_path ? (
+                          <img src={`file://${asset.preview_path}`} alt={asset.filename} className="attachment-preview" />
+                        ) : (
+                          <span className="attachment-kind">{asset.kind.toUpperCase()}</span>
+                        )}
+                        <div className="attachment-copy">
+                          <strong>{asset.filename}</strong>
+                          <span>{asset.status}</span>
+                        </div>
+                      </div>
+                      {!activeSessionId.startsWith(DRAFT_SESSION_PREFIX) ? (
+                        <button
+                          type="button"
+                          className="attachment-remove"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void onDeleteAsset(asset.id);
+                          }}
+                          aria-label={`Delete ${asset.filename}`}
+                          title={`Delete ${asset.filename}`}
+                        >
+                          ×
+                        </button>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
             <textarea
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
@@ -1633,33 +1830,53 @@ export function App() {
             />
           </div>
           <div className="composer-footer simple-footer">
-            <span>Enter to send</span>
-            {isActiveTurnRunning ? (
+            <span>
+              {assetUploadError
+                ? assetUploadError
+                : isUploadingAssets
+                  ? "Uploading attachments..."
+                  : selectedAssetIds.length
+                    ? `${selectedAssetIds.length} attachment(s) selected · Enter to send`
+                    : "Enter to send"}
+            </span>
+            <div className="composer-action-group">
               <button
                 type="button"
-                className="primary-button composer-action-button stop"
-                onClick={onStopTurn}
-                aria-label="Stop current turn"
-                title="Stop current turn"
+                className="secondary-button composer-attach-button"
+                onClick={onComposerPickFiles}
+                disabled={!activeSessionId || isUploadingAssets}
+                aria-label="Add attachment"
+                title="Add attachment"
               >
-                <svg viewBox="0 0 20 20" aria-hidden="true">
-                  <rect x="5.5" y="5.5" width="9" height="9" rx="1.5" />
-                </svg>
+                +
               </button>
-            ) : (
-              <button
-                type="submit"
-                className="primary-button composer-action-button"
-                disabled={!activeSessionId || !draft.trim()}
-                aria-label="Send message"
-                title="Send message"
-              >
-                <svg viewBox="0 0 20 20" aria-hidden="true">
-                  <path d="M3.5 10.5 15.5 4l-3 12-2.2-4.2z" />
-                  <path d="M7.8 11.2 12.4 8" />
-                </svg>
-              </button>
-            )}
+              {isActiveTurnRunning ? (
+                <button
+                  type="button"
+                  className="primary-button composer-action-button stop"
+                  onClick={onStopTurn}
+                  aria-label="Stop current turn"
+                  title="Stop current turn"
+                >
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <rect x="5.5" y="5.5" width="9" height="9" rx="1.5" />
+                  </svg>
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  className="primary-button composer-action-button"
+                  disabled={!activeSessionId || (!draft.trim() && !selectedAssetIds.length) || isUploadingAssets}
+                  aria-label="Send message"
+                  title="Send message"
+                >
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <path d="M3.5 10.5 15.5 4l-3 12-2.2-4.2z" />
+                    <path d="M7.8 11.2 12.4 8" />
+                  </svg>
+                </button>
+              )}
+            </div>
           </div>
         </form>
         </section>

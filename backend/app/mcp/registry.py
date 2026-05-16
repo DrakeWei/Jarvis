@@ -139,6 +139,38 @@ def local_tool_definitions(*, allow_subagent_tool: bool = True) -> list[ToolDefi
             source="local",
         ),
         ToolDefinition(
+            name="list_session_assets",
+            description="List uploaded session attachments available in the current session, including their ids, names, types, and readiness.",
+            input_schema={"type": "object", "properties": {}},
+            source="local",
+        ),
+        ToolDefinition(
+            name="read_asset_summary",
+            description="Read a compact summary of one uploaded session attachment, including its status and representative extracted content if available.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "string"},
+                },
+                "required": ["asset_id"],
+            },
+            source="local",
+        ),
+        ToolDefinition(
+            name="search_asset_chunks",
+            description="Search extracted chunks from one uploaded session attachment using a natural-language query.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "string"},
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["asset_id", "query"],
+            },
+            source="local",
+        ),
+        ToolDefinition(
             name="create_task",
             description="Create a lightweight task in the current session.",
             input_schema={
@@ -148,6 +180,19 @@ def local_tool_definitions(*, allow_subagent_tool: bool = True) -> list[ToolDefi
                     "description": {"type": "string"},
                 },
                 "required": ["subject"],
+            },
+            source="local",
+        ),
+        ToolDefinition(
+            name="read_asset_chunk",
+            description="Read one extracted chunk from an uploaded session attachment by chunk index.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "string"},
+                    "chunk_index": {"type": "integer"},
+                },
+                "required": ["asset_id", "chunk_index"],
             },
             source="local",
         ),

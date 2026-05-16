@@ -95,6 +95,10 @@ class Settings:
         self.jarvis_mcp_cache_ttl_seconds = float(os.getenv("JARVIS_MCP_CACHE_TTL_SECONDS", "15"))
         self.jarvis_agent_iteration_limit = int(os.getenv("JARVIS_AGENT_ITERATION_LIMIT", "24"))
         self.jarvis_subagent_iteration_limit = int(os.getenv("JARVIS_SUBAGENT_ITERATION_LIMIT", "18"))
+        self.jarvis_asset_max_upload_count = int(os.getenv("JARVIS_ASSET_MAX_UPLOAD_COUNT", "8"))
+        self.jarvis_asset_max_file_bytes = int(os.getenv("JARVIS_ASSET_MAX_FILE_BYTES", str(50 * 1024 * 1024)))
+        self.jarvis_asset_max_image_bytes = int(os.getenv("JARVIS_ASSET_MAX_IMAGE_BYTES", str(20 * 1024 * 1024)))
+        self.jarvis_asset_chunk_char_limit = int(os.getenv("JARVIS_ASSET_CHUNK_CHAR_LIMIT", "1400"))
 
     def _load_codex_config(self) -> dict[str, object]:
         config_path = Path.home() / ".codex" / "config.toml"

@@ -821,6 +821,95 @@ textarea:focus-visible {
   padding: 4px;
 }
 
+.hidden-file-input {
+  display: none;
+}
+
+.attachment-tray {
+  display: grid;
+  gap: 8px;
+  padding: 6px 6px 4px;
+}
+
+.attachment-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(248, 250, 252, 0.9);
+  cursor: pointer;
+}
+
+.attachment-chip.selected {
+  border-color: rgba(37, 99, 235, 0.22);
+  background: rgba(243, 247, 255, 0.98);
+}
+
+.attachment-chip-main {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.attachment-preview {
+  width: 42px;
+  height: 42px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: white;
+}
+
+.attachment-kind {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 42px;
+  height: 42px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.96);
+  color: var(--text-soft);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+}
+
+.attachment-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.attachment-copy strong {
+  font-size: 0.88rem;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.attachment-copy span {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.attachment-remove {
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.95);
+  color: var(--text-soft);
+  cursor: pointer;
+}
+
 .composer-frame textarea {
   min-height: 64px;
   padding: 8px 10px;
@@ -832,6 +921,21 @@ textarea:focus-visible {
 .composer-footer {
   justify-content: space-between;
   min-height: 28px;
+}
+
+.composer-action-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.composer-attach-button {
+  width: 36px;
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0;
+  font-size: 1.1rem;
+  line-height: 1;
 }
 
 .composer-footer span {
