@@ -1,4 +1,6 @@
 from app.services import (
+    asset_service,
+    asset_ingestion_service,
     approval_service,
     checkpoint_service,
     memory_service,
@@ -11,6 +13,8 @@ from app.services import (
 )
 
 __all__ = [
+    "asset_service",
+    "asset_ingestion_service",
     "approval_service",
     "checkpoint_service",
     "memory_service",

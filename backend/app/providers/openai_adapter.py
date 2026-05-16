@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import json
+from pathlib import Path
 import ssl
 import urllib.error
 import urllib.parse
@@ -267,12 +269,12 @@ def _openai_messages(messages: list[dict[str, Any]], *, system: str | None = Non
             continue
 
         if role == "user":
-            pending_text: list[str] = []
+            pending_content: list[dict[str, Any]] = []
             for part in content:
                 if isinstance(part, dict) and part.get("type") == "tool_result":
-                    if pending_text:
-                        converted.append({"role": "user", "content": "\n".join(pending_text)})
-                        pending_text = []
+                    if pending_content:
+                        converted.append(_openai_user_message(pending_content))
+                        pending_content = []
                     converted.append(
                         {
                             "role": "tool",
@@ -281,11 +283,15 @@ def _openai_messages(messages: list[dict[str, Any]], *, system: str | None = Non
                         }
                     )
                     continue
+                image_part = _openai_image_part(part)
+                if image_part is not None:
+                    pending_content.append(image_part)
+                    continue
                 text = _part_text(part)
                 if text:
-                    pending_text.append(text)
-            if pending_text:
-                converted.append({"role": "user", "content": "\n".join(pending_text)})
+                    pending_content.append({"type": "text", "text": text})
+            if pending_content:
+                converted.append(_openai_user_message(pending_content))
             continue
 
         converted.append({"role": role, "content": "\n".join(_part_text(part) for part in content)})
@@ -339,12 +345,12 @@ def _responses_input(messages: list[dict[str, Any]], *, system: str | None = Non
             continue
 
         if role == "user":
-            text_parts: list[str] = []
+            content_items: list[dict[str, Any]] = []
             for part in content:
                 if isinstance(part, dict) and part.get("type") == "tool_result":
-                    if text_parts:
-                        items.append(_responses_message("user", text_parts))
-                        text_parts = []
+                    if content_items:
+                        items.append(_responses_message_items("user", content_items))
+                        content_items = []
                     items.append(
                         {
                             "type": "function_call_output",
@@ -353,11 +359,15 @@ def _responses_input(messages: list[dict[str, Any]], *, system: str | None = Non
                         }
                     )
                     continue
+                image_part = _responses_image_part(part)
+                if image_part is not None:
+                    content_items.append(image_part)
+                    continue
                 text = _part_text(part)
                 if text:
-                    text_parts.append(text)
-            if text_parts:
-                items.append(_responses_message("user", text_parts))
+                    content_items.append({"type": "input_text", "text": text})
+            if content_items:
+                items.append(_responses_message_items("user", content_items))
             continue
 
         items.append(_responses_message(role, [_part_text(part) for part in content if _part_text(part)]))
@@ -369,6 +379,13 @@ def _responses_message(role: str, texts: list[str]) -> dict[str, Any]:
     return {
         "role": role,
         "content": [{"type": content_type, "text": text} for text in texts if text],
+    }
+
+
+def _responses_message_items(role: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "role": role,
+        "content": items,
     }
 
 
@@ -431,6 +448,55 @@ def _openai_assistant_message(content: list[Any]) -> dict[str, Any]:
     if tool_calls:
         message["tool_calls"] = tool_calls
     return message
+
+
+def _openai_user_message(content_parts: list[dict[str, Any]]) -> dict[str, Any]:
+    if all(part.get("type") == "text" for part in content_parts):
+        return {
+            "role": "user",
+            "content": "\n".join(str(part.get("text", "")) for part in content_parts if str(part.get("text", "")).strip()),
+        }
+    return {
+        "role": "user",
+        "content": content_parts,
+    }
+
+
+def _openai_image_part(part: Any) -> dict[str, Any] | None:
+    if not isinstance(part, dict) or part.get("type") != "input_image":
+        return None
+    image_url = _image_part_url(part)
+    if not image_url:
+        return None
+    return {
+        "type": "image_url",
+        "image_url": {"url": image_url},
+    }
+
+
+def _responses_image_part(part: Any) -> dict[str, Any] | None:
+    if not isinstance(part, dict) or part.get("type") != "input_image":
+        return None
+    image_url = _image_part_url(part)
+    if not image_url:
+        return None
+    return {
+        "type": "input_image",
+        "image_url": image_url,
+    }
+
+
+def _image_part_url(part: dict[str, Any]) -> str:
+    direct_url = str(part.get("image_url") or "").strip()
+    if direct_url:
+        return direct_url
+    path_value = str(part.get("path") or "").strip()
+    if not path_value:
+        return ""
+    mime_type = str(part.get("mime_type") or "application/octet-stream").strip()
+    data = Path(path_value).read_bytes()
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
 
 
 def _parse_chat_completions_payload(payload: dict[str, Any]) -> LLMResponse:
@@ -519,6 +585,8 @@ def _part_text(part: Any) -> str:
         return part.text
     if isinstance(part, dict) and part.get("type") == "text":
         return str(part.get("text", ""))
+    if isinstance(part, dict) and part.get("type") in {"input_image", "asset_ref"}:
+        return ""
     if isinstance(part, ToolUseBlock):
         return ""
     return str(part)

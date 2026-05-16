@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class SessionCreate(BaseModel):
@@ -16,7 +16,16 @@ class SessionRename(BaseModel):
 
 class MessageCreate(BaseModel):
     role: Literal["user", "assistant", "system"] = "user"
-    content: str = Field(min_length=1)
+    content: str = ""
+    asset_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_message_payload(self) -> "MessageCreate":
+        self.content = self.content.strip()
+        self.asset_ids = [asset_id.strip() for asset_id in self.asset_ids if asset_id and asset_id.strip()]
+        if not self.content and not self.asset_ids:
+            raise ValueError("A message must include text or at least one asset reference.")
+        return self
 
 
 class SessionSummary(BaseModel):

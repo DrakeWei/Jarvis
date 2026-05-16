@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.core import workspace as workspace_utils
 from app.mcp import ToolDefinition, ToolExecutionResult, tool_registry
 from app.providers import ProviderConfigError, ProviderRequestError, TextBlock, ToolUseBlock, create_client
+from app.schemas.assets import SessionAssetSummary
 from app.schemas.events import MessageCreate, SessionCreate, SessionSummary, TimelineEvent
 from app.schemas.session_state import SessionStateSummary
 from app.schemas.subagents import SubagentRunCreate
@@ -17,10 +18,11 @@ from app.schemas.workspace import WorkspaceResolveSummary
 import app.services.context_assembler as context_assembler
 import app.services.conversation_search_service as conversation_search_service
 import app.services.checkpoint_service as checkpoint_service
+import app.services.asset_ingestion_service as asset_ingestion_service
 import app.services.memory_service as memory_service
 import app.services.memory_search_service as memory_search_service
 import app.services.turn_service as turn_service
-from app.services import approval_service, session_service, subagent_service, teammate_service, tool_service
+from app.services import approval_service, asset_service, session_service, subagent_service, teammate_service, tool_service
 from app.tools.broker import ToolBroker, broker
 
 
@@ -154,6 +156,12 @@ class RuntimeManager:
     def list_memory(self, session_id: str):
         return memory_service.list_memory(session_id)
 
+    def list_assets(self, session_id: str) -> list[SessionAssetSummary]:
+        return asset_service.list_assets(session_id)
+
+    def get_asset(self, session_id: str, asset_id: str) -> SessionAssetSummary | None:
+        return asset_service.get_asset(asset_id, session_id=session_id)
+
     def list_approvals(self, session_id: str | None = None):
         return approval_service.list_approvals(session_id)
 
@@ -217,7 +225,12 @@ class RuntimeManager:
         if approve and pending:
             reply = await self._resume_agent_loop_after_approval(pending.session_id, pending.context)
             if reply:
-                await self._publish_assistant_reply(pending.session_id, reply, source_turn_id=turn_id if isinstance(turn_id, int) else None)
+                await self._publish_assistant_reply(
+                    pending.session_id,
+                    reply,
+                    source_turn_id=turn_id if isinstance(turn_id, int) else None,
+                    emit_deltas=False,
+                )
                 if isinstance(turn_id, int):
                     current_turn = turn_service.get_turn(turn_id)
                     if current_turn and current_turn.status == "running":
@@ -323,12 +336,42 @@ class RuntimeManager:
         self.background_tasks.add(task)
         task.add_done_callback(self.background_tasks.discard)
 
+    def _start_asset_ingestion(self, session_id: str, asset_id: str) -> None:
+        task = asyncio.create_task(self._run_asset_ingestion(session_id, asset_id))
+        self.background_tasks.add(task)
+        task.add_done_callback(self.background_tasks.discard)
+
     def _start_resumed_turn(self, session_id: str, turn_id: int, context: dict[str, object], phase: str) -> None:
         cancel_event = asyncio.Event()
         task = asyncio.create_task(self._run_resumed_turn(session_id, turn_id, context, phase, cancel_event))
         self.session_turns[session_id] = SessionTurn(turn_id=turn_id, task=task, cancel_event=cancel_event)
         self.background_tasks.add(task)
         task.add_done_callback(self.background_tasks.discard)
+
+    async def _run_asset_ingestion(self, session_id: str, asset_id: str) -> None:
+        asset = asset_service.get_asset(asset_id, session_id=session_id)
+        if asset is None:
+            return
+        await self.publish(
+            TimelineEvent(
+                session_id=session_id,
+                type="asset.processing",
+                content=f"Processing attachment '{asset.filename}'.",
+            )
+        )
+        result = await asyncio.to_thread(asset_ingestion_service.ingest_asset, asset_id)
+        event_type = "asset.ready" if result.status == "ready" else "asset.failed"
+        if result.status == "ready":
+            content = f"Attachment '{result.filename}' is ready."
+        else:
+            content = f"Attachment '{result.filename}' failed to process: {result.error_message or 'Unknown error.'}"
+        await self.publish(
+            TimelineEvent(
+                session_id=session_id,
+                type=event_type,
+                content=content,
+            )
+        )
 
     async def cancel_session_turn(self, session_id: str) -> bool:
         turn = self.session_turns.get(session_id)
@@ -368,14 +411,42 @@ class RuntimeManager:
         )
         return session
 
+    async def upload_assets(self, session_id: str, uploads: list[tuple[str, str | None, bytes]]) -> list[SessionAssetSummary]:
+        uploaded: list[SessionAssetSummary] = []
+        for filename, mime_type, data in uploads:
+            asset = asset_ingestion_service.stage_uploaded_asset(session_id, filename, mime_type, data)
+            uploaded.append(asset)
+            await self.publish(
+                TimelineEvent(
+                    session_id=session_id,
+                    type="asset.uploaded",
+                    content=f"Uploaded attachment '{asset.filename}'.",
+                )
+            )
+            self._start_asset_ingestion(session_id, asset.id)
+        return uploaded
+
+    async def delete_asset(self, session_id: str, asset_id: str) -> bool:
+        asset = asset_service.get_asset(asset_id, session_id=session_id)
+        deleted = asset_service.hide_asset(asset_id, session_id=session_id)
+        if deleted:
+            await self.publish(
+                TimelineEvent(
+                    session_id=session_id,
+                    type="asset.removed",
+                    content=f"Removed attachment '{asset.filename if asset else asset_id}'.",
+                )
+            )
+        return deleted
+
     async def append_message(self, session_id: str, payload: MessageCreate) -> None:
-        should_autoname = payload.role == "user" and self._should_autoname_session(session_id)
+        should_autoname = payload.role == "user" and bool(payload.content.strip()) and self._should_autoname_session(session_id)
         created_message = session_service.create_message_record(session_id, payload)
         await self.publish(
             TimelineEvent(
                 session_id=session_id,
                 type=f"message.{payload.role}",
-                content=payload.content,
+                content=self._timeline_message_content(session_id, payload),
             )
         )
         if payload.role == "user":
@@ -386,12 +457,29 @@ class RuntimeManager:
                 workspace_path=workspace.as_posix(),
                 workspace_fingerprint=workspace_utils.workspace_fingerprint(workspace),
             )
-            memory_service.remember_goal(session_id, payload.content, source_turn_id=turn.id)
-            self._capture_user_memory_signals(session_id, turn.id, payload.content)
+            if payload.content.strip():
+                memory_service.remember_goal(session_id, payload.content, source_turn_id=turn.id)
+                self._capture_user_memory_signals(session_id, turn.id, payload.content)
             memory_service.refresh_rolling_summary(session_id, turn.id)
             if should_autoname:
                 self._start_autoname_session(session_id, payload.content)
             self._start_background_turn(session_id, payload.content, turn.id)
+
+    def _timeline_message_content(self, session_id: str, payload: MessageCreate) -> str:
+        text = payload.content.strip()
+        if not payload.asset_ids:
+            return text
+        asset_names = [
+            asset.filename
+            for asset_id in payload.asset_ids
+            for asset in [asset_service.get_asset(asset_id, session_id=session_id)]
+            if asset is not None
+        ]
+        if text:
+            return text
+        if asset_names:
+            return ", ".join(asset_names)
+        return f"{len(payload.asset_ids)} attachment(s)"
 
     async def _run_lead_turn(self, session_id: str, turn_id: int, content: str, cancel_event: asyncio.Event) -> None:
         await self.emit_ephemeral(
@@ -411,7 +499,7 @@ class RuntimeManager:
         )
         try:
             reply = await self._run_agent_task(session_id, turn_id, content, cancel_event)
-            await self._publish_assistant_reply(session_id, reply, source_turn_id=turn_id)
+            await self._publish_assistant_reply(session_id, reply, source_turn_id=turn_id, emit_deltas=False)
             current_turn = turn_service.get_turn(turn_id)
             if current_turn and current_turn.status == "running":
                 turn_service.update_turn_status(turn_id, "completed", completed=True)
@@ -469,7 +557,7 @@ class RuntimeManager:
         )
         try:
             reply = await self._resume_turn_from_context(session_id, turn_id, context, cancel_event)
-            await self._publish_assistant_reply(session_id, reply, source_turn_id=turn_id)
+            await self._publish_assistant_reply(session_id, reply, source_turn_id=turn_id, emit_deltas=False)
             current_turn = turn_service.get_turn(turn_id)
             if current_turn and current_turn.status == "running":
                 turn_service.update_turn_status(turn_id, "completed", completed=True)
@@ -1012,6 +1100,74 @@ class RuntimeManager:
                 role=role,
                 limit=max(1, min(limit, 10)),
             )
+        if tool_name == "list_session_assets":
+            assets = asset_service.list_assets(session_id)
+            if not assets:
+                return "completed", "No uploaded session attachments are available."
+            lines = [
+                f"- id={asset.id} name={asset.filename} kind={asset.kind} status={asset.status}"
+                for asset in assets
+            ]
+            return "completed", "Session attachments:\n" + "\n".join(lines)
+        if tool_name == "read_asset_summary":
+            asset_id = str(tool_input.get("asset_id", "")).strip()
+            if not asset_id:
+                return "error", "read_asset_summary requires a non-empty asset_id."
+            asset = asset_service.get_asset(asset_id, session_id=session_id)
+            if asset is None:
+                return "error", f"Unknown session asset '{asset_id}'."
+            lines = [
+                f"id={asset.id}",
+                f"name={asset.filename}",
+                f"kind={asset.kind}",
+                f"mime_type={asset.mime_type}",
+                f"status={asset.status}",
+                f"size_bytes={asset.size_bytes}",
+            ]
+            if asset.error_message:
+                lines.append(f"error={asset.error_message}")
+            chunks = asset_service.list_asset_chunks(asset.id)[:2]
+            if chunks:
+                lines.append("Representative extracted content:")
+                lines.extend(f"- {chunk.content[:500]}" for chunk in chunks)
+            return "completed", "\n".join(lines)
+        if tool_name == "search_asset_chunks":
+            asset_id = str(tool_input.get("asset_id", "")).strip()
+            query = str(tool_input.get("query", "")).strip()
+            raw_limit = tool_input.get("limit", 3)
+            limit = raw_limit if isinstance(raw_limit, int) else 3
+            if not asset_id or not query:
+                return "error", "search_asset_chunks requires both asset_id and query."
+            asset = asset_service.get_asset(asset_id, session_id=session_id)
+            if asset is None:
+                return "error", f"Unknown session asset '{asset_id}'."
+            chunks = asset_service.search_asset_chunks(asset.id, query, limit=max(1, min(limit, 8)))
+            if not chunks:
+                return "completed", f"No extracted chunks matched '{query}' for attachment '{asset.filename}'."
+            lines = [f"Attachment '{asset.filename}' matching chunks:"]
+            for chunk in chunks:
+                location_bits: list[str] = []
+                if chunk.page_number is not None:
+                    location_bits.append(f"page={chunk.page_number}")
+                if chunk.sheet_name:
+                    location_bits.append(f"sheet={chunk.sheet_name}")
+                if chunk.slide_number is not None:
+                    location_bits.append(f"slide={chunk.slide_number}")
+                location = f" ({', '.join(location_bits)})" if location_bits else ""
+                lines.append(f"- chunk_index={chunk.chunk_index}{location}: {chunk.content[:600]}")
+            return "completed", "\n".join(lines)
+        if tool_name == "read_asset_chunk":
+            asset_id = str(tool_input.get("asset_id", "")).strip()
+            chunk_index = tool_input.get("chunk_index")
+            if not asset_id or not isinstance(chunk_index, int):
+                return "error", "read_asset_chunk requires asset_id and integer chunk_index."
+            asset = asset_service.get_asset(asset_id, session_id=session_id)
+            if asset is None:
+                return "error", f"Unknown session asset '{asset_id}'."
+            chunk = asset_service.get_asset_chunk_by_index(asset.id, chunk_index)
+            if chunk is None:
+                return "error", f"Chunk {chunk_index} not found for attachment '{asset.filename}'."
+            return "completed", chunk.content
         if tool_name == "create_task":
             subject = str(tool_input.get("subject", "")).strip()
             description = str(tool_input.get("description", "")).strip()
@@ -1075,17 +1231,25 @@ class RuntimeManager:
         ) or ("error", f"Tool '{tool.name}' returned no execution result.")
         return ToolExecutionResult(status=status, output=output)
 
-    async def _publish_assistant_reply(self, session_id: str, reply: str, *, source_turn_id: int | None = None) -> None:
+    async def _publish_assistant_reply(
+        self,
+        session_id: str,
+        reply: str,
+        *,
+        source_turn_id: int | None = None,
+        emit_deltas: bool = True,
+    ) -> None:
         text = reply.strip() or "LLM provider returned no text output."
-        for chunk in self._chunk_text(text):
-            await self.emit_ephemeral(
-                TimelineEvent(
-                    session_id=session_id,
-                    type="message.assistant.delta",
-                    content=chunk,
+        if emit_deltas:
+            for chunk in self._chunk_text(text):
+                await self.emit_ephemeral(
+                    TimelineEvent(
+                        session_id=session_id,
+                        type="message.assistant.delta",
+                        content=chunk,
+                    )
                 )
-            )
-            await asyncio.sleep(0.035)
+                await asyncio.sleep(0.035)
         session_service.create_message_record(session_id, MessageCreate(role="assistant", content=text))
         memory_service.remember_progress(session_id, text, source_turn_id=source_turn_id)
         self._capture_assistant_memory_signals(session_id, source_turn_id, text)
@@ -1104,6 +1268,7 @@ class RuntimeManager:
                 f"Target workspace: {workspace}",
                 "You may answer directly when no tool is needed, but you should decide for yourself whether tools are necessary.",
                 "When the user asks about files, directories, paths, project structure, README contents, code contents, or workspace state, inspect the workspace with tools first instead of guessing.",
+                "When the session has uploaded attachments and the current prompt depends on them, use the session attachment tools to inspect extracted content instead of guessing from filenames alone.",
                 "When the user asks you to create or modify files, do the work directly inside the target workspace when it is safe.",
                 "The current session is bound to exactly one canonical workspace. Do not treat another project name in the prompt as permission to silently switch workspaces.",
                 "If the user explicitly mentions an absolute path outside the current session workspace, you may read it as a read-only external reference when useful.",
@@ -1127,6 +1292,7 @@ class RuntimeManager:
                 "You are Jarvis running as a bounded subagent.",
                 f"Target workspace: {workspace}",
                 "You may use tools to inspect or modify the workspace when needed.",
+                "If uploaded session attachments matter to the task, use the session attachment tools to inspect them.",
                 "You may read explicit absolute paths outside the current session workspace only as read-only external references.",
                 "You must not write outside the current session workspace.",
                 "You must not spawn subagents.",

@@ -15,6 +15,9 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, futu
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _migrate_session_columns()
+    _migrate_session_asset_columns()
+    _migrate_message_asset_columns()
+    _migrate_asset_chunk_columns()
     _migrate_turn_columns()
     _migrate_approval_columns()
     _migrate_tool_execution_columns()
@@ -94,6 +97,101 @@ def _migrate_tool_execution_columns() -> None:
         with engine.begin() as connection:
             for statement in statements:
                 connection.execute(text(statement))
+
+
+def _migrate_session_asset_columns() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("session_assets")}
+    except Exception:
+        return
+
+    statements: list[str] = []
+    if "preview_path" not in columns:
+        statements.append("ALTER TABLE session_assets ADD COLUMN preview_path TEXT")
+    if "status" not in columns:
+        statements.append("ALTER TABLE session_assets ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'uploaded'")
+    if "error_message" not in columns:
+        statements.append("ALTER TABLE session_assets ADD COLUMN error_message TEXT")
+    if "hidden" not in columns:
+        statements.append("ALTER TABLE session_assets ADD COLUMN hidden BOOLEAN NOT NULL DEFAULT 0")
+    if "updated_at" not in columns:
+        statements.append("ALTER TABLE session_assets ADD COLUMN updated_at DATETIME")
+    if "sha256" not in columns:
+        statements.append("ALTER TABLE session_assets ADD COLUMN sha256 VARCHAR(64) NOT NULL DEFAULT ''")
+    if "size_bytes" not in columns:
+        statements.append("ALTER TABLE session_assets ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0")
+
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+            connection.execute(
+                text(
+                    """
+                    UPDATE session_assets
+                    SET status = COALESCE(status, 'uploaded'),
+                        hidden = COALESCE(hidden, 0),
+                        updated_at = COALESCE(updated_at, created_at),
+                        sha256 = COALESCE(sha256, ''),
+                        size_bytes = COALESCE(size_bytes, 0)
+                    """
+                )
+            )
+
+
+def _migrate_message_asset_columns() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("message_assets")}
+    except Exception:
+        return
+
+    statements: list[str] = []
+    if "created_at" not in columns:
+        statements.append("ALTER TABLE message_assets ADD COLUMN created_at DATETIME")
+
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+
+
+def _migrate_asset_chunk_columns() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("asset_chunks")}
+    except Exception:
+        return
+
+    statements: list[str] = []
+    if "page_number" not in columns:
+        statements.append("ALTER TABLE asset_chunks ADD COLUMN page_number INTEGER")
+    if "sheet_name" not in columns:
+        statements.append("ALTER TABLE asset_chunks ADD COLUMN sheet_name VARCHAR(160)")
+    if "slide_number" not in columns:
+        statements.append("ALTER TABLE asset_chunks ADD COLUMN slide_number INTEGER")
+    if "section_path" not in columns:
+        statements.append("ALTER TABLE asset_chunks ADD COLUMN section_path TEXT")
+    if "summary" not in columns:
+        statements.append("ALTER TABLE asset_chunks ADD COLUMN summary TEXT")
+    if "char_count" not in columns:
+        statements.append("ALTER TABLE asset_chunks ADD COLUMN char_count INTEGER NOT NULL DEFAULT 0")
+    if "created_at" not in columns:
+        statements.append("ALTER TABLE asset_chunks ADD COLUMN created_at DATETIME")
+
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+            connection.execute(
+                text(
+                    """
+                    UPDATE asset_chunks
+                    SET char_count = COALESCE(char_count, LENGTH(COALESCE(content, '')))
+                    """
+                )
+            )
 
 
 def _migrate_turn_columns() -> None:

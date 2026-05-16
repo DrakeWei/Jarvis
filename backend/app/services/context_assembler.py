@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 from app.core.config import settings
-from app.services import session_service
+from app.services import asset_service, session_service
 from app.services import memory_retriever
 from app.services.context_budget import (
     compact_tool_result_messages,
@@ -57,6 +57,8 @@ def _content_text(content: Any) -> str:
                 parts.append(str(part["text"]))
             elif part.get("type") == "tool_result" and part.get("content"):
                 parts.append(str(part["content"]))
+            elif part.get("type") == "asset_ref":
+                parts.append(f"attachment {part.get('filename', part.get('asset_id', ''))}")
         else:
             parts.append(str(part))
     return "\n".join(parts)
@@ -290,6 +292,65 @@ def _prepend_context_text(
     return [{"role": "user", "content": context_text}] + copied
 
 
+def _attachment_summary_text(asset_id: str, query_text: str) -> list[dict[str, str]]:
+    asset = asset_service.get_asset(asset_id)
+    if asset is None:
+        return [{"type": "text", "text": f"Attachment {asset_id} is no longer available."}]
+    if asset.status in {"uploaded", "processing"}:
+        return [{"type": "text", "text": f"Attachment '{asset.filename}' is still processing."}]
+    if asset.status == "failed":
+        reason = asset.error_message or "unknown error"
+        return [{"type": "text", "text": f"Attachment '{asset.filename}' failed to process: {reason}."}]
+    if asset.kind == "image":
+        return [
+            {"type": "text", "text": f"Attached image: {asset.filename}."},
+            {
+                "type": "input_image",
+                "asset_id": asset.id,
+                "filename": asset.filename,
+                "mime_type": asset.mime_type,
+                "path": asset.storage_path,
+            },
+        ]
+
+    chunks = asset_service.search_asset_chunks(asset.id, query_text, limit=3)
+    if not chunks:
+        return [{"type": "text", "text": f"Attached file: {asset.filename} ({asset.kind}). No extracted text is available yet."}]
+
+    lines = [f"Attached file: {asset.filename} ({asset.kind}). Relevant extracted excerpts:"]
+    for chunk in chunks:
+        location_bits: list[str] = []
+        if chunk.page_number is not None:
+            location_bits.append(f"page {chunk.page_number}")
+        if chunk.sheet_name:
+            location_bits.append(f"sheet {chunk.sheet_name}")
+        if chunk.slide_number is not None:
+            location_bits.append(f"slide {chunk.slide_number}")
+        if chunk.section_path:
+            location_bits.append(chunk.section_path)
+        location = f" ({', '.join(location_bits)})" if location_bits else ""
+        lines.append(f"- {chunk.content[:500]}{location}")
+    return [{"type": "text", "text": "\n".join(lines)}]
+
+
+def _expand_asset_references(messages: list[dict[str, Any]], query_text: str) -> list[dict[str, Any]]:
+    expanded = deepcopy(messages)
+    for message in expanded:
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        next_parts: list[dict[str, Any]] = []
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "asset_ref":
+                next_parts.append(part)
+                continue
+            next_parts.extend(_attachment_summary_text(str(part.get("asset_id", "")), query_text))
+        message["content"] = next_parts
+    return expanded
+
+
 def assemble_context(
     *,
     session_id: str,
@@ -412,6 +473,8 @@ def assemble_context(
         dropped_blocks.append("trimmed_dynamic_context")
         assembled_messages = _prepend_context_text(working_suffix, trimmed)
         total_size = _estimate_total(assembled_messages)
+
+    assembled_messages = _expand_asset_references(assembled_messages, latest_user_text)
 
     return AssembledContext(
         system_prompt=system_prompt,

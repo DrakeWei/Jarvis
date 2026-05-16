@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 
+from app.core.config import settings
 from app.schemas.approvals import ApprovalDecision
 from app.schemas.events import MessageCreate, SessionCreate, SessionRename
 from app.schemas.subagents import SubagentRunCreate
@@ -80,6 +81,50 @@ async def get_session_state(session_id: str):
     if not result:
         raise HTTPException(status_code=404, detail="Unknown session")
     return result
+
+
+@router.post("/sessions/{session_id}/assets")
+async def upload_session_assets(session_id: str, files: list[UploadFile] = File(...)):
+    if not runtime.session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Unknown session")
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded")
+    if len(files) > settings.jarvis_asset_max_upload_count:
+        raise HTTPException(status_code=400, detail="Too many files in one upload request")
+    uploads: list[tuple[str, str | None, bytes]] = []
+    for item in files:
+        uploads.append((item.filename or "", item.content_type, await item.read()))
+    try:
+        return await runtime.upload_assets(session_id, uploads)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/sessions/{session_id}/assets")
+async def list_session_assets(session_id: str):
+    if not runtime.session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Unknown session")
+    return runtime.list_assets(session_id)
+
+
+@router.get("/sessions/{session_id}/assets/{asset_id}")
+async def get_session_asset(session_id: str, asset_id: str):
+    if not runtime.session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Unknown session")
+    asset = runtime.get_asset(session_id, asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Unknown asset")
+    return asset
+
+
+@router.delete("/sessions/{session_id}/assets/{asset_id}")
+async def delete_session_asset(session_id: str, asset_id: str) -> dict[str, bool]:
+    if not runtime.session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Unknown session")
+    deleted = await runtime.delete_asset(session_id, asset_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Unknown asset")
+    return {"deleted": True}
 
 
 @router.post("/sessions/{session_id}/messages")

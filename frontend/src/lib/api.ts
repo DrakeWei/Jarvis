@@ -92,6 +92,22 @@ export type SessionMemorySummary = {
   updated_at: string;
 };
 
+export type SessionAssetSummary = {
+  id: string;
+  session_id: string;
+  kind: string;
+  mime_type: string;
+  filename: string;
+  size_bytes: number;
+  sha256: string;
+  storage_path: string;
+  preview_path: string | null;
+  status: string;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type TurnSummary = {
   id: number;
   session_id: string;
@@ -212,6 +228,7 @@ export async function deleteSession(sessionId: string): Promise<void> {
 export async function sendMessage(
   sessionId: string,
   content: string,
+  assetIds: string[] = [],
 ): Promise<void> {
   const response = await fetch(`${API_BASE}/sessions/${sessionId}/messages`, {
     method: "POST",
@@ -221,6 +238,7 @@ export async function sendMessage(
     body: JSON.stringify({
       role: "user",
       content,
+      asset_ids: assetIds,
     }),
   });
   if (!response.ok) {
@@ -253,6 +271,39 @@ export async function fetchSessionState(sessionId: string): Promise<SessionState
     throw new Error("Failed to load session state");
   }
   return response.json();
+}
+
+export async function fetchSessionAssets(sessionId: string): Promise<SessionAssetSummary[]> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/assets`);
+  if (!response.ok) {
+    throw new Error("Failed to load session assets");
+  }
+  return response.json();
+}
+
+export async function uploadSessionAssets(sessionId: string, files: File[]): Promise<SessionAssetSummary[]> {
+  const form = new FormData();
+  for (const file of files) {
+    form.append("files", file);
+  }
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/assets`, {
+    method: "POST",
+    body: form,
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || "Failed to upload session assets");
+  }
+  return response.json();
+}
+
+export async function deleteSessionAsset(sessionId: string, assetId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/assets/${assetId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    throw new Error("Failed to delete session asset");
+  }
 }
 
 export async function fetchTurns(sessionId?: string): Promise<TurnSummary[]> {
