@@ -1,0 +1,212 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest import TestCase
+from unittest.mock import patch
+
+import app.services.context_assembler as context_assembler
+import app.services.context_budget as context_budget
+import app.services.conversation_search_service as conversation_search_service
+import app.services.memory_retriever as memory_retriever
+import app.services.memory_search_service as memory_search_service
+
+
+class ContextBudgetTests(TestCase):
+    def test_build_tool_result_summary_shortens_long_output(self) -> None:
+        content = "\n".join(f"/tmp/file_{index}.txt line {index}" for index in range(40))
+        summary = context_budget.build_tool_result_summary(
+            tool_name="read_file",
+            content=content,
+            limit=180,
+        )
+        self.assertIn("Compacted read_file result", summary)
+        self.assertLessEqual(len(summary), 180)
+
+    def test_compact_tool_result_messages_preserves_tool_use_id(self) -> None:
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call-1",
+                        "content": "X" * 1200,
+                    }
+                ],
+            }
+        ]
+        compacted, count = context_budget.compact_tool_result_messages(
+            messages,
+            {"call-1": "bash"},
+            per_result_limit=160,
+        )
+        self.assertEqual(count, 1)
+        part = compacted[0]["content"][0]
+        self.assertEqual(part["tool_use_id"], "call-1")
+        self.assertIn("Compacted bash result", part["content"])
+
+
+class SearchFormattingTests(TestCase):
+    def test_memory_search_text_formats_ranked_rows(self) -> None:
+        row = memory_retriever.RankedMemory(
+            id=1,
+            kind="constraint",
+            content="Keep changes inside the current workspace only.",
+            path_ref=None,
+            source_turn_id=12,
+            status="active",
+            salience=90,
+            score=500,
+            path_match=False,
+            text_matches=1,
+        )
+        with patch.object(memory_retriever, "search_memories", return_value=[row]):
+            text = memory_search_service.search_memory_text(
+                "session-1",
+                query="workspace only",
+            )
+        self.assertIn("Memory search results:", text)
+        self.assertIn("[constraint]", text)
+        self.assertIn("turn=12", text)
+
+    def test_conversation_search_text_formats_hits(self) -> None:
+        hit = conversation_search_service.ConversationHit(
+            id=1,
+            role="user",
+            content="Please inspect the backend runtime manager.",
+            score=180,
+        )
+        with patch.object(conversation_search_service, "search_conversation", return_value=[hit]):
+            text = conversation_search_service.search_conversation_text(
+                "session-1",
+                query="runtime manager",
+            )
+        self.assertIn("Conversation search results:", text)
+        self.assertIn("[user]", text)
+        self.assertIn("backend runtime manager", text)
+
+
+class ContextAssemblerTests(TestCase):
+    def test_build_initial_loop_messages_keeps_tail_and_extra_signal_messages(self) -> None:
+        transcript = [
+            {"role": "user", "content": f"message {index}"}
+            for index in range(16)
+        ]
+        transcript[2]["content"] = "Please inspect /tmp/project/README.md"
+        with patch.object(context_assembler.session_service, "list_message_records", return_value=transcript):
+            selected = context_assembler.build_initial_loop_messages("session-1", lookback=24, keep=12)
+        self.assertEqual(len(selected), 12)
+        self.assertEqual(selected[-1]["content"], "message 15")
+        self.assertTrue(any("README.md" in item["content"] for item in selected))
+
+    def test_assemble_context_injects_runtime_context_into_tool_result_message(self) -> None:
+        retrieval = memory_retriever.RetrievalResult(
+            stable=[],
+            dynamic=[
+                memory_retriever.RankedMemory(
+                    id=1,
+                    kind="progress",
+                    content="We are currently inspecting the runtime manager flow.",
+                    path_ref="backend/app/runtime/manager.py",
+                    source_turn_id=3,
+                    status="active",
+                    salience=80,
+                    score=300,
+                    path_match=True,
+                    text_matches=1,
+                )
+            ],
+            counts_by_kind={"progress": 1},
+        )
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "call-1",
+                        "name": "read_file",
+                        "input": {"path": "backend/app/runtime/manager.py"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call-1",
+                        "content": "runtime manager content",
+                    }
+                ],
+            },
+        ]
+        with patch.object(
+            context_assembler.session_service,
+            "get_session",
+            return_value=SimpleNamespace(workspace_mode="bound", workspace_label="Jarvis"),
+        ), patch.object(
+            context_assembler.memory_retriever,
+            "retrieve_context_memories",
+            return_value=retrieval,
+        ):
+            assembled = context_assembler.assemble_context(
+                session_id="session-1",
+                workspace=SimpleNamespace(as_posix=lambda: "/tmp/workspace"),
+                messages=messages,
+                base_system_prompt="You are Jarvis.",
+                allowed_external_reads=[],
+                max_tokens=4000,
+            )
+        first_user = next(message for message in assembled.messages if message["role"] == "user")
+        self.assertEqual(first_user["content"][1]["tool_use_id"], "call-1")
+        self.assertIn("<runtime-context>", first_user["content"][0]["text"])
+
+    def test_assemble_context_compacts_large_tool_result_when_over_budget(self) -> None:
+        retrieval = memory_retriever.RetrievalResult(stable=[], dynamic=[], counts_by_kind={})
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "call-1",
+                        "name": "bash",
+                        "input": {"command": "rg TODO backend"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call-1",
+                        "content": "\n".join(f"/tmp/file_{index}.py:TODO item {index}" for index in range(80)),
+                    }
+                ],
+            },
+        ]
+        with patch.object(
+            context_assembler.session_service,
+            "get_session",
+            return_value=SimpleNamespace(workspace_mode="bound", workspace_label="Jarvis"),
+        ), patch.object(
+            context_assembler.memory_retriever,
+            "retrieve_context_memories",
+            return_value=retrieval,
+        ):
+            assembled = context_assembler.assemble_context(
+                session_id="session-1",
+                workspace=SimpleNamespace(as_posix=lambda: "/tmp/workspace"),
+                messages=messages,
+                base_system_prompt="You are Jarvis.",
+                allowed_external_reads=[],
+                max_tokens=256,
+            )
+        first_user = next(message for message in assembled.messages if message["role"] == "user")
+        tool_result_part = next(
+            part for part in first_user["content"] if isinstance(part, dict) and part.get("type") == "tool_result"
+        )
+        self.assertIn("Compacted bash result", tool_result_part["content"])
+        self.assertEqual(assembled.debug_meta["summarized_tool_results"], 1)

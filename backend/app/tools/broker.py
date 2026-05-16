@@ -5,11 +5,20 @@ import subprocess
 from pathlib import Path
 
 from app.core.config import settings
+from app.core import workspace as workspace_utils
 
 
 class ToolBroker:
-    def __init__(self, project_root: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        project_root: Path | str | None = None,
+        *,
+        allowed_external_reads: list[Path] | None = None,
+        write_enabled: bool = True,
+    ) -> None:
         self.project_root = Path(project_root).resolve() if project_root else settings.project_root
+        self.allowed_external_reads = [path.resolve() for path in (allowed_external_reads or [])]
+        self.write_enabled = write_enabled
         self._ignored_dir_names = {
             ".git",
             ".hg",
@@ -29,7 +38,7 @@ class ToolBroker:
     def run(self, tool_name: str, payload: dict[str, object]) -> tuple[str, str]:
         try:
             if tool_name == "list_files":
-                return "completed", self._list_files()
+                return "completed", self._list_files(str(payload.get("path", "")))
             if tool_name == "read_file":
                 return self._read_file(str(payload.get("path", "")))
             if tool_name == "write_file":
@@ -49,18 +58,49 @@ class ToolBroker:
     def serialize_input(self, payload: dict[str, object]) -> str:
         return json.dumps(payload, ensure_ascii=True)
 
-    def _safe_path(self, value: str) -> Path:
-        if not value.strip():
+    def _is_allowed_external_read(self, path: Path) -> bool:
+        for allowed in self.allowed_external_reads:
+            if allowed.is_dir() and workspace_utils.path_within(allowed, path):
+                return True
+            if path == allowed:
+                return True
+        return False
+
+    def _resolve_path(self, value: str, *, mode: str) -> Path:
+        if value.strip():
+            raw = Path(value).expanduser()
+            path = raw.resolve() if raw.is_absolute() else (self.project_root / raw).resolve()
+        else:
+            path = self.project_root
+        if workspace_utils.path_within(self.project_root, path):
+            if mode == "write" and not self.write_enabled:
+                raise ValueError(
+                    "This session is in Default Conversations mode. Bind it to a workspace before writing files."
+                )
+            return path
+        if mode in {"read", "list"} and self._is_allowed_external_read(path):
+            return path
+        if mode == "write":
+            raise ValueError(
+                "Write target is outside the current session workspace. Open a session bound to that workspace or rebind this session first."
+            )
+        raise ValueError("Path is outside the current session workspace and is not approved for explicit read access.")
+
+    def _safe_path(self, value: str, *, mode: str) -> Path:
+        if mode in {"read", "write"} and not value.strip():
             raise ValueError("Path is required.")
-        path = (self.project_root / value).resolve()
-        if not path.is_relative_to(self.project_root):
-            raise ValueError("Path escapes project root")
+        path = self._resolve_path(value, mode=mode)
         return path
 
-    def _list_files(self) -> str:
+    def _list_files(self, path: str = "") -> str:
+        target_root = self._resolve_path(path, mode="list")
+        if not target_root.exists():
+            return "(no files)"
+        if not target_root.is_dir():
+            return f"Path is a file, not a directory: {target_root.as_posix()}"
         try:
             result = subprocess.run(
-                ["rg", "--files", str(self.project_root)],
+                ["rg", "--files", str(target_root)],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -70,21 +110,23 @@ class ToolBroker:
             return "\n".join(lines)
         except FileNotFoundError:
             files = [
-                path.relative_to(self.project_root).as_posix()
-                for path in sorted(self._iter_visible_files())
+                candidate.relative_to(target_root).as_posix()
+                for candidate in sorted(self._iter_visible_files(target_root))
             ]
             if not files:
                 return "(no files)"
             return "\n".join(files[:80])
 
     def _read_file(self, path: str) -> tuple[str, str]:
-        target = self._safe_path(path)
+        target = self._safe_path(path, mode="read")
         if not target.exists():
             return "error", f"File not found: {path}"
+        if target.is_dir():
+            return "error", f"Path is a directory, not a file: {path}"
         return "completed", "\n".join(target.read_text().splitlines()[:120])
 
     def _write_file(self, path: str, content: str) -> tuple[str, str]:
-        target = self._safe_path(path)
+        target = self._safe_path(path, mode="write")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
         return "completed", f"Wrote {len(content)} bytes to {path}"
@@ -94,7 +136,7 @@ class ToolBroker:
             return "error", "edit_file requires a non-empty old_text."
         if old_text == new_text:
             return "error", "edit_file old_text and new_text must differ."
-        target = self._safe_path(path)
+        target = self._safe_path(path, mode="write")
         if not target.exists():
             return "error", f"File not found: {path}"
         current = target.read_text()
@@ -120,10 +162,10 @@ class ToolBroker:
         output = (result.stdout + result.stderr).strip()[:10000] or "(no output)"
         return ("completed" if result.returncode == 0 else "error"), output
 
-    def _iter_visible_files(self):
+    def _iter_visible_files(self, root: Path):
         import os
 
-        for root, dirs, files in os.walk(self.project_root):
+        for current_root, dirs, files in os.walk(root):
             dirs[:] = [
                 directory
                 for directory in dirs
@@ -132,7 +174,7 @@ class ToolBroker:
             for filename in files:
                 if filename.startswith("."):
                     continue
-                yield Path(root) / filename
+                yield Path(current_root) / filename
 
 
 broker = ToolBroker()

@@ -5,6 +5,7 @@ from app.schemas.events import MessageCreate, SessionCreate, SessionRename
 from app.schemas.subagents import SubagentRunCreate
 from app.schemas.tasks import TaskCreate
 from app.schemas.teammates import TeammateCreate, TeammateMessageCreate
+from app.schemas.workspace import WorkspaceResolveRequest
 from app.services import task_service
 from app.services.runtime_state import runtime
 
@@ -33,6 +34,11 @@ async def bootstrap() -> dict[str, object]:
 @router.get("/skills")
 async def list_skills():
     return runtime.list_local_skills()
+
+
+@router.post("/workspaces/resolve")
+async def resolve_workspace(payload: WorkspaceResolveRequest):
+    return runtime.resolve_workspace(payload.content)
 
 
 @router.post("/sessions")
@@ -68,6 +74,14 @@ async def get_timeline(session_id: str):
     return runtime.list_timeline(session_id)
 
 
+@router.get("/sessions/{session_id}/state")
+async def get_session_state(session_id: str):
+    result = runtime.get_session_state(session_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Unknown session")
+    return result
+
+
 @router.post("/sessions/{session_id}/messages")
 async def post_message(session_id: str, payload: MessageCreate) -> dict[str, str]:
     if not runtime.session_exists(session_id):
@@ -97,6 +111,13 @@ async def create_task(payload: TaskCreate):
 @router.get("/tool-executions")
 async def list_tool_executions(session_id: str | None = None):
     return runtime.list_tool_executions(session_id)
+
+
+@router.get("/session-memory")
+async def list_session_memory(session_id: str):
+    if not runtime.session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Unknown session")
+    return runtime.list_memory(session_id)
 
 
 @router.get("/approvals")
@@ -151,3 +172,24 @@ async def run_subagent(payload: SubagentRunCreate):
     if not runtime.session_exists(payload.session_id):
         raise HTTPException(status_code=404, detail="Unknown session")
     return await runtime.run_subagent(payload)
+
+
+@router.get("/turns")
+async def list_turns(session_id: str | None = None):
+    return runtime.list_turns(session_id)
+
+
+@router.get("/turns/{turn_id}")
+async def get_turn(turn_id: int):
+    result = runtime.get_turn(turn_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Unknown turn")
+    return result
+
+
+@router.post("/turns/{turn_id}/resume")
+async def resume_turn(turn_id: int) -> dict[str, bool]:
+    resumed = await runtime.resume_turn(turn_id)
+    if not resumed:
+        raise HTTPException(status_code=400, detail="Turn is not resumable")
+    return {"accepted": True}

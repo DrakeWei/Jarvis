@@ -1,4 +1,5 @@
-import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, type Dispatch, type MutableRefObject, type SetStateAction, useEffect, useRef, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -9,15 +10,20 @@ import {
   decideApproval,
   fetchApprovals,
   fetchBootstrap,
+  resolveWorkspace,
+  fetchSessionState,
+  fetchSessionMemory,
   fetchSessions,
   fetchSkills,
   fetchSubagents,
+  fetchTurns,
   fetchTeammateMessages,
   fetchTeammates,
   fetchTimeline,
   fetchToolExecutions,
   openSessionEvents,
   renameSession,
+  resumeTurn,
   runSubagent,
   sendMessage,
   sendTeammateMessage,
@@ -25,12 +31,15 @@ import {
   deleteSession,
   type ApprovalSummary,
   type SessionSummary,
+  type SessionStateSummary,
+  type SessionMemorySummary,
   type SkillSummary,
   type SubagentSummary,
   type TaskSummary,
   type TeammateMessageSummary,
   type TeammateSummary,
   type TimelineEvent,
+  type TurnSummary,
   type ToolExecutionSummary,
 } from "../lib/api";
 
@@ -43,6 +52,8 @@ const APP_LOGO_SRC = new URL("../assets/app-logo.png", import.meta.url).href;
 const WORKBENCH_TABS = [
   { id: "tasks", label: "Tasks" },
   { id: "approvals", label: "Approvals" },
+  { id: "memory", label: "Memory" },
+  { id: "turns", label: "Turns" },
   { id: "logs", label: "Logs" },
   { id: "subagents", label: "Subagents" },
   { id: "teammates", label: "Teammates" },
@@ -57,6 +68,9 @@ type SessionContextMenuState = {
   y: number;
 } | null;
 type SessionDialogState =
+  | {
+      mode: "create";
+    }
   | {
       mode: "rename";
       sessionId: string;
@@ -122,6 +136,61 @@ function sortSessionsByActivity<T extends { updated_at: string; created_at: stri
       parseTimestamp(right.updated_at ?? right.created_at).getTime() -
       parseTimestamp(left.updated_at ?? left.created_at).getTime(),
   );
+}
+
+function groupSessionsByWorkspace(items: SessionItem[]): Array<{ key: string; label: string; sessions: SessionItem[] }> {
+  const groups = new Map<string, { key: string; label: string; sessions: SessionItem[] }>();
+  for (const session of sortSessionsByActivity(items)) {
+    const label = session.isDraft
+      ? "Default Conversations"
+      : session.workspace_mode === "default"
+        ? "Default Conversations"
+        : session.workspace_label;
+    const key = session.isDraft ? "default" : session.workspace_mode === "default" ? "default" : session.workspace_fingerprint;
+    const group = groups.get(key);
+    if (group) {
+      group.sessions.push(session);
+    } else {
+      groups.set(key, { key, label, sessions: [session] });
+    }
+  }
+  return Array.from(groups.values());
+}
+
+function startDraftSession(
+  setSessions: Dispatch<SetStateAction<SessionItem[]>>,
+  setActiveSessionId: Dispatch<SetStateAction<string>>,
+  activeSessionRef: MutableRefObject<string>,
+  setEventsBySession: Dispatch<SetStateAction<Record<string, TimelineEvent[]>>>,
+  setStreamingBySession: Dispatch<SetStateAction<Record<string, { content: string; created_at: string } | null>>>,
+  setDraft: Dispatch<SetStateAction<string>>,
+  config: {
+    workspaceMode: "bound" | "default";
+    workspacePath?: string;
+    workspaceLabel: string;
+    workspaceFingerprint?: string;
+  },
+) {
+  const timestamp = new Date().toISOString();
+  const draftId = `${DRAFT_SESSION_PREFIX}${Date.now()}`;
+  const draftSession: SessionItem = {
+    session_id: draftId,
+    title: nextSessionTitle(),
+    workspace_mode: config.workspaceMode,
+    canonical_workspace_path: config.workspacePath ?? "",
+    workspace_label: config.workspaceLabel,
+    workspace_fingerprint: config.workspaceFingerprint ?? "",
+    status: "draft",
+    created_at: timestamp,
+    updated_at: timestamp,
+    isDraft: true,
+  };
+  setSessions((current) => sortSessionsByActivity([draftSession, ...current]));
+  setActiveSessionId(draftId);
+  activeSessionRef.current = draftId;
+  setEventsBySession((current) => ({ ...current, [draftId]: [] }));
+  setStreamingBySession((current) => ({ ...current, [draftId]: null }));
+  setDraft("");
 }
 
 function touchSession<T extends { session_id: string; title: string; updated_at: string; created_at: string }>(
@@ -341,6 +410,9 @@ function nextSessionTitle(): string {
 export function App() {
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [activeSessionId, setActiveSessionId] = useState("");
+  const [sessionStateBySession, setSessionStateBySession] = useState<Record<string, SessionStateSummary>>({});
+  const [memoryBySession, setMemoryBySession] = useState<Record<string, SessionMemorySummary[]>>({});
+  const [turnsBySession, setTurnsBySession] = useState<Record<string, TurnSummary[]>>({});
   const [eventsBySession, setEventsBySession] = useState<Record<string, TimelineEvent[]>>({});
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
   const [teammates, setTeammates] = useState<TeammateSummary[]>([]);
@@ -363,6 +435,7 @@ export function App() {
   const [activeWorkbenchTab, setActiveWorkbenchTab] = useState<WorkbenchTabId>("approvals");
   const [autoScrollTimeline, setAutoScrollTimeline] = useState(true);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [createSessionError, setCreateSessionError] = useState("");
   const [sessionContextMenu, setSessionContextMenu] = useState<SessionContextMenuState>(null);
   const [sessionDialog, setSessionDialog] = useState<SessionDialogState>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
@@ -415,12 +488,15 @@ export function App() {
   }, [activeSessionId]);
 
   async function refreshSessionState(sessionId: string) {
-    const [nextSessions, nextSubagents, nextApprovals, nextExecutions, nextTeammates] = await Promise.all([
+    const [nextSessions, nextSubagents, nextApprovals, nextExecutions, nextTeammates, nextSessionState, nextTurns, nextMemory] = await Promise.all([
       fetchSessions(),
       fetchSubagents(sessionId),
       fetchApprovals(sessionId),
       fetchToolExecutions(sessionId),
       fetchTeammates(sessionId),
+      fetchSessionState(sessionId),
+      fetchTurns(sessionId),
+      fetchSessionMemory(sessionId),
     ]);
 
     setSessions(sortSessionsByActivity(nextSessions));
@@ -434,6 +510,9 @@ export function App() {
     setSelectedTeammateId((current) =>
       nextTeammates.some((item) => item.id === current) ? current : nextTeammates[0]?.id ?? null,
     );
+    setSessionStateBySession((current) => ({ ...current, [sessionId]: nextSessionState }));
+    setTurnsBySession((current) => ({ ...current, [sessionId]: nextTurns }));
+    setMemoryBySession((current) => ({ ...current, [sessionId]: nextMemory }));
   }
 
   useEffect(() => {
@@ -542,6 +621,7 @@ export function App() {
           if (
             event.type.startsWith("tool.") ||
             event.type.startsWith("approval.") ||
+            event.type.startsWith("turn.") ||
             event.type.startsWith("task.") ||
             event.type.startsWith("teammate.") ||
             event.type.startsWith("subagent.")
@@ -615,6 +695,7 @@ export function App() {
     const content = draft.trim();
     const sourceSessionId = activeSessionId;
     const isDraftSession = sourceSessionId.startsWith(DRAFT_SESSION_PREFIX);
+    const draftSession = sessions.find((session) => session.session_id === sourceSessionId) ?? null;
     let targetSessionId = sourceSessionId;
     setDraft("");
     setAutoScrollTimeline(true);
@@ -645,7 +726,17 @@ export function App() {
     }));
     try {
       if (isDraftSession) {
-        const created = await createSession(nextSessionTitle());
+        const resolvedWorkspace =
+          draftSession?.workspace_mode === "bound" && draftSession.canonical_workspace_path
+            ? {
+                workspace_path: draftSession.canonical_workspace_path,
+                workspace_label: draftSession.workspace_label,
+                workspace_fingerprint: draftSession.workspace_fingerprint,
+              }
+            : await resolveWorkspace(content).catch(() => null);
+        const created = resolvedWorkspace
+          ? await createSession(nextSessionTitle(), resolvedWorkspace.workspace_path)
+          : await createSession(nextSessionTitle(), undefined);
         targetSessionId = created.session_id;
         setSessions((current) =>
           sortSessionsByActivity(
@@ -686,21 +777,59 @@ export function App() {
   }
 
   async function onCreateSession() {
-    const timestamp = new Date().toISOString();
-    const draftId = `${DRAFT_SESSION_PREFIX}${Date.now()}`;
-    const draftSession: SessionItem = {
-      session_id: draftId,
-      title: nextSessionTitle(),
-      created_at: timestamp,
-      updated_at: timestamp,
-      isDraft: true,
-    };
-    setSessions((current) => sortSessionsByActivity([draftSession, ...current]));
-    setActiveSessionId(draftId);
-    activeSessionRef.current = draftId;
-    setEventsBySession((current) => ({ ...current, [draftId]: [] }));
-    setStreamingBySession((current) => ({ ...current, [draftId]: null }));
-    setDraft("");
+    setCreateSessionError("");
+    setSessionDialog({ mode: "create" });
+  }
+
+  async function onCreateDefaultSession() {
+    setCreateSessionError("");
+    startDraftSession(
+      setSessions,
+      setActiveSessionId,
+      activeSessionRef,
+      setEventsBySession,
+      setStreamingBySession,
+      setDraft,
+      {
+        workspaceMode: "default",
+        workspaceLabel: "Default Conversations",
+      },
+    );
+    setSessionDialog(null);
+  }
+
+  async function onCreateBoundSession() {
+    try {
+      setCreateSessionError("");
+      const selection = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose Workspace Folder",
+      });
+      if (!selection || Array.isArray(selection)) {
+        return;
+      }
+      const path = String(selection);
+      const parts = path.split("/").filter(Boolean);
+      const label = parts[parts.length - 1] || path;
+      startDraftSession(
+        setSessions,
+        setActiveSessionId,
+        activeSessionRef,
+        setEventsBySession,
+        setStreamingBySession,
+        setDraft,
+        {
+          workspaceMode: "bound",
+          workspacePath: path,
+          workspaceLabel: label,
+          workspaceFingerprint: path,
+        },
+      );
+      setSessionDialog(null);
+    } catch (error) {
+      setCreateSessionError(error instanceof Error ? error.message : "Failed to open the folder picker.");
+    }
   }
 
   function onRenameSession(sessionId: string) {
@@ -724,6 +853,10 @@ export function App() {
 
   async function confirmSessionDialog() {
     if (!sessionDialog) return;
+    if (sessionDialog.mode === "create") {
+      setSessionDialog(null);
+      return;
+    }
     if (sessionDialog.mode === "rename") {
       const nextTitle = sessionDialog.value.trim();
       const target = sessions.find((session) => session.session_id === sessionDialog.sessionId);
@@ -780,6 +913,16 @@ export function App() {
       ...current,
       [activeSessionId]: timeline,
     }));
+    await refreshSessionState(activeSessionId);
+  }
+
+  async function onResumeInterruptedTurn() {
+    if (!activeSessionId) return;
+    const turnId = activeSessionState?.latest_interrupted_turn?.id;
+    if (!turnId) return;
+    await resumeTurn(turnId);
+    setActiveWorkbenchTab("turns");
+    setWorkbenchOpen(true);
     await refreshSessionState(activeSessionId);
   }
 
@@ -843,9 +986,13 @@ export function App() {
   }
 
   const activeSession = sessions.find((session) => session.session_id === activeSessionId) ?? null;
+  const activeSessionState = activeSessionId ? sessionStateBySession[activeSessionId] ?? null : null;
+  const sessionMemory = activeSessionId ? memoryBySession[activeSessionId] ?? [] : [];
+  const turns = activeSessionId ? turnsBySession[activeSessionId] ?? [] : [];
   const filteredSessions = sessions.filter((session) =>
     session.title.toLowerCase().includes(sessionSearch.trim().toLowerCase()),
   );
+  const groupedSessions = groupSessionsByWorkspace(filteredSessions);
   const pendingApprovals = approvals.filter((approval) => approval.status === "pending");
   const selectedExecution = executions.find((item) => item.id === selectedExecutionId) ?? null;
   const selectedTeammate = teammates.find((item) => item.id === selectedTeammateId) ?? null;
@@ -891,9 +1038,19 @@ export function App() {
       emphasis: pendingApprovals.length ? "alert" : "default",
     },
     {
+      tab: "memory",
+      label: "Memory",
+      value: String(sessionMemory.length),
+    },
+    {
       tab: "tasks",
       label: "Tasks",
       value: String(tasks.length),
+    },
+    {
+      tab: "turns",
+      label: "Turns",
+      value: String(turns.length),
     },
     {
       tab: "logs",
@@ -986,6 +1143,65 @@ export function App() {
               </article>
             ))}
             {!approvals.length ? <p className="empty-inline">No approvals in this session.</p> : null}
+          </div>
+        </section>
+      );
+    }
+
+    if (activeWorkbenchTab === "memory") {
+      return (
+        <section className="workbench-section">
+          <div className="section-heading">
+            <div>
+              <p className="micro-label">Context</p>
+              <h3>Memory</h3>
+            </div>
+            <span className="section-count">{sessionMemory.length}</span>
+          </div>
+          <div className="workbench-list">
+            {sessionMemory.map((entry) => (
+              <article key={entry.id} className="workbench-card">
+                <div className="workbench-card-header">
+                  <strong>{entry.kind}</strong>
+                  <span className="mini-pill">{entry.status}</span>
+                </div>
+                <p>{entry.content}</p>
+                <p>Salience: {entry.salience}</p>
+                {entry.path_ref ? <p>Path: {entry.path_ref}</p> : null}
+                {entry.source_turn_id ? <p>Turn #{entry.source_turn_id}</p> : null}
+              </article>
+            ))}
+            {!sessionMemory.length ? <p className="empty-inline">No memory entries in this session yet.</p> : null}
+          </div>
+        </section>
+      );
+    }
+
+    if (activeWorkbenchTab === "turns") {
+      return (
+        <section className="workbench-section">
+          <div className="section-heading">
+            <div>
+              <p className="micro-label">Lifecycle</p>
+              <h3>Turns</h3>
+            </div>
+            <span className="section-count">{turns.length}</span>
+          </div>
+          <div className="workbench-list">
+            {turns.map((turn) => (
+              <article key={turn.id} className="workbench-card">
+                <div className="workbench-card-header">
+                  <strong>Turn #{turn.id}</strong>
+                  <span className="mini-pill">{turn.status}</span>
+                </div>
+                <p>{formatSessionStamp(turn.updated_at)}</p>
+                <p>Checkpoint seq: {turn.last_checkpoint_seq}</p>
+                <p>{turn.workspace_path ?? "No workspace recorded."}</p>
+                {turn.resume_hint ? <p>{turn.resume_hint}</p> : null}
+                {turn.error_summary ? <p>{turn.error_summary}</p> : null}
+              </article>
+            ))}
+            {!turns.length ? <p className="empty-inline">No turns in this session yet.</p> : null}
           </div>
         </section>
       );
@@ -1184,27 +1400,39 @@ export function App() {
 
         <div className="session-column">
           <div className="session-list">
-            {filteredSessions.map((session) => (
-              <button
-                key={session.session_id}
-                type="button"
-                className={session.session_id === activeSessionId ? "session-card active-card" : "session-card"}
-                onClick={() => setActiveSessionId(session.session_id)}
-                onContextMenu={(event) => {
-                  if (session.isDraft) return;
-                  event.preventDefault();
-                  setSessionContextMenu({
-                    sessionId: session.session_id,
-                    x: event.clientX,
-                    y: event.clientY,
-                  });
-                }}
-              >
-                <strong>{session.title}</strong>
-                <span>{formatSessionStamp(session.updated_at ?? session.created_at)}</span>
-              </button>
+            {groupedSessions.map((group) => (
+              <details key={group.key} className="session-drawer" open>
+                <summary className="session-drawer-heading">
+                  <svg viewBox="0 0 20 20" aria-hidden="true" className="drawer-folder-icon">
+                    <path d="M2.5 5.5a2 2 0 0 1 2-2h3l1.4 1.8H15.5a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2z" />
+                  </svg>
+                  <strong>{group.label}</strong>
+                </summary>
+                <div className="session-drawer-body">
+                  {group.sessions.map((session) => (
+                    <button
+                      key={session.session_id}
+                      type="button"
+                      className={session.session_id === activeSessionId ? "session-card active-card" : "session-card"}
+                      onClick={() => setActiveSessionId(session.session_id)}
+                      onContextMenu={(event) => {
+                        if (session.isDraft) return;
+                        event.preventDefault();
+                        setSessionContextMenu({
+                          sessionId: session.session_id,
+                          x: event.clientX,
+                          y: event.clientY,
+                        });
+                      }}
+                    >
+                      <strong>{session.title}</strong>
+                      <span>{formatSessionStamp(session.updated_at ?? session.created_at)}</span>
+                    </button>
+                  ))}
+                </div>
+              </details>
             ))}
-            {!filteredSessions.length ? <p className="empty-inline">No matching sessions.</p> : null}
+            {!groupedSessions.length ? <p className="empty-inline">No matching sessions.</p> : null}
           </div>
         </div>
 
@@ -1220,7 +1448,9 @@ export function App() {
           <div className="workspace-title">
             <h2 className="session-heading">{activeSession?.title ?? "Jarvis"}</h2>
             <p className="workspace-subtitle">
-              {activeSessionStamp ? `Updated ${activeSessionStamp}` : "Choose a session or create a new one to begin."}
+              {activeSession
+                ? `${activeSession.workspace_label || "Workspace pending"} · ${activeSession.status}${activeSessionStamp ? ` · Updated ${activeSessionStamp}` : ""}`
+                : "Choose a session or create a new one to begin."}
             </p>
           </div>
           <div className="header-actions">
@@ -1343,6 +1573,31 @@ export function App() {
             </div>
           )}
         </section>
+
+        {activeSession?.status === "interrupted" ? (
+          <div className="inline-approval-stack">
+            <article className="inline-approval-bar">
+              <div className="approval-copy">
+                <p className="micro-label">Recovered session</p>
+                <strong>Previous turn was interrupted</strong>
+                <p>
+                  {activeSessionState?.latest_interrupted_turn?.resume_hint
+                    ?? "Jarvis restored this session to a safe idle point. Your next message can continue the work from the current workspace."}
+                </p>
+                {activeSessionState?.rolling_summary ? (
+                  <p>{activeSessionState.rolling_summary}</p>
+                ) : null}
+              </div>
+              {activeSessionState?.latest_interrupted_turn?.resumable ? (
+                <div className="inline-actions">
+                  <button type="button" className="primary-button" onClick={onResumeInterruptedTurn}>
+                    Continue
+                  </button>
+                </div>
+              ) : null}
+            </article>
+          </div>
+        ) : null}
 
         {pendingApprovals.length ? (
           <div className="inline-approval-stack">
@@ -1467,9 +1722,20 @@ export function App() {
         <div className="dialog-backdrop" onClick={() => setSessionDialog(null)}>
           <div className="session-dialog" onClick={(event) => event.stopPropagation()}>
             <div className="session-dialog-header">
-              <h3>{sessionDialog.mode === "rename" ? "Rename Session" : "Hide Session"}</h3>
+              <h3>
+                {sessionDialog.mode === "create"
+                  ? "New Session"
+                  : sessionDialog.mode === "rename"
+                    ? "Rename Session"
+                    : "Hide Session"}
+              </h3>
             </div>
-            {sessionDialog.mode === "rename" ? (
+            {sessionDialog.mode === "create" ? (
+              <div className="session-dialog-body">
+                <p>Choose a workspace folder for a bound session, or start in the default conversation drawer.</p>
+                {createSessionError ? <p className="dialog-error">{createSessionError}</p> : null}
+              </div>
+            ) : sessionDialog.mode === "rename" ? (
               <div className="session-dialog-body">
                 <input
                   value={sessionDialog.value}
@@ -1496,9 +1762,20 @@ export function App() {
               <button type="button" className="secondary-button" onClick={() => setSessionDialog(null)}>
                 Cancel
               </button>
-              <button type="button" className="primary-button" onClick={() => void confirmSessionDialog()}>
-                {sessionDialog.mode === "rename" ? "Save" : "Hide"}
-              </button>
+              {sessionDialog.mode === "create" ? (
+                <>
+                  <button type="button" className="secondary-button" onClick={() => void onCreateDefaultSession()}>
+                    Start in Default Conversations
+                  </button>
+                  <button type="button" className="primary-button" onClick={() => void onCreateBoundSession()}>
+                    Choose Folder
+                  </button>
+                </>
+              ) : (
+                <button type="button" className="primary-button" onClick={() => void confirmSessionDialog()}>
+                  {sessionDialog.mode === "rename" ? "Save" : "Hide"}
+                </button>
+              )}
             </div>
           </div>
         </div>

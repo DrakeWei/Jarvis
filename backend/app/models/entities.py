@@ -15,6 +15,11 @@ class SessionRecord(Base):
     __tablename__ = "sessions"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     title: Mapped[str] = mapped_column(String(120), nullable=False)
+    workspace_mode: Mapped[str] = mapped_column(String(20), default="bound", nullable=False)
+    canonical_workspace_path: Mapped[str] = mapped_column(Text, nullable=False)
+    workspace_fingerprint: Mapped[str] = mapped_column(String(40), nullable=False)
+    workspace_label: Mapped[str] = mapped_column(String(160), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="idle", nullable=False)
     hidden: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
@@ -32,9 +37,29 @@ class TurnRecord(Base):
     __tablename__ = "turns"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
-    status: Mapped[str] = mapped_column(String(40), default="completed", nullable=False)
+    user_message_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id", ondelete="SET NULL"), index=True)
+    workspace_path: Mapped[str | None] = mapped_column(Text)
+    workspace_fingerprint: Mapped[str | None] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(40), default="queued", nullable=False)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_checkpoint_seq: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    resume_hint: Mapped[str | None] = mapped_column(Text)
+    error_summary: Mapped[str | None] = mapped_column(Text)
+
+
+class TurnCheckpointRecord(Base):
+    __tablename__ = "turn_checkpoints"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    turn_id: Mapped[int] = mapped_column(ForeignKey("turns.id", ondelete="CASCADE"), index=True)
+    checkpoint_seq: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    phase: Mapped[str] = mapped_column(String(40), nullable=False)
+    context_json: Mapped[str] = mapped_column(Text, nullable=False)
+    pending_tool_name: Mapped[str | None] = mapped_column(String(80))
+    pending_tool_input_json: Mapped[str | None] = mapped_column(Text)
+    summary: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 class ToolExecutionRecord(Base):
@@ -94,11 +119,27 @@ class ApprovalRecord(Base):
     __tablename__ = "approvals"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str | None] = mapped_column(ForeignKey("sessions.id", ondelete="SET NULL"), index=True)
+    turn_id: Mapped[int | None] = mapped_column(ForeignKey("turns.id", ondelete="SET NULL"), index=True)
+    checkpoint_id: Mapped[int | None] = mapped_column(ForeignKey("turn_checkpoints.id", ondelete="SET NULL"), index=True)
     approval_type: Mapped[str] = mapped_column(String(80), nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="pending", nullable=False)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     feedback: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class SessionMemoryRecord(Base):
+    __tablename__ = "session_memory"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    source_turn_id: Mapped[int | None] = mapped_column(ForeignKey("turns.id", ondelete="SET NULL"), index=True)
+    path_ref: Mapped[str | None] = mapped_column(Text)
+    salience: Mapped[int] = mapped_column(Integer, default=50, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 class BackgroundJobRecord(Base):

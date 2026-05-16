@@ -40,13 +40,16 @@ def local_tool_definitions(*, allow_subagent_tool: bool = True) -> list[ToolDefi
     tools = [
         ToolDefinition(
             name="list_files",
-            description="List files in the current target workspace.",
-            input_schema={"type": "object", "properties": {}},
+            description="List files in the current session workspace. You may optionally pass an explicit absolute directory path for a read-only external reference mentioned by the user.",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+            },
             source="local",
         ),
         ToolDefinition(
             name="read_file",
-            description="Read a file from the current target workspace.",
+            description="Read a file from the current session workspace. You may also read an explicit absolute path mentioned by the user as a read-only external reference.",
             input_schema={
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
@@ -56,7 +59,7 @@ def local_tool_definitions(*, allow_subagent_tool: bool = True) -> list[ToolDefi
         ),
         ToolDefinition(
             name="write_file",
-            description="Create or overwrite a file in the current target workspace.",
+            description="Create or overwrite a file in the current session workspace only. Do not use this for paths outside the current session workspace.",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -69,7 +72,7 @@ def local_tool_definitions(*, allow_subagent_tool: bool = True) -> list[ToolDefi
         ),
         ToolDefinition(
             name="edit_file",
-            description="Replace exact text in a file in the current target workspace.",
+            description="Replace exact text in a file in the current session workspace only. Do not use this for paths outside the current session workspace.",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -104,6 +107,34 @@ def local_tool_definitions(*, allow_subagent_tool: bool = True) -> list[ToolDefi
                 "type": "object",
                 "properties": {"name": {"type": "string"}},
                 "required": ["name"],
+            },
+            source="local",
+        ),
+        ToolDefinition(
+            name="memory_search",
+            description="Search structured session memory for prior goals, constraints, decisions, progress, open questions, or artifact references in the current session.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "kind": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["query"],
+            },
+            source="local",
+        ),
+        ToolDefinition(
+            name="conversation_search",
+            description="Search prior durable conversation messages from the current session when the current context pack is insufficient.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "role": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["query"],
             },
             source="local",
         ),

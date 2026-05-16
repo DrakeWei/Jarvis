@@ -11,6 +11,7 @@ fn main() {
     let managed_backend = backend_child.clone();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(move |_app| {
             if let Some(child) = spawn_backend_if_needed()? {
                 *managed_backend.lock().expect("backend mutex poisoned") = Some(child);
@@ -21,7 +22,9 @@ fn main() {
         .expect("failed to build Jarvis shell")
         .run(move |_app_handle, event| {
             if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
-                if let Some(mut child) = backend_child.lock().expect("backend mutex poisoned").take() {
+                if let Some(mut child) =
+                    backend_child.lock().expect("backend mutex poisoned").take()
+                {
                     let _ = child.kill();
                     let _ = child.wait();
                 }

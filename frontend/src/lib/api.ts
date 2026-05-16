@@ -1,6 +1,11 @@
 export type SessionSummary = {
   session_id: string;
   title: string;
+  workspace_mode: "bound" | "default";
+  canonical_workspace_path: string;
+  workspace_label: string;
+  workspace_fingerprint: string;
+  status: string;
   created_at: string;
   updated_at: string;
 };
@@ -74,6 +79,49 @@ export type SkillSummary = {
   path: string;
 };
 
+export type SessionMemorySummary = {
+  id: number;
+  session_id: string;
+  kind: string;
+  content: string;
+  source_turn_id: number | null;
+  path_ref: string | null;
+  salience: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type TurnSummary = {
+  id: number;
+  session_id: string;
+  user_message_id: number | null;
+  workspace_path: string | null;
+  workspace_fingerprint: string | null;
+  status: string;
+  started_at: string;
+  updated_at: string;
+  completed_at: string | null;
+  last_checkpoint_seq: number;
+  resume_hint: string | null;
+  error_summary: string | null;
+  resumable: boolean;
+};
+
+export type SessionStateSummary = {
+  session: SessionSummary;
+  active_turn: TurnSummary | null;
+  latest_interrupted_turn: TurnSummary | null;
+  latest_waiting_approval_turn: TurnSummary | null;
+  rolling_summary: string | null;
+};
+
+export type WorkspaceResolveSummary = {
+  workspace_path: string;
+  workspace_label: string;
+  workspace_fingerprint: string;
+};
+
 const API_BASE = "http://127.0.0.1:8731/api";
 
 export async function fetchBootstrap(): Promise<{
@@ -101,13 +149,28 @@ export async function fetchSkills(): Promise<SkillSummary[]> {
   return response.json();
 }
 
-export async function createSession(title: string): Promise<SessionSummary> {
+export async function resolveWorkspace(content: string): Promise<WorkspaceResolveSummary | null> {
+  const response = await fetch(`${API_BASE}/workspaces/resolve`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ content }),
+  });
+  if (!response.ok) {
+    throw new Error("Failed to resolve workspace");
+  }
+  return response.json();
+}
+
+export async function createSession(title: string, workspacePath?: string): Promise<SessionSummary> {
+  const workspaceMode = workspacePath ? "bound" : "default";
   const response = await fetch(`${API_BASE}/sessions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ title }),
+    body: JSON.stringify({ title, workspace_mode: workspaceMode, workspace_path: workspacePath ?? null }),
   });
   if (!response.ok) {
     throw new Error("Failed to create session");
@@ -184,6 +247,36 @@ export async function fetchTimeline(sessionId: string): Promise<TimelineEvent[]>
   return response.json();
 }
 
+export async function fetchSessionState(sessionId: string): Promise<SessionStateSummary> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/state`);
+  if (!response.ok) {
+    throw new Error("Failed to load session state");
+  }
+  return response.json();
+}
+
+export async function fetchTurns(sessionId?: string): Promise<TurnSummary[]> {
+  const url = sessionId
+    ? `${API_BASE}/turns?session_id=${encodeURIComponent(sessionId)}`
+    : `${API_BASE}/turns`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error("Failed to load turns");
+  }
+  return response.json();
+}
+
+export async function resumeTurn(turnId: number): Promise<boolean> {
+  const response = await fetch(`${API_BASE}/turns/${turnId}/resume`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error("Failed to resume turn");
+  }
+  const payload = await response.json();
+  return Boolean(payload.accepted);
+}
+
 export async function createTask(subject: string, sessionId: string): Promise<TaskSummary> {
   const response = await fetch(`${API_BASE}/tasks`, {
     method: "POST",
@@ -211,6 +304,14 @@ export async function fetchToolExecutions(
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error("Failed to load tool executions");
+  }
+  return response.json();
+}
+
+export async function fetchSessionMemory(sessionId: string): Promise<SessionMemorySummary[]> {
+  const response = await fetch(`${API_BASE}/session-memory?session_id=${encodeURIComponent(sessionId)}`);
+  if (!response.ok) {
+    throw new Error("Failed to load session memory");
   }
   return response.json();
 }
