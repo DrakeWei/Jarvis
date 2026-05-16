@@ -11,6 +11,7 @@
     "tauri:build": "cd .. && ./frontend/node_modules/.bin/tauri build --config src-tauri/tauri.conf.json"
   },
   "dependencies": {
+    "@tauri-apps/plugin-dialog": "^2.7.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",

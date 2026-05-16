@@ -6,9 +6,11 @@ from app.models.entities import (
     EventLogRecord,
     MessageRecord,
     SessionRecord,
+    SessionMemoryRecord,
     TaskDependencyRecord,
     TaskRecord,
     ToolExecutionRecord,
+    TurnCheckpointRecord,
     TurnRecord,
 )
 
@@ -20,8 +22,10 @@ __all__ = [
     "EventLogRecord",
     "MessageRecord",
     "SessionRecord",
+    "SessionMemoryRecord",
     "TaskDependencyRecord",
     "TaskRecord",
     "ToolExecutionRecord",
+    "TurnCheckpointRecord",
     "TurnRecord",
 ]

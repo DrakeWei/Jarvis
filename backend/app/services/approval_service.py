@@ -5,6 +5,7 @@ from sqlalchemy import select
 from app.db.session import create_session
 from app.models import ApprovalRecord
 from app.schemas.approvals import ApprovalSummary
+import app.services.checkpoint_service as checkpoint_service
 
 RUNTIME_PREFIX = "__runtime__:"
 
@@ -48,15 +49,20 @@ def create_approval(
     session_id: str,
     approval_type: str,
     prompt: str,
+    *,
+    turn_id: int | None = None,
+    checkpoint_id: int | None = None,
     context: dict[str, object] | None = None,
 ) -> ApprovalSummary:
     with create_session() as db:
         row = ApprovalRecord(
             session_id=session_id,
+            turn_id=turn_id,
+            checkpoint_id=checkpoint_id,
             approval_type=approval_type,
             status="pending",
             prompt=prompt,
-            feedback=_runtime_feedback(context),
+            feedback=_runtime_feedback(context) if checkpoint_id is None else None,
         )
         db.add(row)
         db.commit()
@@ -115,6 +121,11 @@ def list_pending_runtime_contexts() -> list[tuple[int, str | None, dict[str, obj
         ).all()
         contexts: list[tuple[int, str | None, dict[str, object]]] = []
         for row in rows:
+            if row.checkpoint_id:
+                decoded = checkpoint_service.get_checkpoint(row.checkpoint_id)
+                if isinstance(decoded, dict):
+                    contexts.append((row.id, row.session_id, decoded))
+                continue
             if not row.feedback or not row.feedback.startswith(RUNTIME_PREFIX):
                 continue
             raw = row.feedback[len(RUNTIME_PREFIX):]

@@ -360,6 +360,47 @@ textarea:focus-visible {
   padding-right: 4px;
 }
 
+.session-drawer {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.session-drawer-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 4px 0;
+  color: var(--text-soft);
+  list-style: none;
+  cursor: pointer;
+}
+
+.session-drawer-heading::-webkit-details-marker {
+  display: none;
+}
+
+.session-drawer-heading strong {
+  font-size: 0.98rem;
+  font-weight: 500;
+}
+
+.session-drawer-body {
+  display: grid;
+  gap: 8px;
+}
+
+.drawer-folder-icon {
+  width: 18px;
+  height: 18px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex: none;
+}
+
 .session-card,
 .workbench-card {
   width: 100%;
@@ -953,6 +994,10 @@ textarea:focus-visible {
 .session-dialog-body {
   display: grid;
   gap: 10px;
+}
+
+.dialog-error {
+  color: var(--danger);
 }
 
 .session-dialog-body input {

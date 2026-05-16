@@ -87,7 +87,7 @@ class Settings:
         self.openai_http_headers = _env_json_map("OPENAI_HTTP_HEADERS_JSON") or _string_map(
             self.codex_provider_config.get("http_headers")
         )
-        self.llm_max_tokens = int(os.getenv("JARVIS_LLM_MAX_TOKENS", "1200"))
+        self.llm_max_tokens = int(os.getenv("JARVIS_LLM_MAX_TOKENS", "4000"))
         self.jarvis_mcp_feishu_enabled = os.getenv("JARVIS_MCP_FEISHU_ENABLED", "").strip() in {"1", "true", "TRUE", "yes", "YES"}
         self.jarvis_mcp_feishu_base_url = os.getenv("JARVIS_MCP_FEISHU_BASE_URL", "").strip()
         self.jarvis_mcp_feishu_bearer_token = os.getenv("JARVIS_MCP_FEISHU_BEARER_TOKEN", "").strip()
