@@ -37,6 +37,7 @@ def init_db() -> None:
     _migrate_message_asset_columns()
     _migrate_asset_chunk_columns()
     _migrate_turn_columns()
+    _migrate_agent_columns()
     _migrate_approval_columns()
     _migrate_tool_execution_columns()
     _migrate_background_job_columns()
@@ -65,6 +66,18 @@ def _migrate_session_columns() -> None:
         statements.append("ALTER TABLE sessions ADD COLUMN workspace_fingerprint VARCHAR(40)")
     if "workspace_label" not in columns:
         statements.append("ALTER TABLE sessions ADD COLUMN workspace_label VARCHAR(160)")
+    if "repo_root" not in columns:
+        statements.append("ALTER TABLE sessions ADD COLUMN repo_root TEXT")
+    if "git_enabled" not in columns:
+        statements.append("ALTER TABLE sessions ADD COLUMN git_enabled BOOLEAN NOT NULL DEFAULT 0")
+    if "lead_branch" not in columns:
+        statements.append("ALTER TABLE sessions ADD COLUMN lead_branch VARCHAR(160)")
+    if "head_revision" not in columns:
+        statements.append("ALTER TABLE sessions ADD COLUMN head_revision VARCHAR(80)")
+    if "working_tree_status" not in columns:
+        statements.append("ALTER TABLE sessions ADD COLUMN working_tree_status VARCHAR(20)")
+    if "detached_head" not in columns:
+        statements.append("ALTER TABLE sessions ADD COLUMN detached_head BOOLEAN NOT NULL DEFAULT 0")
     if "status" not in columns:
         statements.append("ALTER TABLE sessions ADD COLUMN status VARCHAR(40) NOT NULL DEFAULT 'idle'")
 
@@ -86,6 +99,8 @@ def _migrate_session_columns() -> None:
                     canonical_workspace_path = COALESCE(canonical_workspace_path, :path),
                     workspace_fingerprint = COALESCE(workspace_fingerprint, :fingerprint),
                     workspace_label = COALESCE(workspace_label, :label),
+                    git_enabled = COALESCE(git_enabled, 0),
+                    detached_head = COALESCE(detached_head, 0),
                     status = COALESCE(status, 'idle')
                 """
             ),
@@ -309,6 +324,8 @@ def _migrate_turn_columns() -> None:
         statements.append("ALTER TABLE turns ADD COLUMN workspace_path TEXT")
     if "workspace_fingerprint" not in columns:
         statements.append("ALTER TABLE turns ADD COLUMN workspace_fingerprint VARCHAR(40)")
+    if "execution_mode" not in columns:
+        statements.append("ALTER TABLE turns ADD COLUMN execution_mode VARCHAR(20) NOT NULL DEFAULT 'normal'")
     if "updated_at" not in columns:
         statements.append("ALTER TABLE turns ADD COLUMN updated_at DATETIME")
     if "cancel_requested" not in columns:
@@ -327,6 +344,45 @@ def _migrate_turn_columns() -> None:
             connection.execute(text("UPDATE turns SET updated_at = COALESCE(updated_at, started_at)"))
             connection.execute(text("UPDATE turns SET cancel_requested = COALESCE(cancel_requested, 0)"))
             connection.execute(text("UPDATE turns SET status = COALESCE(status, 'queued')"))
+            connection.execute(text("UPDATE turns SET execution_mode = COALESCE(execution_mode, 'normal')"))
+
+
+def _migrate_agent_columns() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("agents")}
+    except Exception:
+        return
+
+    statements: list[str] = []
+    if "base_workspace_path" not in columns:
+        statements.append("ALTER TABLE agents ADD COLUMN base_workspace_path TEXT")
+    if "execution_workspace_path" not in columns:
+        statements.append("ALTER TABLE agents ADD COLUMN execution_workspace_path TEXT")
+    if "isolation_mode" not in columns:
+        statements.append("ALTER TABLE agents ADD COLUMN isolation_mode VARCHAR(20) NOT NULL DEFAULT 'shared'")
+    if "git_branch" not in columns:
+        statements.append("ALTER TABLE agents ADD COLUMN git_branch VARCHAR(160)")
+    if "git_base_revision" not in columns:
+        statements.append("ALTER TABLE agents ADD COLUMN git_base_revision VARCHAR(80)")
+    if "cleanup_status" not in columns:
+        statements.append("ALTER TABLE agents ADD COLUMN cleanup_status VARCHAR(40) NOT NULL DEFAULT 'pending'")
+    if "preserved_reason" not in columns:
+        statements.append("ALTER TABLE agents ADD COLUMN preserved_reason VARCHAR(80)")
+
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+            connection.execute(
+                text(
+                    """
+                    UPDATE agents
+                    SET isolation_mode = COALESCE(isolation_mode, 'shared'),
+                        cleanup_status = COALESCE(cleanup_status, 'pending')
+                    """
+                )
+            )
 
 
 def _migrate_approval_columns() -> None:

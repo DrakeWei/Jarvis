@@ -460,6 +460,7 @@ class Phase1LeaseHeartbeatAsyncTests(IsolatedAsyncioTestCase):
                 allow_subagent_tool=False,
                 agent_kind="lead",
                 emit_stream_events=False,
+                execution_mode="normal",
             )
 
         self.assertIn("Approval required before running `bash`", message)
@@ -490,6 +491,7 @@ class Phase1LeaseHeartbeatAsyncTests(IsolatedAsyncioTestCase):
             allow_subagent_tool: bool,
             agent_kind: str,
             emit_stream_events: bool,
+            execution_mode: str,
             summary: str,
             tool_use_id: str | None = None,
             tool_name: str | None = None,
@@ -498,7 +500,10 @@ class Phase1LeaseHeartbeatAsyncTests(IsolatedAsyncioTestCase):
             checkpoint_calls.append((phase, write_enabled))
             return len(checkpoint_calls)
 
-        with patch("app.runtime.manager.create_client", return_value=object()), patch.object(
+        with patch("app.runtime.manager.create_client", return_value=object()), patch(
+            "app.runtime.manager.turn_service.is_cancel_requested",
+            return_value=False,
+        ), patch.object(
             runtime,
             "_autonomous_tool_definitions",
             return_value=[tool_definition],
@@ -550,9 +555,49 @@ class Phase1LeaseHeartbeatAsyncTests(IsolatedAsyncioTestCase):
             "before_model",
         )
 
+    async def test_run_resumed_turn_uses_approval_resume_path_for_waiting_approval(self) -> None:
+        runtime = RuntimeManager()
+        reply = SimpleNamespace(text="approved output", asset_ids=[])
+
+        with patch.object(
+            runtime,
+            "_resume_agent_loop_after_approval",
+            return_value=reply,
+        ) as approval_resume_mock, patch.object(
+            runtime,
+            "_publish_assistant_reply",
+        ) as publish_reply_mock, patch(
+            "app.runtime.manager.turn_service.update_turn_status"
+        ), patch(
+            "app.runtime.manager.turn_service.get_turn",
+            return_value=SimpleNamespace(status="running"),
+        ), patch.object(
+            runtime,
+            "publish",
+        ), patch(
+            "app.runtime.manager.lease_service.try_acquire",
+            return_value=True,
+        ), patch(
+            "app.runtime.manager.lease_service.release"
+        ), patch.object(
+            runtime,
+            "_lease_heartbeat_loop",
+            return_value=None,
+        ):
+            await runtime._run_resumed_turn(
+                "session-1",
+                12,
+                {"workspace": "/tmp/workspace", "messages": []},
+                "waiting_approval",
+                asyncio.Event(),
+            )
+
+        approval_resume_mock.assert_awaited_once_with("session-1", {"workspace": "/tmp/workspace", "messages": []})
+        publish_reply_mock.assert_awaited_once()
+
     async def test_decide_approval_enqueues_resume_job_on_approve(self) -> None:
         runtime = RuntimeManager()
-        decision = SimpleNamespace(session_id="session-1", status="approved")
+        decision = SimpleNamespace(session_id="session-1", status="approved", approval_type="bash")
 
         with patch("app.runtime.manager.lease_service.try_acquire", return_value=True), patch(
             "app.runtime.manager.approval_service.get_pending_runtime_context",
@@ -596,3 +641,37 @@ class Phase1LeaseHeartbeatAsyncTests(IsolatedAsyncioTestCase):
         self.assertIs(result, decision)
         enqueue_mock.assert_not_called()
         publish_mock.assert_not_called()
+
+    async def test_decide_plan_execution_approval_starts_plan_execution_flow(self) -> None:
+        runtime = RuntimeManager()
+        decision = SimpleNamespace(session_id="session-1", status="approved", approval_type="plan_execution")
+
+        with patch("app.runtime.manager.lease_service.try_acquire", return_value=True), patch(
+            "app.runtime.manager.approval_service.get_pending_runtime_context",
+            return_value=(
+                "session-1",
+                {
+                    "source_turn_id": 12,
+                    "original_request": "Refactor the runtime manager",
+                    "approved_plan": "1. Inspect files\n2. Edit them",
+                },
+            ),
+        ), patch(
+            "app.runtime.manager.approval_service.apply_approval_decision",
+            return_value=(decision, True),
+        ), patch.object(runtime, "_start_plan_execution_from_approval", return_value=True) as start_plan_mock, patch.object(
+            runtime,
+            "publish",
+        ) as publish_mock, patch("app.runtime.manager.lease_service.release"):
+            result = await runtime.decide_approval(56, approve=True, feedback="")
+
+        self.assertIs(result, decision)
+        start_plan_mock.assert_awaited_once_with(
+            "session-1",
+            {
+                "source_turn_id": 12,
+                "original_request": "Refactor the runtime manager",
+                "approved_plan": "1. Inspect files\n2. Edit them",
+            },
+        )
+        publish_mock.assert_awaited()

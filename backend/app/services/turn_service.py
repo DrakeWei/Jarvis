@@ -24,6 +24,7 @@ def _to_summary(row: TurnRecord) -> TurnSummary:
         user_message_id=row.user_message_id,
         workspace_path=row.workspace_path,
         workspace_fingerprint=row.workspace_fingerprint,
+        execution_mode=row.execution_mode,
         status=row.status,
         started_at=row.started_at.isoformat(),
         updated_at=row.updated_at.isoformat(),
@@ -48,7 +49,14 @@ def _sync_session_status(db, session_id: str, turn_status: str) -> None:
     }.get(turn_status, "idle")
 
 
-def create_turn(session_id: str, user_message_id: int | None, workspace_path: str, workspace_fingerprint: str) -> TurnSummary:
+def create_turn(
+    session_id: str,
+    user_message_id: int | None,
+    workspace_path: str,
+    workspace_fingerprint: str,
+    *,
+    execution_mode: str = "normal",
+) -> TurnSummary:
     with create_session() as db:
         now = _utcnow()
         row = TurnRecord(
@@ -56,6 +64,7 @@ def create_turn(session_id: str, user_message_id: int | None, workspace_path: st
             user_message_id=user_message_id,
             workspace_path=workspace_path,
             workspace_fingerprint=workspace_fingerprint,
+            execution_mode=execution_mode,
             status="queued",
             started_at=now,
             updated_at=now,

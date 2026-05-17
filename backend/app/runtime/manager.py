@@ -27,6 +27,7 @@ import app.services.image_generation_service as image_generation_service
 import app.services.memory_service as memory_service
 import app.services.memory_search_service as memory_search_service
 import app.services.turn_service as turn_service
+import app.services.worktree_service as worktree_service
 from app.services import approval_service, asset_service, background_job_service, ingestion_job_service, lease_service, session_service, subagent_service, teammate_service, tool_service
 from app.tools.broker import ToolBroker, broker
 
@@ -99,6 +100,22 @@ def build_event_broker():
 
 
 class RuntimeManager:
+    PLAN_MODE_ALLOWED_TOOLS = frozenset(
+        {
+            "get_session_git_state",
+            "list_files",
+            "read_file",
+            "list_skills",
+            "load_skill",
+            "memory_search",
+            "conversation_search",
+            "list_session_assets",
+            "read_asset_summary",
+            "search_asset_chunks",
+            "read_asset_chunk",
+        }
+    )
+
     def __init__(self) -> None:
         self.instance_id = f"runtime-{uuid4()}"
         self.events = build_event_broker()
@@ -343,6 +360,18 @@ class RuntimeManager:
             pending_payload = pending_context[1] if pending_context else None
             turn_id = pending_payload.get("turn_id") if isinstance(pending_payload, dict) else None
             summary_session_id = decision.session_id or pending_session_id
+            if decision.approval_type == "plan_execution":
+                if decision.session_id:
+                    await self.publish(
+                        TimelineEvent(
+                            session_id=decision.session_id,
+                            type="approval.resolved",
+                            content=f"Approval #{approval_id} {decision.status}.",
+                        )
+                    )
+                if approve and pending_session_id and isinstance(pending_payload, dict):
+                    await self._start_plan_execution_from_approval(pending_session_id, pending_payload)
+                return decision
             if isinstance(turn_id, int):
                 if approve:
                     turn_service.update_turn_status(turn_id, "queued", resume_hint="Bash approval granted; queued to resume.")
@@ -386,6 +415,47 @@ class RuntimeManager:
         )
         return teammate
 
+    async def _start_plan_execution_from_approval(self, session_id: str, context: dict[str, object]) -> bool:
+        original_request = str(context.get("original_request") or "").strip()
+        approved_plan = str(context.get("approved_plan") or "").strip()
+        source_turn_id = context.get("source_turn_id")
+        if not original_request or not approved_plan:
+            return False
+        self._ensure_dispatcher_started()
+        workspace = self._session_workspace(session_id)
+        turn = turn_service.create_turn(
+            session_id=session_id,
+            user_message_id=None,
+            workspace_path=workspace.as_posix(),
+            workspace_fingerprint=workspace_utils.workspace_fingerprint(workspace),
+            execution_mode="normal",
+        )
+        background_job_service.create_job(
+            session_id=session_id,
+            job_type="turn_execution",
+            payload={
+                "session_id": session_id,
+                "turn_id": turn.id,
+                "content": original_request,
+                "execution_mode": "normal",
+                "plan_context": {
+                    "approved_plan": approved_plan,
+                    "original_request": original_request,
+                    "source_turn_id": source_turn_id,
+                },
+            },
+            command=f"turn_execution:{turn.id}",
+        )
+        self._signal_dispatcher()
+        await self.publish(
+            TimelineEvent(
+                session_id=session_id,
+                type="plan.execution_queued",
+                content=f"Approved plan queued for execution as turn #{turn.id}.",
+            )
+        )
+        return True
+
     async def send_teammate_message(self, agent_id: int, content: str):
         teammate = teammate_service.get_teammate(agent_id)
         if not teammate:
@@ -414,28 +484,117 @@ class RuntimeManager:
         return {"sent": outbound, "reply": inbound}
 
     async def run_subagent(self, payload: SubagentRunCreate):
-        subagent = subagent_service.create_subagent(payload.session_id, payload.name)
+        session_workspace = self._session_workspace(payload.session_id)
+        isolation_mode = self._normalize_subagent_isolation_mode(payload.isolation_mode)
+        subagent = subagent_service.create_subagent(
+            payload.session_id,
+            payload.name,
+            base_workspace_path=session_workspace.as_posix(),
+            isolation_mode=isolation_mode,
+        )
+        execution_workspace = session_workspace
+        worktree_context: worktree_service.WorktreeExecutionContext | None = None
+
+        if isolation_mode == "worktree":
+            try:
+                worktree_context = worktree_service.prepare_subagent_worktree(session_workspace, subagent.id, payload.name)
+            except worktree_service.WorktreeIsolationError as exc:
+                summary = f"Subagent could not start in worktree mode: {exc}"
+                subagent_service.add_subagent_summary(subagent.id, summary)
+                subagent_service.finish_subagent(
+                    subagent.id,
+                    status="failed",
+                    execution_workspace_path=None,
+                    cleanup_status="pending",
+                    preserved_reason=exc.code,
+                )
+                await self.publish(
+                    TimelineEvent(
+                        session_id=payload.session_id,
+                        type="subagent.summary",
+                        content=f"{payload.name}: {summary}",
+                    )
+                )
+                raise ValueError(summary) from exc
+
+            execution_workspace = worktree_context.execution_workspace_path
+            subagent = (
+                subagent_service.update_subagent_execution(
+                    subagent.id,
+                    execution_workspace_path=execution_workspace.as_posix(),
+                    git_branch=worktree_context.branch_name,
+                    git_base_revision=worktree_context.base_revision,
+                    cleanup_status="pending",
+                )
+                or subagent
+            )
+        else:
+            subagent = (
+                subagent_service.update_subagent_execution(
+                    subagent.id,
+                    execution_workspace_path=session_workspace.as_posix(),
+                    cleanup_status="pending",
+                )
+                or subagent
+            )
+
         await self.publish(
             TimelineEvent(
                 session_id=payload.session_id,
                 type="subagent.started",
-                content=f"Subagent '{payload.name}' started.",
+                content=self._subagent_started_event_content(payload.name, subagent),
             )
         )
-        summary = await self._run_subagent_task(payload.session_id, payload.prompt)
+
+        try:
+            summary = await self._run_subagent_task(payload.session_id, payload.prompt, workspace=execution_workspace)
+        except Exception as exc:
+            summary = f"Subagent failed: {exc}"
+            cleanup = (
+                worktree_service.finalize_subagent_worktree(worktree_context, run_failed=True)
+                if worktree_context is not None
+                else None
+            )
+            subagent_service.add_subagent_summary(subagent.id, summary)
+            failed = subagent_service.finish_subagent(
+                subagent.id,
+                status="failed",
+                execution_workspace_path=(cleanup.execution_workspace_path.as_posix() if cleanup else execution_workspace.as_posix()),
+                git_branch=cleanup.branch_name if cleanup else subagent.git_branch,
+                git_base_revision=cleanup.base_revision if cleanup else subagent.git_base_revision,
+                cleanup_status=cleanup.cleanup_status if cleanup else "pending",
+                preserved_reason=cleanup.preserved_reason if cleanup else None,
+            )
+            await self.publish(
+                TimelineEvent(
+                    session_id=payload.session_id,
+                    type="subagent.summary",
+                    content=self._subagent_summary_event_content(payload.name, summary, failed or subagent),
+                )
+            )
+            return {"subagent": failed or subagent, "summary": summary}
+
+        cleanup = worktree_service.finalize_subagent_worktree(worktree_context) if worktree_context is not None else None
         subagent_service.add_subagent_summary(subagent.id, summary)
-        completed = subagent_service.complete_subagent(subagent.id)
+        completed = subagent_service.finish_subagent(
+            subagent.id,
+            status="completed",
+            execution_workspace_path=(cleanup.execution_workspace_path.as_posix() if cleanup else execution_workspace.as_posix()),
+            git_branch=cleanup.branch_name if cleanup else subagent.git_branch,
+            git_base_revision=cleanup.base_revision if cleanup else subagent.git_base_revision,
+            cleanup_status=cleanup.cleanup_status if cleanup else "pending",
+            preserved_reason=cleanup.preserved_reason if cleanup else None,
+        )
         await self.publish(
             TimelineEvent(
                 session_id=payload.session_id,
                 type="subagent.summary",
-                content=f"{payload.name}: {summary}",
+                content=self._subagent_summary_event_content(payload.name, summary, completed or subagent),
             )
         )
         return {"subagent": completed or subagent, "summary": summary}
 
-    async def _run_subagent_task(self, session_id: str, prompt: str) -> str:
-        workspace = self._session_workspace(session_id)
+    async def _run_subagent_task(self, session_id: str, prompt: str, *, workspace: Path) -> str:
         workspace_mode = self._session_workspace_mode(session_id)
         messages: list[dict[str, object]] = [{"role": "user", "content": prompt}]
         reply = await self._continue_agent_loop(
@@ -449,6 +608,34 @@ class RuntimeManager:
             emit_stream_events=False,
         )
         return reply.text
+
+    async def _queue_plan_execution_approval(
+        self,
+        *,
+        session_id: str,
+        turn_id: int,
+        original_request: str,
+        plan_text: str,
+    ) -> None:
+        approval = approval_service.create_approval(
+            session_id=session_id,
+            turn_id=turn_id,
+            approval_type="plan_execution",
+            prompt=f"Execute the approved plan from turn #{turn_id}?",
+            context={
+                "turn_id": turn_id,
+                "source_turn_id": turn_id,
+                "original_request": original_request,
+                "approved_plan": plan_text,
+            },
+        )
+        await self.publish(
+            TimelineEvent(
+                session_id=session_id,
+                type="approval.requested",
+                content=f"Approval #{approval.id} requested for plan execution.",
+            )
+        )
 
     async def publish(self, event: TimelineEvent) -> TimelineEvent:
         stored = session_service.create_event_record(event)
@@ -580,7 +767,15 @@ class RuntimeManager:
             return True
         return False
 
-    def _start_background_turn(self, session_id: str, content: str, turn_id: int) -> None:
+    def _start_background_turn(
+        self,
+        session_id: str,
+        content: str,
+        turn_id: int,
+        *,
+        execution_mode: str = "normal",
+        plan_context: dict[str, object] | None = None,
+    ) -> None:
         existing = self.session_turns.get(session_id)
         if existing and not existing.task.done():
             turn_service.update_turn_status(
@@ -593,7 +788,16 @@ class RuntimeManager:
         if not lease_service.try_acquire("turn", str(turn_id), self.instance_id):
             return
         cancel_event = asyncio.Event()
-        task = asyncio.create_task(self._run_lead_turn(session_id, turn_id, content, cancel_event))
+        task = asyncio.create_task(
+            self._run_lead_turn(
+                session_id,
+                turn_id,
+                content,
+                cancel_event,
+                execution_mode=execution_mode,
+                plan_context=plan_context,
+            )
+        )
         self.session_turns[session_id] = SessionTurn(turn_id=turn_id, task=task, cancel_event=cancel_event)
         self.background_tasks.add(task)
         task.add_done_callback(self.background_tasks.discard)
@@ -688,6 +892,8 @@ class RuntimeManager:
             session_id = str(payload.get("session_id") or job.session_id or "").strip()
             turn_id = payload.get("turn_id")
             content = str(payload.get("content") or "")
+            execution_mode = str(payload.get("execution_mode") or "normal").strip().lower() or "normal"
+            plan_context = payload.get("plan_context")
             resume_context = payload.get("resume_context")
             resume_phase = str(payload.get("resume_phase") or "")
             if not session_id or not isinstance(turn_id, int):
@@ -734,7 +940,13 @@ class RuntimeManager:
             if isinstance(resume_context, dict) and resume_phase:
                 self._start_resumed_turn(session_id, turn_id, resume_context, resume_phase)
             else:
-                self._start_background_turn(session_id, content, turn_id)
+                self._start_background_turn(
+                    session_id,
+                    content,
+                    turn_id,
+                    execution_mode=execution_mode,
+                    plan_context=plan_context if isinstance(plan_context, dict) else None,
+                )
             turn = self.session_turns.get(session_id)
             if turn is not None and turn.turn_id == turn_id:
                 try:
@@ -883,6 +1095,7 @@ class RuntimeManager:
                 user_message_id=created_message.id if created_message else None,
                 workspace_path=workspace.as_posix(),
                 workspace_fingerprint=workspace_utils.workspace_fingerprint(workspace),
+                execution_mode=payload.execution_mode,
             )
             if payload.content.strip():
                 memory_service.remember_goal(session_id, payload.content, source_turn_id=turn.id)
@@ -897,6 +1110,7 @@ class RuntimeManager:
                     "session_id": session_id,
                     "turn_id": turn.id,
                     "content": payload.content,
+                    "execution_mode": payload.execution_mode,
                 },
                 command=f"turn_execution:{turn.id}",
             )
@@ -967,7 +1181,16 @@ class RuntimeManager:
         )
         memory_service.refresh_rolling_summary(session_id, turn_id)
 
-    async def _run_lead_turn(self, session_id: str, turn_id: int, content: str, cancel_event: asyncio.Event) -> None:
+    async def _run_lead_turn(
+        self,
+        session_id: str,
+        turn_id: int,
+        content: str,
+        cancel_event: asyncio.Event,
+        *,
+        execution_mode: str = "normal",
+        plan_context: dict[str, object] | None = None,
+    ) -> None:
         if self._should_cancel_turn(turn_id, cancel_event):
             raise TurnCancelled
         heartbeat_stop = asyncio.Event()
@@ -990,7 +1213,14 @@ class RuntimeManager:
             )
         )
         try:
-            reply = await self._run_agent_task(session_id, turn_id, content, cancel_event)
+            reply = await self._run_agent_task(
+                session_id,
+                turn_id,
+                content,
+                cancel_event,
+                execution_mode=execution_mode,
+                plan_context=plan_context,
+            )
             await self._publish_assistant_reply(
                 session_id,
                 reply.text,
@@ -998,6 +1228,13 @@ class RuntimeManager:
                 emit_deltas=False,
                 asset_ids=reply.asset_ids,
             )
+            if execution_mode == "plan":
+                await self._queue_plan_execution_approval(
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    original_request=content,
+                    plan_text=reply.text,
+                )
             current_turn = turn_service.get_turn(turn_id)
             if current_turn and current_turn.status == "running":
                 turn_service.update_turn_status(turn_id, "completed", completed=True)
@@ -1064,7 +1301,15 @@ class RuntimeManager:
             )
         )
         try:
-            reply = await self._resume_turn_from_context(session_id, turn_id, context, cancel_event)
+            if phase == "waiting_approval":
+                reply = await self._resume_agent_loop_after_approval(session_id, context)
+                if reply is None:
+                    reply = AgentReply(
+                        text="Approval context is incomplete; unable to resume the approved action.",
+                        asset_ids=[],
+                    )
+            else:
+                reply = await self._resume_turn_from_context(session_id, turn_id, context, cancel_event)
             await self._publish_assistant_reply(
                 session_id,
                 reply.text,
@@ -1108,9 +1353,19 @@ class RuntimeManager:
 
         await self._publish_assistant_reply(session_id, reply, source_turn_id=turn_id)
 
-    async def _run_agent_task(self, session_id: str, turn_id: int, latest_user_content: str, cancel_event: asyncio.Event) -> AgentReply:
+    async def _run_agent_task(
+        self,
+        session_id: str,
+        turn_id: int,
+        latest_user_content: str,
+        cancel_event: asyncio.Event,
+        *,
+        execution_mode: str = "normal",
+        plan_context: dict[str, object] | None = None,
+    ) -> AgentReply:
         workspace = self._session_workspace(session_id)
         workspace_mode = self._session_workspace_mode(session_id)
+        execution_mode = self._normalize_execution_mode(execution_mode)
         explicit_external_reads = self._explicit_external_reads(workspace, latest_user_content)
         named_workspace = workspace_utils.detect_named_workspace_reference(latest_user_content, workspace)
         if workspace_mode == "default" and named_workspace is not None:
@@ -1150,6 +1405,20 @@ class RuntimeManager:
             )
 
         messages = context_assembler.build_initial_loop_messages(session_id)
+        if execution_mode == "normal" and isinstance(plan_context, dict):
+            original_request = str(plan_context.get("original_request") or latest_user_content).strip()
+            approved_plan = str(plan_context.get("approved_plan") or "").strip()
+            if approved_plan:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "The user approved the following plan. Execute it now.\n\n"
+                            f"Original request:\n{original_request}\n\n"
+                            f"Approved plan:\n{approved_plan}"
+                        ),
+                    }
+                )
         return await self._continue_agent_loop(
             session_id,
             workspace,
@@ -1158,6 +1427,7 @@ class RuntimeManager:
             turn_id=turn_id,
             allowed_external_reads=explicit_external_reads,
             write_enabled=workspace_mode != "default",
+            execution_mode=execution_mode,
         )
 
     def _session_workspace(self, session_id: str) -> Path:
@@ -1171,6 +1441,43 @@ class RuntimeManager:
         if session is None:
             return "bound"
         return session.workspace_mode
+
+    def _normalize_subagent_isolation_mode(self, raw: str | None) -> str:
+        value = (raw or "shared").strip().lower()
+        return value if value in {"shared", "worktree"} else "shared"
+
+    def _normalize_execution_mode(self, raw: str | None) -> str:
+        value = (raw or "normal").strip().lower()
+        return value if value in {"normal", "plan"} else "normal"
+
+    def _session_git_prompt_section(self, session_id: str) -> str:
+        session = session_service.get_session(session_id)
+        if session is None or not getattr(session, "git_enabled", False):
+            return ""
+        lines = [
+            f"Repository root: {session.repo_root or 'unknown'}",
+            f"Lead branch: {session.lead_branch or '(detached or unknown)'}",
+            f"Working tree status: {session.working_tree_status or 'unknown'}",
+        ]
+        if getattr(session, "detached_head", False):
+            lines.append("The repository is currently in detached HEAD state.")
+        return "\n".join(lines)
+
+    def _session_git_state_tool_output(self, session_id: str) -> str:
+        session = session_service.get_session(session_id)
+        if session is None:
+            return "Session not found."
+        if not getattr(session, "git_enabled", False):
+            return "The current session workspace is not inside a Git repository."
+
+        lines = [
+            f"Repository root: {session.repo_root or 'unknown'}",
+            f"Lead branch: {session.lead_branch or '(detached or unknown)'}",
+            f"HEAD revision: {session.head_revision or 'unknown'}",
+            f"Working tree status: {session.working_tree_status or 'unknown'}",
+            f"Detached HEAD: {'yes' if getattr(session, 'detached_head', False) else 'no'}",
+        ]
+        return "\n".join(lines)
 
     def _explicit_external_reads(self, workspace: Path, content: str) -> list[Path]:
         return [
@@ -1212,6 +1519,7 @@ class RuntimeManager:
         allow_subagent_tool: bool,
         agent_kind: str,
         emit_stream_events: bool,
+        execution_mode: str,
         tool_use_id: str | None = None,
         tool_name: str | None = None,
         tool_input: dict[str, object] | None = None,
@@ -1229,6 +1537,7 @@ class RuntimeManager:
             "allow_subagent_tool": allow_subagent_tool,
             "agent_kind": agent_kind,
             "emit_stream_events": emit_stream_events,
+            "execution_mode": execution_mode,
         }
 
     def _write_checkpoint(
@@ -1243,6 +1552,7 @@ class RuntimeManager:
         allow_subagent_tool: bool,
         agent_kind: str,
         emit_stream_events: bool,
+        execution_mode: str,
         summary: str,
         tool_use_id: str | None = None,
         tool_name: str | None = None,
@@ -1259,6 +1569,7 @@ class RuntimeManager:
             allow_subagent_tool=allow_subagent_tool,
             agent_kind=agent_kind,
             emit_stream_events=emit_stream_events,
+            execution_mode=execution_mode,
             tool_use_id=tool_use_id,
             tool_name=tool_name,
             tool_input=tool_input,
@@ -1275,6 +1586,11 @@ class RuntimeManager:
 
     def _autonomous_tool_schemas(self, *, allow_subagent_tool: bool = True) -> list[dict[str, object]]:
         schemas = [
+            {
+                "name": "get_session_git_state",
+                "description": "Read the current session's Git repository state, including repo root, lead branch, HEAD state, and working tree cleanliness.",
+                "input_schema": {"type": "object", "properties": {}},
+            },
             {
                 "name": "list_files",
                 "description": "List files in the current target workspace.",
@@ -1383,6 +1699,7 @@ class RuntimeManager:
                     "properties": {
                         "name": {"type": "string"},
                         "prompt": {"type": "string"},
+                        "isolation_mode": {"type": "string", "enum": ["shared", "worktree"]},
                     },
                     "required": ["prompt"],
                 },
@@ -1526,6 +1843,29 @@ class RuntimeManager:
                 summary_parts.append("README snapshot:\n" + content[:500])
         return "\n\n".join(summary_parts)
 
+    def _subagent_started_event_content(self, name: str, subagent) -> str:
+        if getattr(subagent, "isolation_mode", "shared") != "worktree":
+            return f"Subagent '{name}' started."
+        details: list[str] = ["mode=worktree"]
+        if getattr(subagent, "git_branch", None):
+            details.append(f"branch={subagent.git_branch}")
+        if getattr(subagent, "execution_workspace_path", None):
+            details.append(f"path={subagent.execution_workspace_path}")
+        return f"Subagent '{name}' started ({', '.join(details)})."
+
+    def _subagent_summary_event_content(self, name: str, summary: str, subagent) -> str:
+        suffix_parts: list[str] = []
+        if getattr(subagent, "cleanup_status", "") == "preserved" and getattr(subagent, "execution_workspace_path", None):
+            suffix_parts.append(f"preserved at {subagent.execution_workspace_path}")
+        elif getattr(subagent, "cleanup_status", "") == "cleaned":
+            suffix_parts.append("cleaned")
+        elif getattr(subagent, "cleanup_status", "") == "cleanup_failed":
+            suffix_parts.append("cleanup failed")
+        if getattr(subagent, "git_branch", None):
+            suffix_parts.append(f"branch={subagent.git_branch}")
+        suffix = f" ({'; '.join(suffix_parts)})" if suffix_parts else ""
+        return f"{name}: {summary}{suffix}"
+
     def _skill_roots(self) -> list[Path]:
         roots = [
             settings.project_root / "skills",
@@ -1591,6 +1931,8 @@ class RuntimeManager:
             return None
         if tool_name in {"list_files", "read_file", "write_file", "edit_file"}:
             return broker_for_workspace.run(tool_name, tool_input)
+        if tool_name == "get_session_git_state":
+            return "completed", self._session_git_state_tool_output(session_id)
         if tool_name == "list_skills":
             return "completed", self._list_skills()
         if tool_name == "load_skill":
@@ -1746,9 +2088,20 @@ class RuntimeManager:
         if tool_name == "run_subagent":
             prompt = str(tool_input.get("prompt", "")).strip()
             name = str(tool_input.get("name", "")).strip() or f"Explorer {len(self.list_subagents(session_id)) + 1}"
+            isolation_mode = self._normalize_subagent_isolation_mode(str(tool_input.get("isolation_mode", "")).strip() or "shared")
             if not prompt:
                 return "error", "run_subagent requires a non-empty prompt."
-            result = await self.run_subagent(SubagentRunCreate(session_id=session_id, name=name, prompt=prompt))
+            try:
+                result = await self.run_subagent(
+                    SubagentRunCreate(
+                        session_id=session_id,
+                        name=name,
+                        prompt=prompt,
+                        isolation_mode=isolation_mode,
+                    )
+                )
+            except ValueError as exc:
+                return "error", str(exc)
             return "completed", result["summary"]
         if tool_name == "create_teammate":
             name = str(tool_input.get("name", "")).strip()
@@ -1777,7 +2130,13 @@ class RuntimeManager:
         tool: ToolDefinition,
         tool_input: dict[str, object],
         broker_for_workspace: ToolBroker,
+        execution_mode: str = "normal",
     ) -> ToolExecutionResult | None:
+        if self._normalize_execution_mode(execution_mode) == "plan" and tool.name not in self.PLAN_MODE_ALLOWED_TOOLS:
+            return ToolExecutionResult(
+                status="blocked",
+                output=f"Tool '{tool.name}' is not available in Plan Mode.",
+            )
         if tool.name == "bash":
             return None
         if tool.source == "mcp":
@@ -1881,15 +2240,20 @@ class RuntimeManager:
                     collected.append(value)
         return collected
 
-    def _build_agent_system_prompt(self, workspace: Path, session_memory_header: str = "") -> str:
+    def _build_agent_system_prompt(self, workspace: Path, session_memory_header: str = "", *, execution_mode: str = "normal") -> str:
         sections = [
                 "You are Jarvis, a local desktop coding agent.",
                 f"Target workspace: {workspace}",
                 "You may answer directly when no tool is needed, but you should decide for yourself whether tools are necessary.",
                 "When the user asks about files, directories, paths, project structure, README contents, code contents, or workspace state, inspect the workspace with tools first instead of guessing.",
+                "When the user asks about the current repository, Git branch, HEAD state, or working tree cleanliness, use get_session_git_state instead of guessing or shelling out.",
                 "When the session has uploaded attachments and the current prompt depends on them, use the session attachment tools to inspect extracted content instead of guessing from filenames alone.",
                 "When the user asks you to create a brand-new image, render a visual, or edit an uploaded image, use the generate_image tool instead of claiming the image exists.",
-                "When the user asks you to create or modify files, do the work directly inside the target workspace when it is safe.",
+                (
+                    "When the user asks you to create or modify files, do the work directly inside the target workspace when it is safe."
+                    if execution_mode != "plan"
+                    else "Use this turn to inspect and plan only. Do not create or modify files in Plan Mode."
+                ),
                 "The current session is bound to exactly one canonical workspace. Do not treat another project name in the prompt as permission to silently switch workspaces.",
                 "If the user explicitly mentions an absolute path outside the current session workspace, you may read it as a read-only external reference when useful.",
                 "Do not write or edit paths outside the current session workspace. If the user wants that, explain that they need a session bound to the target workspace or an explicit rebind.",
@@ -1902,6 +2266,15 @@ class RuntimeManager:
                 "For read-only questions, give the result directly instead of writing a work-log style summary.",
                 "Do not append extra offers such as 'if you want I can continue...' unless the user asked for options or follow-up help.",
             ]
+        if execution_mode == "plan":
+            sections.extend(
+                [
+                    "This turn is in Plan Mode.",
+                    "You may inspect and analyze, but you must not modify files, execute shell commands, or perform side effects.",
+                    "Return a concrete plan instead of claiming the work is already done.",
+                    "Structure the plan with: goal, findings or assumptions, execution steps, and risks or open questions.",
+                ]
+            )
         if session_memory_header:
             sections.append(session_memory_header)
         return "\n\n".join(sections)
@@ -2039,9 +2412,13 @@ class RuntimeManager:
         allow_subagent_tool: bool = True,
         agent_kind: str = "lead",
         emit_stream_events: bool = True,
+        execution_mode: str = "normal",
     ) -> AgentReply:
         client = create_client()
         tool_definitions = await self._autonomous_tool_definitions(allow_subagent_tool=allow_subagent_tool)
+        execution_mode = self._normalize_execution_mode(execution_mode)
+        if execution_mode == "plan":
+            tool_definitions = [tool for tool in tool_definitions if tool.name in self.PLAN_MODE_ALLOWED_TOOLS]
         tools = self._tool_schemas_from_definitions(tool_definitions)
         tool_map = {tool.name: tool for tool in tool_definitions}
         broker_for_workspace = ToolBroker(
@@ -2052,7 +2429,11 @@ class RuntimeManager:
         base_system_prompt = (
             self._build_subagent_system_prompt(workspace)
             if agent_kind == "subagent"
-            else self._build_agent_system_prompt(workspace, "")
+            else self._build_agent_system_prompt(
+                workspace,
+                self._session_git_prompt_section(session_id),
+                execution_mode=execution_mode,
+            )
         )
 
         iteration_limit = (
@@ -2075,6 +2456,7 @@ class RuntimeManager:
                 allow_subagent_tool=allow_subagent_tool,
                 agent_kind=agent_kind,
                 emit_stream_events=emit_stream_events,
+                execution_mode=execution_mode,
                 summary="About to call the model for the next agent step.",
             )
             assembled = (
@@ -2116,6 +2498,7 @@ class RuntimeManager:
                 allow_subagent_tool=allow_subagent_tool,
                 agent_kind=agent_kind,
                 emit_stream_events=emit_stream_events,
+                execution_mode=execution_mode,
                 summary="Model output received for the current agent step.",
             )
             tool_calls = [block for block in streamed_blocks if getattr(block, "type", "") == "tool_use"]
@@ -2167,6 +2550,7 @@ class RuntimeManager:
                             allow_subagent_tool=allow_subagent_tool,
                             agent_kind=agent_kind,
                             emit_stream_events=emit_stream_events,
+                            execution_mode=execution_mode,
                         ),
                         asset_ids=generated_asset_ids,
                     )
@@ -2177,6 +2561,7 @@ class RuntimeManager:
                     tool=tool_definition,
                     tool_input=block.input,
                     broker_for_workspace=broker_for_workspace,
+                    execution_mode=execution_mode,
                 )
                 if executed is None:
                     return AgentReply(
@@ -2192,6 +2577,7 @@ class RuntimeManager:
                             allow_subagent_tool=allow_subagent_tool,
                             agent_kind=agent_kind,
                             emit_stream_events=emit_stream_events,
+                            execution_mode=execution_mode,
                         ),
                         asset_ids=generated_asset_ids,
                     )
@@ -2255,6 +2641,7 @@ class RuntimeManager:
                 allow_subagent_tool=allow_subagent_tool,
                 agent_kind=agent_kind,
                 emit_stream_events=emit_stream_events,
+                execution_mode=execution_mode,
                 summary="Tool execution results appended to the loop context.",
             )
 
@@ -2277,6 +2664,7 @@ class RuntimeManager:
         allow_subagent_tool: bool,
         agent_kind: str,
         emit_stream_events: bool,
+        execution_mode: str,
     ) -> str:
         broker_for_workspace = ToolBroker(workspace, allowed_external_reads=allowed_external_reads, write_enabled=write_enabled)
         context = self._build_runtime_context(
@@ -2288,6 +2676,7 @@ class RuntimeManager:
             allow_subagent_tool=allow_subagent_tool,
             agent_kind=agent_kind,
             emit_stream_events=emit_stream_events,
+            execution_mode=execution_mode,
             tool_use_id=tool_use_id,
             tool_name="bash",
             tool_input=tool_input,
@@ -2302,6 +2691,7 @@ class RuntimeManager:
             allow_subagent_tool=allow_subagent_tool,
             agent_kind=agent_kind,
             emit_stream_events=emit_stream_events,
+            execution_mode=execution_mode,
             summary="Waiting for bash approval.",
             tool_use_id=tool_use_id,
             tool_name="bash",
@@ -2350,6 +2740,7 @@ class RuntimeManager:
         allow_subagent_tool = bool(context.get("allow_subagent_tool", True))
         agent_kind = str(context.get("agent_kind", "lead"))
         emit_stream_events = bool(context.get("emit_stream_events", True))
+        execution_mode = self._normalize_execution_mode(str(context.get("execution_mode", "normal")))
 
         if not isinstance(workspace_raw, str) or not isinstance(messages, list):
             return AgentReply(
@@ -2410,6 +2801,7 @@ class RuntimeManager:
             allow_subagent_tool=allow_subagent_tool,
             agent_kind=agent_kind,
             emit_stream_events=emit_stream_events,
+            execution_mode=execution_mode,
         )
 
     async def _resume_turn_from_context(
@@ -2426,6 +2818,7 @@ class RuntimeManager:
         allow_subagent_tool = bool(context.get("allow_subagent_tool", True))
         agent_kind = str(context.get("agent_kind", "lead"))
         emit_stream_events = bool(context.get("emit_stream_events", True))
+        execution_mode = self._normalize_execution_mode(str(context.get("execution_mode", "normal")))
 
         if not isinstance(workspace_raw, str) or not isinstance(messages, list):
             return AgentReply(
@@ -2450,6 +2843,7 @@ class RuntimeManager:
             allow_subagent_tool=allow_subagent_tool,
             agent_kind=agent_kind,
             emit_stream_events=emit_stream_events,
+            execution_mode=execution_mode,
         )
 
     def _serialize_content_blocks(self, blocks: list[object]) -> list[dict[str, object]]:

@@ -280,7 +280,10 @@ async def list_subagents(session_id: str | None = None):
 async def run_subagent(payload: SubagentRunCreate):
     if not runtime.session_exists(payload.session_id):
         raise HTTPException(status_code=404, detail="Unknown session")
-    return await runtime.run_subagent(payload)
+    try:
+        return await runtime.run_subagent(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/turns")
