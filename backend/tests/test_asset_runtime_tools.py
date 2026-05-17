@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import patch
 
-from app.runtime.manager import RuntimeManager
+from app.runtime.manager import RuntimeManager, SessionTurn
 
 
 class AssetRuntimeToolTests(IsolatedAsyncioTestCase):
@@ -95,3 +95,39 @@ class AssetRuntimeToolTests(IsolatedAsyncioTestCase):
                 SimpleNamespace(content="请总结这个文档", asset_ids=["asset-1"]),
             )
         self.assertEqual(content, "请总结这个文档")
+
+    async def test_stream_agent_response_coalesces_small_deltas(self) -> None:
+        runtime = RuntimeManager()
+        cancel_event = __import__("asyncio").Event()
+        emitted = []
+
+        class DummyClient:
+            def stream_response(self, **kwargs):
+                yield {"type": "text_delta", "delta": "Hel"}
+                yield {"type": "text_delta", "delta": "lo "}
+                yield {"type": "text_delta", "delta": "world."}
+                yield {"type": "done"}
+
+        async def fake_emit(event):
+            emitted.append(event)
+            return event
+
+        runtime.session_turns["session-1"] = SessionTurn(
+            turn_id=1,
+            task=SimpleNamespace(done=lambda: False),
+            cancel_event=cancel_event,
+        )
+        with patch.object(runtime, "emit_ephemeral", side_effect=fake_emit):
+            blocks = await runtime._stream_agent_response(
+                client=DummyClient(),
+                session_id="session-1",
+                turn_id=1,
+                system_prompt="You are Jarvis.",
+                messages=[],
+                tools=[],
+                cancel_event=cancel_event,
+                emit_stream_events=True,
+            )
+
+        self.assertEqual(blocks[0].text, "Hello world.")
+        self.assertEqual([event.content for event in emitted], ["Hello world."])

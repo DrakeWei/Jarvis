@@ -162,3 +162,31 @@ class SessionAssetFoundationTests(TestCase):
         parts = transcript[0]["content"]
         self.assertTrue(isinstance(parts, list))
         self.assertTrue(any(isinstance(part, dict) and part.get("type") == "asset_ref" and part.get("asset_id") == asset.id for part in parts))
+
+    def test_list_sessions_orders_by_latest_message_activity_in_sql(self) -> None:
+        with self._create_session() as db:
+            db.add(
+                SessionRecord(
+                    id="session-2",
+                    title="Later Session",
+                    workspace_mode="bound",
+                    canonical_workspace_path="/tmp/workspace-2",
+                    workspace_fingerprint="workspace-fp-2",
+                    workspace_label="workspace-2",
+                    status="idle",
+                )
+            )
+            db.commit()
+
+        with patch.object(session_service, "create_session", self._create_session):
+            session_service.create_message_record(
+                "session-1",
+                MessageCreate(role="user", content="older message"),
+            )
+            session_service.create_message_record(
+                "session-2",
+                MessageCreate(role="user", content="newer message"),
+            )
+            sessions = session_service.list_sessions()
+
+        self.assertEqual([session.session_id for session in sessions[:2]], ["session-2", "session-1"])

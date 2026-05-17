@@ -7,13 +7,22 @@ from app.schemas.subagents import SubagentSummary
 
 def list_subagents(session_id: str | None = None) -> list[SubagentSummary]:
     with create_session() as db:
-        stmt = select(AgentRecord).where(AgentRecord.kind == "subagent").order_by(
-            AgentRecord.created_at.desc(),
-            AgentRecord.id.desc(),
+        stmt = (
+            select(
+                AgentRecord.id,
+                AgentRecord.session_id,
+                AgentRecord.name,
+                AgentRecord.role,
+                AgentRecord.kind,
+                AgentRecord.status,
+                AgentRecord.created_at,
+            )
+            .where(AgentRecord.kind == "subagent")
+            .order_by(AgentRecord.created_at.desc(), AgentRecord.id.desc())
         )
         if session_id:
             stmt = stmt.where(AgentRecord.session_id == session_id)
-        rows = db.scalars(stmt).all()
+        rows = db.execute(stmt).all()
         return [
             SubagentSummary(
                 id=row.id,
@@ -83,12 +92,13 @@ def add_subagent_summary(agent_id: int, content: str) -> None:
 
 def get_subagent_summary(agent_id: int) -> str | None:
     with create_session() as db:
-        row = db.scalars(
-            select(AgentMessageRecord)
+        row = db.execute(
+            select(AgentMessageRecord.content)
             .where(
                 AgentMessageRecord.agent_id == agent_id,
                 AgentMessageRecord.direction == "summary",
             )
             .order_by(AgentMessageRecord.id.desc())
+            .limit(1)
         ).first()
         return row.content if row else None

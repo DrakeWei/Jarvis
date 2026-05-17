@@ -11,13 +11,22 @@ from app.schemas.teammates import (
 
 def list_teammates(session_id: str | None = None) -> list[TeammateSummary]:
     with create_session() as db:
-        stmt = select(AgentRecord).where(AgentRecord.kind == "teammate").order_by(
-            AgentRecord.created_at.desc(),
-            AgentRecord.id.desc(),
+        stmt = (
+            select(
+                AgentRecord.id,
+                AgentRecord.session_id,
+                AgentRecord.name,
+                AgentRecord.role,
+                AgentRecord.kind,
+                AgentRecord.status,
+                AgentRecord.created_at,
+            )
+            .where(AgentRecord.kind == "teammate")
+            .order_by(AgentRecord.created_at.desc(), AgentRecord.id.desc())
         )
         if session_id:
             stmt = stmt.where(AgentRecord.session_id == session_id)
-        rows = db.scalars(stmt).all()
+        rows = db.execute(stmt).all()
         return [
             TeammateSummary(
                 id=row.id,
@@ -57,8 +66,18 @@ def create_teammate(payload: TeammateCreate) -> TeammateSummary:
 
 def get_teammate(agent_id: int) -> TeammateSummary | None:
     with create_session() as db:
-        row = db.get(AgentRecord, agent_id)
-        if not row or row.kind != "teammate":
+        row = db.execute(
+            select(
+                AgentRecord.id,
+                AgentRecord.session_id,
+                AgentRecord.name,
+                AgentRecord.role,
+                AgentRecord.kind,
+                AgentRecord.status,
+                AgentRecord.created_at,
+            ).where(AgentRecord.id == agent_id, AgentRecord.kind == "teammate")
+        ).first()
+        if not row:
             return None
         return TeammateSummary(
             id=row.id,
@@ -111,8 +130,14 @@ def add_teammate_message(agent_id: int, direction: str, content: str) -> Teammat
 
 def list_teammate_messages(agent_id: int) -> list[TeammateMessageSummary]:
     with create_session() as db:
-        rows = db.scalars(
-            select(AgentMessageRecord)
+        rows = db.execute(
+            select(
+                AgentMessageRecord.id,
+                AgentMessageRecord.agent_id,
+                AgentMessageRecord.direction,
+                AgentMessageRecord.content,
+                AgentMessageRecord.created_at,
+            )
             .where(AgentMessageRecord.agent_id == agent_id)
             .order_by(AgentMessageRecord.created_at.desc(), AgentMessageRecord.id.desc())
         ).all()

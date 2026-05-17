@@ -7,13 +7,25 @@ from app.schemas.tools import ToolExecutionSummary
 
 def list_tool_executions(session_id: str | None = None) -> list[ToolExecutionSummary]:
     with create_session() as db:
-        stmt = select(ToolExecutionRecord).order_by(
-            ToolExecutionRecord.created_at.desc(),
-            ToolExecutionRecord.id.desc(),
+        stmt = (
+            select(
+                ToolExecutionRecord.id,
+                ToolExecutionRecord.session_id,
+                ToolExecutionRecord.tool_name,
+                ToolExecutionRecord.tool_source,
+                ToolExecutionRecord.server_name,
+                ToolExecutionRecord.status,
+                ToolExecutionRecord.input_json,
+                ToolExecutionRecord.output_text,
+                ToolExecutionRecord.latency_ms,
+                ToolExecutionRecord.remote_request_id,
+                ToolExecutionRecord.created_at,
+            )
+            .order_by(ToolExecutionRecord.created_at.desc(), ToolExecutionRecord.id.desc())
         )
         if session_id:
             stmt = stmt.where(ToolExecutionRecord.session_id == session_id)
-        rows = db.scalars(stmt).all()
+        rows = db.execute(stmt).all()
         return [
             ToolExecutionSummary(
                 id=row.id,

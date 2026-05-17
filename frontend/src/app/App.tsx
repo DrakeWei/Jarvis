@@ -221,6 +221,13 @@ function sortAssets(items: SessionAssetSummary[]): SessionAssetSummary[] {
   );
 }
 
+function latestDurableEventId(events: TimelineEvent[]): number | undefined {
+  const ids = events
+    .map((event) => event.event_id)
+    .filter((value): value is number => typeof value === "number");
+  return ids.length ? Math.max(...ids) : undefined;
+}
+
 function formatTimelineStamp(timestamp: string): string {
   return timelineStampFormatter.format(parseTimestamp(timestamp));
 }
@@ -455,6 +462,12 @@ export function App() {
   const composerFileInputRef = useRef<HTMLInputElement | null>(null);
   const sessionContextMenuRef = useRef<HTMLDivElement | null>(null);
   const activeSessionRef = useRef("");
+  const eventsBySessionRef = useRef<Record<string, TimelineEvent[]>>({});
+  const lastRealtimeEventAtRef = useRef<Record<string, number>>({});
+  const lastRecoveryAttemptAtRef = useRef<Record<string, number>>({});
+  const sessionRefreshTimersRef = useRef<Record<string, number>>({});
+  const sessionRefreshInFlightRef = useRef<Record<string, boolean>>({});
+  const sessionRefreshNeedsTimelineRef = useRef<Record<string, boolean>>({});
   const sessionSocketsRef = useRef<Record<string, () => void>>({});
 
   useEffect(() => {
@@ -535,6 +548,56 @@ export function App() {
     }));
   }
 
+  async function refreshRealtimeRecovery(sessionId: string) {
+    const [timeline, nextSessionState] = await Promise.all([
+      fetchTimeline(sessionId),
+      fetchSessionState(sessionId),
+    ]);
+    setEventsBySession((current) => ({ ...current, [sessionId]: timeline }));
+    setSessionStateBySession((current) => ({ ...current, [sessionId]: nextSessionState }));
+    if (!nextSessionState.active_turn) {
+      setStreamingBySession((current) => ({ ...current, [sessionId]: null }));
+    }
+  }
+
+  async function runScheduledSessionRefresh(sessionId: string) {
+    if (sessionRefreshInFlightRef.current[sessionId]) {
+      return;
+    }
+    sessionRefreshInFlightRef.current[sessionId] = true;
+    const includeTimeline = Boolean(sessionRefreshNeedsTimelineRef.current[sessionId]);
+    sessionRefreshNeedsTimelineRef.current[sessionId] = false;
+    try {
+      if (includeTimeline) {
+        const [timeline] = await Promise.all([
+          fetchTimeline(sessionId),
+          refreshSessionState(sessionId),
+        ]);
+        setEventsBySession((current) => ({ ...current, [sessionId]: timeline }));
+      } else {
+        await refreshSessionState(sessionId);
+      }
+    } finally {
+      sessionRefreshInFlightRef.current[sessionId] = false;
+      if (sessionRefreshNeedsTimelineRef.current[sessionId]) {
+        scheduleSessionRefresh(sessionId, { includeTimeline: sessionRefreshNeedsTimelineRef.current[sessionId] });
+      }
+    }
+  }
+
+  function scheduleSessionRefresh(sessionId: string, options?: { includeTimeline?: boolean }) {
+    if (options?.includeTimeline) {
+      sessionRefreshNeedsTimelineRef.current[sessionId] = true;
+    }
+    if (sessionRefreshTimersRef.current[sessionId]) {
+      return;
+    }
+    sessionRefreshTimersRef.current[sessionId] = window.setTimeout(() => {
+      delete sessionRefreshTimersRef.current[sessionId];
+      void runScheduledSessionRefresh(sessionId);
+    }, 150);
+  }
+
   useEffect(() => {
     if (!activeSessionId) return;
     let cancelled = false;
@@ -575,6 +638,10 @@ export function App() {
   }, [selectedTeammateId]);
 
   useEffect(() => {
+    eventsBySessionRef.current = eventsBySession;
+  }, [eventsBySession]);
+
+  useEffect(() => {
     const cleanups = sessionSocketsRef.current;
     const liveSessionIds = sessions
       .filter((session) => !session.isDraft)
@@ -586,6 +653,7 @@ export function App() {
       cleanups[sessionId] = openSessionEvents(
         sessionId,
         (event) => {
+          lastRealtimeEventAtRef.current[event.session_id] = Date.now();
           if (event.type === "message.user") {
             setSessions((current) => touchSession(current, event.session_id, event.created_at));
             setEventsBySession((current) => {
@@ -596,9 +664,12 @@ export function App() {
               if (localIndex === -1) {
                 const exists = sessionEvents.some(
                   (item) =>
-                    item.created_at === event.created_at &&
-                    item.type === event.type &&
-                    item.content === event.content,
+                    (typeof event.event_id === "number" && item.event_id === event.event_id)
+                    || (
+                      item.created_at === event.created_at &&
+                      item.type === event.type &&
+                      item.content === event.content
+                    ),
                 );
                 return exists ? current : { ...current, [event.session_id]: [...sessionEvents, event] };
               }
@@ -633,9 +704,12 @@ export function App() {
             const sessionEvents = current[event.session_id] ?? [];
             const exists = sessionEvents.some(
               (item) =>
-                item.created_at === event.created_at &&
-                item.type === event.type &&
-                item.content === event.content,
+                (typeof event.event_id === "number" && item.event_id === event.event_id)
+                || (
+                  item.created_at === event.created_at &&
+                  item.type === event.type &&
+                  item.content === event.content
+                ),
             );
             return exists ? current : { ...current, [event.session_id]: [...sessionEvents, event] };
           });
@@ -648,14 +722,18 @@ export function App() {
             event.type.startsWith("teammate.") ||
             event.type.startsWith("subagent.")
           ) {
-            refreshSessionState(event.session_id).catch(() => undefined);
+            scheduleSessionRefresh(event.session_id);
           }
           if (event.type.startsWith("teammate.") && selectedTeammateId) {
             fetchTeammateMessages(selectedTeammateId).then(setTeammateMessages).catch(() => undefined);
           }
         },
+        () => latestDurableEventId(eventsBySessionRef.current[sessionId] ?? []),
         {
-          onOpen: () => setConnectionState("live"),
+          onOpen: () => {
+            lastRealtimeEventAtRef.current[sessionId] = Date.now();
+            setConnectionState("live");
+          },
           onError: () => setConnectionState("degraded"),
           onClose: () => setConnectionState("reconnecting"),
         },
@@ -676,6 +754,10 @@ export function App() {
       for (const cleanup of Object.values(sessionSocketsRef.current)) {
         cleanup();
       }
+      for (const timer of Object.values(sessionRefreshTimersRef.current)) {
+        window.clearTimeout(timer);
+      }
+      sessionRefreshTimersRef.current = {};
       sessionSocketsRef.current = {};
       setConnectionState("offline");
     };
@@ -1084,6 +1166,34 @@ export function App() {
   const events = eventsBySession[activeSessionId] ?? [];
   const streamingAssistant = streamingBySession[activeSessionId] ?? null;
   const isActiveTurnRunning = Boolean(activeSessionId && streamingAssistant);
+
+  useEffect(() => {
+    if (!activeSessionId || activeSessionId.startsWith(DRAFT_SESSION_PREFIX)) return;
+    if (!isActiveTurnRunning) return;
+    const interval = window.setInterval(() => {
+      const now = Date.now();
+      const lastEventAt = lastRealtimeEventAtRef.current[activeSessionId] ?? 0;
+      const lastRecoveryAt = lastRecoveryAttemptAtRef.current[activeSessionId] ?? 0;
+      const staleForMs = now - lastEventAt;
+      const sinceRecoveryMs = now - lastRecoveryAt;
+      if (staleForMs < 8000 || sinceRecoveryMs < 8000) {
+        return;
+      }
+      lastRecoveryAttemptAtRef.current[activeSessionId] = now;
+      if (connectionState === "live") {
+        setConnectionState("degraded");
+      }
+      refreshRealtimeRecovery(activeSessionId)
+        .then(() => {
+          lastRealtimeEventAtRef.current[activeSessionId] = Date.now();
+        })
+        .catch(() => undefined);
+    }, 3000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [activeSessionId, connectionState, isActiveTurnRunning]);
 
   useEffect(() => {
     if (!autoScrollTimeline || !timelineRef.current) return;

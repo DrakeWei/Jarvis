@@ -41,6 +41,7 @@ class SessionSummary(BaseModel):
 
 
 class TimelineEvent(BaseModel):
+    event_id: int | None = None
     session_id: str
     type: str
     content: str

@@ -11,6 +11,7 @@ class TurnSummary(BaseModel):
     started_at: str
     updated_at: str
     completed_at: str | None
+    cancel_requested: bool = False
     last_checkpoint_seq: int
     resume_hint: str | None
     error_summary: str | None

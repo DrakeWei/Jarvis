@@ -4,6 +4,7 @@ import hashlib
 import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from docx import Document as DocxDocument
 from openpyxl import load_workbook
@@ -19,6 +20,13 @@ from app.services import asset_service
 
 class AssetUploadError(ValueError):
     pass
+
+
+class AsyncUploadLike(Protocol):
+    filename: str | None
+    content_type: str | None
+
+    async def read(self, size: int = -1) -> bytes: ...
 
 
 @dataclass
@@ -87,6 +95,55 @@ def stage_uploaded_asset(session_id: str, filename: str, mime_type: str | None, 
     original_path.write_bytes(data)
     updated = asset_service.update_asset_record(asset.id, storage_path=original_path.as_posix(), sha256=sha256)
     return updated or asset
+
+
+async def stage_uploaded_asset_stream(
+    session_id: str,
+    upload: AsyncUploadLike,
+    *,
+    chunk_size: int = 1024 * 1024,
+) -> SessionAssetSummary:
+    filename = upload.filename or ""
+    normalized_mime = normalize_mime_type(filename, upload.content_type)
+    kind = detect_asset_kind(filename, normalized_mime)
+    if kind == "other":
+        raise AssetUploadError("Unsupported file type. Jarvis currently accepts images, PDF, DOCX, XLSX, and PPTX.")
+
+    asset_id = session_asset_utils.new_asset_id()
+    session_asset_utils.ensure_asset_dirs(session_id, asset_id)
+    original_path = session_asset_utils.allocate_original_path(session_id, asset_id, filename)
+
+    sha256_hasher = hashlib.sha256()
+    size_bytes = 0
+    try:
+        with original_path.open("wb") as handle:
+            while True:
+                chunk = await upload.read(chunk_size)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                sha256_hasher.update(chunk)
+                size_bytes += len(chunk)
+
+        validate_upload(filename, normalized_mime, size_bytes)
+        asset = asset_service.create_asset_record(
+            session_id,
+            asset_id=asset_id,
+            kind=kind,
+            mime_type=normalized_mime,
+            filename=filename,
+            size_bytes=size_bytes,
+            sha256=sha256_hasher.hexdigest(),
+            status="uploaded",
+            storage_path=original_path.as_posix(),
+        )
+        return asset
+    except Exception:
+        try:
+            original_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
 
 
 def ingest_asset(asset_id: str) -> SessionAssetSummary:

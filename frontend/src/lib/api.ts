@@ -11,6 +11,7 @@ export type SessionSummary = {
 };
 
 export type TimelineEvent = {
+  event_id?: number | null;
   session_id: string;
   type: string;
   content: string;
@@ -72,6 +73,33 @@ export type ToolExecutionSummary = {
   input_json: string | null;
   output_text: string | null;
   created_at: string;
+};
+
+export type BackgroundJobSummary = {
+  id: number;
+  session_id: string | null;
+  job_type: string;
+  command: string;
+  status: string;
+  owner_id: string | null;
+  attempts: number;
+  next_attempt_at: string | null;
+  output_text: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+};
+
+export type ExecutionLeaseSummary = {
+  id: number;
+  scope_type: string;
+  scope_key: string;
+  owner_id: string;
+  status: string;
+  acquired_at: string;
+  heartbeat_at: string;
+  expires_at: string;
 };
 
 export type SkillSummary = {
@@ -359,6 +387,70 @@ export async function fetchToolExecutions(
   return response.json();
 }
 
+export async function fetchBackgroundJobs(params?: {
+  sessionId?: string;
+  jobType?: string;
+  status?: string;
+  limit?: number;
+}): Promise<BackgroundJobSummary[]> {
+  const search = new URLSearchParams();
+  if (params?.sessionId) search.set("session_id", params.sessionId);
+  if (params?.jobType) search.set("job_type", params.jobType);
+  if (params?.status) search.set("status", params.status);
+  if (params?.limit) search.set("limit", String(params.limit));
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  const response = await fetch(`${API_BASE}/background-jobs${suffix}`);
+  if (!response.ok) {
+    throw new Error("Failed to load background jobs");
+  }
+  return response.json();
+}
+
+export async function retryBackgroundJob(jobId: number): Promise<BackgroundJobSummary> {
+  const response = await fetch(`${API_BASE}/background-jobs/${jobId}/retry`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error("Failed to retry background job");
+  }
+  return response.json();
+}
+
+export async function cancelBackgroundJob(jobId: number): Promise<BackgroundJobSummary> {
+  const response = await fetch(`${API_BASE}/background-jobs/${jobId}/cancel`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error("Failed to cancel background job");
+  }
+  return response.json();
+}
+
+export async function fetchExecutionLeases(params?: {
+  scopeType?: string;
+  status?: string;
+}): Promise<ExecutionLeaseSummary[]> {
+  const search = new URLSearchParams();
+  if (params?.scopeType) search.set("scope_type", params.scopeType);
+  if (params?.status) search.set("status", params.status);
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  const response = await fetch(`${API_BASE}/execution-leases${suffix}`);
+  if (!response.ok) {
+    throw new Error("Failed to load execution leases");
+  }
+  return response.json();
+}
+
+export async function forceReleaseExecutionLease(leaseId: number): Promise<ExecutionLeaseSummary> {
+  const response = await fetch(`${API_BASE}/execution-leases/${leaseId}/force-release`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error("Failed to force release execution lease");
+  }
+  return response.json();
+}
+
 export async function fetchSessionMemory(sessionId: string): Promise<SessionMemorySummary[]> {
   const response = await fetch(`${API_BASE}/session-memory?session_id=${encodeURIComponent(sessionId)}`);
   if (!response.ok) {
@@ -492,26 +584,43 @@ export async function runSubagent(
 export function openSessionEvents(
   sessionId: string,
   onEvent: (event: TimelineEvent) => void,
+  getSinceEventId?: () => number | undefined,
   handlers?: {
     onOpen?: () => void;
     onClose?: () => void;
     onError?: () => void;
   },
 ): () => void {
-  const socket = new WebSocket(`ws://127.0.0.1:8731/api/sessions/${sessionId}/events`);
   let manuallyClosed = false;
-  socket.onopen = () => handlers?.onOpen?.();
-  socket.onmessage = (message) => {
-    onEvent(JSON.parse(message.data) as TimelineEvent);
-  };
-  socket.onerror = () => handlers?.onError?.();
-  socket.onclose = () => {
-    if (!manuallyClosed) {
+  let reconnectTimer: number | undefined;
+  let reconnectAttempts = 0;
+  let socket: WebSocket | null = null;
+
+  const connect = () => {
+    const sinceEventId = getSinceEventId?.();
+    const suffix = typeof sinceEventId === "number" ? `?since_event_id=${encodeURIComponent(String(sinceEventId))}` : "";
+    socket = new WebSocket(`ws://127.0.0.1:8731/api/sessions/${sessionId}/events${suffix}`);
+    socket.onopen = () => {
+      reconnectAttempts = 0;
+      handlers?.onOpen?.();
+    };
+    socket.onmessage = (message) => {
+      onEvent(JSON.parse(message.data) as TimelineEvent);
+    };
+    socket.onerror = () => handlers?.onError?.();
+    socket.onclose = () => {
+      if (manuallyClosed) return;
       handlers?.onClose?.();
-    }
+      const delay = Math.min(2000, 250 * 2 ** reconnectAttempts);
+      reconnectAttempts += 1;
+      reconnectTimer = window.setTimeout(connect, delay);
+    };
   };
+
+  connect();
   return () => {
     manuallyClosed = true;
-    socket.close();
+    if (reconnectTimer) window.clearTimeout(reconnectTimer);
+    socket?.close();
   };
 }

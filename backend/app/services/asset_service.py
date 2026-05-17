@@ -53,6 +53,7 @@ def _to_chunk_summary(row: AssetChunkRecord) -> SessionAssetChunkSummary:
 def create_asset_record(
     session_id: str,
     *,
+    asset_id: str | None = None,
     kind: str,
     mime_type: str,
     filename: str,
@@ -61,19 +62,20 @@ def create_asset_record(
     status: str = "uploaded",
     preview_path: str | None = None,
     error_message: str | None = None,
+    storage_path: str | None = None,
 ) -> SessionAssetSummary:
-    asset_id = session_asset_utils.new_asset_id()
-    storage_path = session_asset_utils.allocate_original_path(session_id, asset_id, filename).as_posix()
+    resolved_asset_id = asset_id or session_asset_utils.new_asset_id()
+    resolved_storage_path = storage_path or session_asset_utils.allocate_original_path(session_id, resolved_asset_id, filename).as_posix()
     with create_session() as db:
         row = SessionAssetRecord(
-            id=asset_id,
+            id=resolved_asset_id,
             session_id=session_id,
             kind=kind,
             mime_type=mime_type,
             filename=session_asset_utils.display_filename(filename),
             size_bytes=max(0, int(size_bytes)),
             sha256=sha256,
-            storage_path=storage_path,
+            storage_path=resolved_storage_path,
             preview_path=preview_path,
             status=status,
             error_message=error_message,

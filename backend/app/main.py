@@ -21,10 +21,16 @@ app.include_router(api_router, prefix=settings.api_prefix)
 app.include_router(ws_router, prefix=settings.api_prefix)
 
 
-@app.on_event("startup")
-async def startup() -> None:
+async def initialize_runtime_for_role() -> None:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     init_db()
     runtime.restore_state()
-    if not runtime.list_sessions():
+    if settings.jarvis_runtime_role in {"hybrid", "worker"}:
+        runtime.start_dispatcher()
+    if settings.jarvis_runtime_role in {"api", "hybrid"} and not runtime.list_sessions():
         await runtime.create_session(SessionCreate(title="Command Deck"))
+
+
+@app.on_event("startup")
+async def startup() -> None:
+    await initialize_runtime_for_role()
