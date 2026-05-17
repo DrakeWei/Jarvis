@@ -28,3 +28,4 @@ services/**/*.egg-info/
 backend/data/
 
 data/
+tmp/

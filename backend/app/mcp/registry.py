@@ -26,6 +26,7 @@ class ToolExecutionResult:
     status: str
     output: str
     remote_request_id: str | None = None
+    payload: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -193,6 +194,24 @@ def local_tool_definitions(*, allow_subagent_tool: bool = True) -> list[ToolDefi
                     "chunk_index": {"type": "integer"},
                 },
                 "required": ["asset_id", "chunk_index"],
+            },
+            source="local",
+        ),
+        ToolDefinition(
+            name="generate_image",
+            description="Generate a new image for the current session using a text prompt. Use this when the user asks you to create or render an image instead of only describing one.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string"},
+                    "asset_ids": {"type": "array", "items": {"type": "string"}},
+                    "mask_asset_id": {"type": "string"},
+                    "input_fidelity": {"type": "string"},
+                    "size": {"type": "string"},
+                    "background": {"type": "string"},
+                    "quality": {"type": "string"},
+                },
+                "required": ["prompt"],
             },
             source="local",
         ),

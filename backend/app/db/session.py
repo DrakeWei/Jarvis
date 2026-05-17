@@ -172,6 +172,8 @@ def _migrate_event_log_columns() -> None:
     statements: list[str] = []
     if "ephemeral" not in columns:
         statements.append("ALTER TABLE event_log ADD COLUMN ephemeral BOOLEAN NOT NULL DEFAULT 0")
+    if "payload_json" not in columns:
+        statements.append("ALTER TABLE event_log ADD COLUMN payload_json TEXT")
 
     if statements:
         with engine.begin() as connection:

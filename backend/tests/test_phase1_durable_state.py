@@ -527,7 +527,8 @@ class Phase1LeaseHeartbeatAsyncTests(IsolatedAsyncioTestCase):
                 emit_stream_events=False,
             )
 
-        self.assertEqual(result, "done")
+        self.assertEqual(result.text, "done")
+        self.assertEqual(result.asset_ids, [])
         self.assertIn(("after_tools", False), checkpoint_calls)
 
     async def test_resume_turn_enqueues_background_resume_job(self) -> None:

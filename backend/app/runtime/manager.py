@@ -23,6 +23,7 @@ import app.services.context_assembler as context_assembler
 import app.services.conversation_search_service as conversation_search_service
 import app.services.checkpoint_service as checkpoint_service
 import app.services.asset_ingestion_service as asset_ingestion_service
+import app.services.image_generation_service as image_generation_service
 import app.services.memory_service as memory_service
 import app.services.memory_search_service as memory_search_service
 import app.services.turn_service as turn_service
@@ -36,6 +37,12 @@ class SessionTurn:
     task: asyncio.Task[None]
     cancel_event: asyncio.Event
     partial_text: str = ""
+
+
+@dataclass(frozen=True)
+class AgentReply:
+    text: str
+    asset_ids: list[str]
 
 
 class TurnCancelled(RuntimeError):
@@ -431,7 +438,7 @@ class RuntimeManager:
         workspace = self._session_workspace(session_id)
         workspace_mode = self._session_workspace_mode(session_id)
         messages: list[dict[str, object]] = [{"role": "user", "content": prompt}]
-        return await self._continue_agent_loop(
+        reply = await self._continue_agent_loop(
             session_id,
             workspace,
             messages,
@@ -441,6 +448,7 @@ class RuntimeManager:
             agent_kind="subagent",
             emit_stream_events=False,
         )
+        return reply.text
 
     async def publish(self, event: TimelineEvent) -> TimelineEvent:
         stored = session_service.create_event_record(event)
@@ -983,7 +991,13 @@ class RuntimeManager:
         )
         try:
             reply = await self._run_agent_task(session_id, turn_id, content, cancel_event)
-            await self._publish_assistant_reply(session_id, reply, source_turn_id=turn_id, emit_deltas=False)
+            await self._publish_assistant_reply(
+                session_id,
+                reply.text,
+                source_turn_id=turn_id,
+                emit_deltas=False,
+                asset_ids=reply.asset_ids,
+            )
             current_turn = turn_service.get_turn(turn_id)
             if current_turn and current_turn.status == "running":
                 turn_service.update_turn_status(turn_id, "completed", completed=True)
@@ -1051,7 +1065,13 @@ class RuntimeManager:
         )
         try:
             reply = await self._resume_turn_from_context(session_id, turn_id, context, cancel_event)
-            await self._publish_assistant_reply(session_id, reply, source_turn_id=turn_id, emit_deltas=False)
+            await self._publish_assistant_reply(
+                session_id,
+                reply.text,
+                source_turn_id=turn_id,
+                emit_deltas=False,
+                asset_ids=reply.asset_ids,
+            )
             current_turn = turn_service.get_turn(turn_id)
             if current_turn and current_turn.status == "running":
                 turn_service.update_turn_status(turn_id, "completed", completed=True)
@@ -1088,7 +1108,7 @@ class RuntimeManager:
 
         await self._publish_assistant_reply(session_id, reply, source_turn_id=turn_id)
 
-    async def _run_agent_task(self, session_id: str, turn_id: int, latest_user_content: str, cancel_event: asyncio.Event) -> str:
+    async def _run_agent_task(self, session_id: str, turn_id: int, latest_user_content: str, cancel_event: asyncio.Event) -> AgentReply:
         workspace = self._session_workspace(session_id)
         workspace_mode = self._session_workspace_mode(session_id)
         explicit_external_reads = self._explicit_external_reads(workspace, latest_user_content)
@@ -1119,11 +1139,14 @@ class RuntimeManager:
                     content=f"Turn #{turn_id} stopped because the prompt referenced another workspace.",
                 )
             )
-            return (
+            return AgentReply(
+                text=(
                 f"当前会话绑定的工作目录是 `{workspace.as_posix()}`，"
                 f"你这次提到的项目是 `{named_workspace.as_posix()}`。"
                 "如果你要在那个项目里继续执行，请新开一个绑定到该目录的会话，"
                 "或后续提供显式绝对路径做只读查看。"
+                ),
+                asset_ids=[],
             )
 
         messages = context_assembler.build_initial_loop_messages(session_id)
@@ -1563,7 +1586,7 @@ class RuntimeManager:
         tool_name: str,
         tool_input: dict[str, object],
         broker_for_workspace: ToolBroker,
-    ) -> tuple[str, str] | None:
+    ) -> tuple[str, str] | ToolExecutionResult | None:
         if tool_name == "bash":
             return None
         if tool_name in {"list_files", "read_file", "write_file", "edit_file"}:
@@ -1666,6 +1689,44 @@ class RuntimeManager:
             if chunk is None:
                 return "error", f"Chunk {chunk_index} not found for attachment '{asset.filename}'."
             return "completed", chunk.content
+        if tool_name == "generate_image":
+            prompt = str(tool_input.get("prompt", "")).strip()
+            raw_asset_ids = tool_input.get("asset_ids", [])
+            asset_ids = [str(asset_id).strip() for asset_id in raw_asset_ids] if isinstance(raw_asset_ids, list) else []
+            mask_asset_id = str(tool_input.get("mask_asset_id", "")).strip() or None
+            input_fidelity = str(tool_input.get("input_fidelity", "")).strip() or None
+            size = str(tool_input.get("size", "")).strip() or None
+            background = str(tool_input.get("background", "")).strip() or None
+            quality = str(tool_input.get("quality", "")).strip() or None
+            if not prompt:
+                return "error", "generate_image requires a non-empty prompt."
+            try:
+                generated = image_generation_service.generate_image(
+                    session_id,
+                    prompt,
+                    asset_ids=asset_ids,
+                    mask_asset_id=mask_asset_id,
+                    input_fidelity=input_fidelity,
+                    size=size,
+                    background=background,
+                    quality=quality,
+                )
+            except image_generation_service.ImageGenerationError as exc:
+                return "error", str(exc)
+            action = "Edited image" if any(asset_ids) else "Generated image"
+            summary = f"{action} asset {generated.asset.id} ({generated.asset.filename})."
+            if generated.revised_prompt and generated.revised_prompt != generated.prompt:
+                summary += f" Revised prompt: {generated.revised_prompt}"
+            return ToolExecutionResult(
+                status="completed",
+                output=summary,
+                payload={
+                    "asset_ids": [generated.asset.id],
+                    "assets": [asset_service.build_asset_reference(generated.asset)],
+                    "model": generated.model,
+                    "revised_prompt": generated.revised_prompt,
+                },
+            )
         if tool_name == "create_task":
             subject = str(tool_input.get("subject", "")).strip()
             description = str(tool_input.get("description", "")).strip()
@@ -1721,12 +1782,17 @@ class RuntimeManager:
             return None
         if tool.source == "mcp":
             return await tool_registry.call_tool(tool, tool_input)
-        status, output = await self._execute_autonomous_tool(
+        result = await self._execute_autonomous_tool(
             session_id=session_id,
             tool_name=tool.name,
             tool_input=tool_input,
             broker_for_workspace=broker_for_workspace,
-        ) or ("error", f"Tool '{tool.name}' returned no execution result.")
+        )
+        if result is None:
+            return ToolExecutionResult(status="error", output=f"Tool '{tool.name}' returned no execution result.")
+        if isinstance(result, ToolExecutionResult):
+            return result
+        status, output = result
         return ToolExecutionResult(status=status, output=output)
 
     async def _publish_assistant_reply(
@@ -1736,8 +1802,10 @@ class RuntimeManager:
         *,
         source_turn_id: int | None = None,
         emit_deltas: bool = True,
+        asset_ids: list[str] | None = None,
     ) -> None:
-        text = reply.strip() or "LLM provider returned no text output."
+        resolved_asset_ids = self._normalize_asset_ids(asset_ids or [])
+        text = reply.strip() or ("Generated image." if resolved_asset_ids else "LLM provider returned no text output.")
         if emit_deltas:
             for chunk in self._chunk_text(text):
                 await self.emit_ephemeral(
@@ -1748,7 +1816,11 @@ class RuntimeManager:
                     )
                 )
                 await asyncio.sleep(0.035)
-        session_service.create_message_record(session_id, MessageCreate(role="assistant", content=text))
+        parts = self._build_assistant_message_parts(session_id, text, resolved_asset_ids)
+        session_service.create_message_record(
+            session_id,
+            MessageCreate(role="assistant", content=text, asset_ids=resolved_asset_ids),
+        )
         memory_service.remember_progress(session_id, text, source_turn_id=source_turn_id)
         self._capture_assistant_memory_signals(session_id, source_turn_id, text)
         memory_service.refresh_rolling_summary(session_id, source_turn_id)
@@ -1757,8 +1829,57 @@ class RuntimeManager:
                 session_id=session_id,
                 type="message.assistant",
                 content=text,
+                parts=parts,
             )
         )
+
+    def _build_assistant_message_parts(
+        self,
+        session_id: str,
+        text: str,
+        asset_ids: list[str],
+    ) -> list[dict[str, object]] | None:
+        parts: list[dict[str, object]] = []
+        if text:
+            parts.append({"type": "text", "text": text})
+        for asset_id in asset_ids:
+            asset = asset_service.get_asset(asset_id, session_id=session_id)
+            if asset is None:
+                continue
+            parts.append(asset_service.build_asset_reference(asset))
+        return parts or None
+
+    def _normalize_asset_ids(self, asset_ids: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for asset_id in asset_ids:
+            value = str(asset_id).strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            normalized.append(value)
+        return normalized
+
+    def _collect_generated_asset_ids(self, messages: list[dict[str, object]]) -> list[str]:
+        collected: list[str] = []
+        seen: set[str] = set()
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") != "tool_result":
+                    continue
+                raw_ids = part.get("asset_ids")
+                if not isinstance(raw_ids, list):
+                    continue
+                for asset_id in raw_ids:
+                    value = str(asset_id).strip()
+                    if not value or value in seen:
+                        continue
+                    seen.add(value)
+                    collected.append(value)
+        return collected
 
     def _build_agent_system_prompt(self, workspace: Path, session_memory_header: str = "") -> str:
         sections = [
@@ -1767,6 +1888,7 @@ class RuntimeManager:
                 "You may answer directly when no tool is needed, but you should decide for yourself whether tools are necessary.",
                 "When the user asks about files, directories, paths, project structure, README contents, code contents, or workspace state, inspect the workspace with tools first instead of guessing.",
                 "When the session has uploaded attachments and the current prompt depends on them, use the session attachment tools to inspect extracted content instead of guessing from filenames alone.",
+                "When the user asks you to create a brand-new image, render a visual, or edit an uploaded image, use the generate_image tool instead of claiming the image exists.",
                 "When the user asks you to create or modify files, do the work directly inside the target workspace when it is safe.",
                 "The current session is bound to exactly one canonical workspace. Do not treat another project name in the prompt as permission to silently switch workspaces.",
                 "If the user explicitly mentions an absolute path outside the current session workspace, you may read it as a read-only external reference when useful.",
@@ -1917,7 +2039,7 @@ class RuntimeManager:
         allow_subagent_tool: bool = True,
         agent_kind: str = "lead",
         emit_stream_events: bool = True,
-    ) -> str:
+    ) -> AgentReply:
         client = create_client()
         tool_definitions = await self._autonomous_tool_definitions(allow_subagent_tool=allow_subagent_tool)
         tools = self._tool_schemas_from_definitions(tool_definitions)
@@ -1938,6 +2060,7 @@ class RuntimeManager:
             if agent_kind == "subagent"
             else settings.jarvis_agent_iteration_limit
         )
+        generated_asset_ids = self._collect_generated_asset_ids(messages)
 
         for _ in range(iteration_limit):
             if self._should_cancel_turn(turn_id, cancel_event):
@@ -1981,7 +2104,7 @@ class RuntimeManager:
                 emit_stream_events=emit_stream_events,
             )
             if streamed_blocks is None:
-                return "任务执行失败：模型没有返回可用响应。"
+                return AgentReply(text="任务执行失败：模型没有返回可用响应。", asset_ids=generated_asset_ids)
             messages.append({"role": "assistant", "content": self._serialize_content_blocks(streamed_blocks)})
             self._write_checkpoint(
                 turn_id=turn_id,
@@ -2002,9 +2125,12 @@ class RuntimeManager:
                     for block in streamed_blocks
                     if isinstance(block, TextBlock) and block.text.strip()
                 ]
-                return "\n\n".join(text_blocks) if text_blocks else "任务已执行，但模型没有返回最终文本说明。"
+                return AgentReply(
+                    text="\n\n".join(text_blocks) if text_blocks else "任务已执行，但模型没有返回最终文本说明。",
+                    asset_ids=generated_asset_ids,
+                )
 
-            results: list[dict[str, str]] = []
+            results: list[dict[str, object]] = []
             for block in tool_calls:
                 tool_definition = tool_map.get(block.name)
                 if tool_definition is None:
@@ -2028,18 +2154,21 @@ class RuntimeManager:
                     continue
 
                 if tool_definition.name == "bash":
-                    return await self._queue_bash_approval(
-                        session_id,
-                        workspace,
-                        messages,
-                        block.id,
-                        block.input,
-                        turn_id=turn_id,
-                        allowed_external_reads=allowed_external_reads,
-                        write_enabled=write_enabled,
-                        allow_subagent_tool=allow_subagent_tool,
-                        agent_kind=agent_kind,
-                        emit_stream_events=emit_stream_events,
+                    return AgentReply(
+                        text=await self._queue_bash_approval(
+                            session_id,
+                            workspace,
+                            messages,
+                            block.id,
+                            block.input,
+                            turn_id=turn_id,
+                            allowed_external_reads=allowed_external_reads,
+                            write_enabled=write_enabled,
+                            allow_subagent_tool=allow_subagent_tool,
+                            agent_kind=agent_kind,
+                            emit_stream_events=emit_stream_events,
+                        ),
+                        asset_ids=generated_asset_ids,
                     )
 
                 started_at = time.perf_counter()
@@ -2050,18 +2179,21 @@ class RuntimeManager:
                     broker_for_workspace=broker_for_workspace,
                 )
                 if executed is None:
-                    return await self._queue_bash_approval(
-                        session_id,
-                        workspace,
-                        messages,
-                        block.id,
-                        block.input,
-                        turn_id=turn_id,
-                        allowed_external_reads=allowed_external_reads,
-                        write_enabled=write_enabled,
-                        allow_subagent_tool=allow_subagent_tool,
-                        agent_kind=agent_kind,
-                        emit_stream_events=emit_stream_events,
+                    return AgentReply(
+                        text=await self._queue_bash_approval(
+                            session_id,
+                            workspace,
+                            messages,
+                            block.id,
+                            block.input,
+                            turn_id=turn_id,
+                            allowed_external_reads=allowed_external_reads,
+                            write_enabled=write_enabled,
+                            allow_subagent_tool=allow_subagent_tool,
+                            agent_kind=agent_kind,
+                            emit_stream_events=emit_stream_events,
+                        ),
+                        asset_ids=generated_asset_ids,
                     )
                 latency_ms = int((time.perf_counter() - started_at) * 1000)
                 tool_service.create_tool_execution(
@@ -2095,11 +2227,21 @@ class RuntimeManager:
                             source_turn_id=turn_id,
                             path_ref=target_path,
                         )
+                executed_payload = getattr(executed, "payload", None)
+                tool_asset_ids = self._normalize_asset_ids(
+                    list(executed_payload.get("asset_ids", []))
+                    if isinstance(executed_payload, dict)
+                    else []
+                )
+                for asset_id in tool_asset_ids:
+                    if asset_id not in generated_asset_ids:
+                        generated_asset_ids.append(asset_id)
                 results.append(
                     {
                         "type": "tool_result",
                         "tool_use_id": block.id,
                         "content": executed.output,
+                        "asset_ids": tool_asset_ids,
                     }
                 )
             messages.append({"role": "user", "content": results})
@@ -2116,7 +2258,10 @@ class RuntimeManager:
                 summary="Tool execution results appended to the loop context.",
             )
 
-        return f"任务执行达到了安全迭代上限（{iteration_limit} 轮），我先停在这里。你可以让我继续，或告诉我希望收敛到哪一步。"
+        return AgentReply(
+            text=f"任务执行达到了安全迭代上限（{iteration_limit} 轮），我先停在这里。你可以让我继续，或告诉我希望收敛到哪一步。",
+            asset_ids=generated_asset_ids,
+        )
 
     async def _queue_bash_approval(
         self,
@@ -2193,7 +2338,7 @@ class RuntimeManager:
         )
         return f"Approval required before running `bash`. Review approval #{approval.id} above the composer."
 
-    async def _resume_agent_loop_after_approval(self, session_id: str, context: dict[str, object]) -> str | None:
+    async def _resume_agent_loop_after_approval(self, session_id: str, context: dict[str, object]) -> AgentReply | None:
         workspace_raw = context.get("workspace")
         messages = context.get("messages")
         turn_id = context.get("turn_id")
@@ -2207,9 +2352,15 @@ class RuntimeManager:
         emit_stream_events = bool(context.get("emit_stream_events", True))
 
         if not isinstance(workspace_raw, str) or not isinstance(messages, list):
-            return "Approval context is incomplete; unable to resume the pending action."
+            return AgentReply(
+                text="Approval context is incomplete; unable to resume the pending action.",
+                asset_ids=[],
+            )
         if not isinstance(tool_use_id, str) or not isinstance(tool_name, str) or not isinstance(tool_input, dict):
-            return "Approval context is incomplete; unable to execute the approved tool call."
+            return AgentReply(
+                text="Approval context is incomplete; unable to execute the approved tool call.",
+                asset_ids=[],
+            )
 
         workspace = Path(workspace_raw)
         allowed_external_reads = (
@@ -2267,7 +2418,7 @@ class RuntimeManager:
         turn_id: int,
         context: dict[str, object],
         cancel_event: asyncio.Event,
-    ) -> str:
+    ) -> AgentReply:
         workspace_raw = context.get("workspace")
         messages = context.get("messages")
         allowed_external_reads_raw = context.get("allowed_external_reads")
@@ -2277,7 +2428,10 @@ class RuntimeManager:
         emit_stream_events = bool(context.get("emit_stream_events", True))
 
         if not isinstance(workspace_raw, str) or not isinstance(messages, list):
-            return "Resume context is incomplete; unable to continue the interrupted turn."
+            return AgentReply(
+                text="Resume context is incomplete; unable to continue the interrupted turn.",
+                asset_ids=[],
+            )
 
         workspace = Path(workspace_raw)
         allowed_external_reads = (

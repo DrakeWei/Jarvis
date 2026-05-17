@@ -94,6 +94,14 @@ class Settings:
         self.openai_http_headers = _env_json_map("OPENAI_HTTP_HEADERS_JSON") or _string_map(
             self.codex_provider_config.get("http_headers")
         )
+        self.jarvis_image_base_url = os.getenv("JARVIS_IMAGE_BASE_URL", "").strip()
+        self.jarvis_image_query_params = _env_json_map("JARVIS_IMAGE_QUERY_PARAMS_JSON")
+        self.jarvis_image_http_headers = _env_json_map("JARVIS_IMAGE_HTTP_HEADERS_JSON")
+        self.jarvis_image_model = os.getenv("JARVIS_IMAGE_MODEL", "").strip() or "gpt-image-2"
+        self.jarvis_image_default_size = os.getenv("JARVIS_IMAGE_DEFAULT_SIZE", "1024x1024").strip() or "1024x1024"
+        self.jarvis_image_default_background = os.getenv("JARVIS_IMAGE_DEFAULT_BACKGROUND", "auto").strip() or "auto"
+        self.jarvis_image_default_quality = os.getenv("JARVIS_IMAGE_DEFAULT_QUALITY", "auto").strip() or "auto"
+        self.jarvis_image_request_timeout_seconds = int(os.getenv("JARVIS_IMAGE_REQUEST_TIMEOUT_SECONDS", "180"))
         self.llm_max_tokens = int(os.getenv("JARVIS_LLM_MAX_TOKENS", "4000"))
         self.jarvis_mcp_feishu_enabled = os.getenv("JARVIS_MCP_FEISHU_ENABLED", "").strip() in {"1", "true", "TRUE", "yes", "YES"}
         self.jarvis_mcp_feishu_base_url = os.getenv("JARVIS_MCP_FEISHU_BASE_URL", "").strip()

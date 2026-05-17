@@ -1,3 +1,4 @@
+import json
 from datetime import timedelta
 
 from sqlalchemy import delete, func, select
@@ -145,6 +146,8 @@ def list_message_records(session_id: str, limit: int | None = None) -> list[dict
                         "filename": asset_row.filename,
                         "kind": asset_row.kind,
                         "status": asset_row.status,
+                        "preview_path": asset_row.preview_path,
+                        "storage_path": asset_row.storage_path,
                     }
                 )
         messages: list[dict[str, object]] = []
@@ -208,6 +211,7 @@ def list_event_records(
                 session_id=row.session_id,
                 type=row.event_type,
                 content=row.content,
+                parts=_decode_event_parts(row.payload_json),
                 created_at=row.created_at.isoformat(),
             )
             for row in rows
@@ -220,6 +224,7 @@ def create_event_record(event: TimelineEvent, *, ephemeral: bool = False) -> Tim
             session_id=event.session_id,
             event_type=event.type,
             content=event.content,
+            payload_json=json.dumps(event.parts) if event.parts else None,
             ephemeral=ephemeral,
         )
         db.add(row)
@@ -230,8 +235,21 @@ def create_event_record(event: TimelineEvent, *, ephemeral: bool = False) -> Tim
             session_id=row.session_id,
             type=row.event_type,
             content=row.content,
+            parts=_decode_event_parts(row.payload_json),
             created_at=row.created_at.isoformat(),
         )
+
+
+def _decode_event_parts(payload_json: str | None) -> list[dict[str, object]] | None:
+    if not payload_json:
+        return None
+    try:
+        loaded = json.loads(payload_json)
+    except Exception:
+        return None
+    if not isinstance(loaded, list):
+        return None
+    return [item for item in loaded if isinstance(item, dict)]
 
 
 def purge_expired_ephemeral_events() -> int:
