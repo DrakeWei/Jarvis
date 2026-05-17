@@ -11,6 +11,7 @@ import app.services.memory_retriever as memory_retriever
 import app.services.memory_search_service as memory_search_service
 import app.services.asset_service as asset_service
 import app.providers.openai_adapter as openai_adapter
+from app.runtime.manager import RuntimeManager
 
 
 class ContextBudgetTests(TestCase):
@@ -212,6 +213,40 @@ class ContextAssemblerTests(TestCase):
         )
         self.assertIn("Compacted bash result", tool_result_part["content"])
         self.assertEqual(assembled.debug_meta["summarized_tool_results"], 1)
+
+    def test_runtime_git_prompt_section_includes_branch_metadata(self) -> None:
+        runtime = RuntimeManager()
+        session = SimpleNamespace(
+            git_enabled=True,
+            repo_root="/tmp/repo",
+            lead_branch="feature/test",
+            working_tree_status="dirty",
+            detached_head=False,
+        )
+        with patch("app.runtime.manager.session_service.get_session", return_value=session):
+            section = runtime._session_git_prompt_section("session-1")
+
+        self.assertIn("Repository root: /tmp/repo", section)
+        self.assertIn("Lead branch: feature/test", section)
+        self.assertIn("Working tree status: dirty", section)
+
+    def test_session_git_state_tool_output_includes_branch_metadata(self) -> None:
+        runtime = RuntimeManager()
+        session = SimpleNamespace(
+            git_enabled=True,
+            repo_root="/tmp/repo",
+            lead_branch="main",
+            head_revision="abc123",
+            working_tree_status="dirty",
+            detached_head=False,
+        )
+        with patch("app.runtime.manager.session_service.get_session", return_value=session):
+            output = runtime._session_git_state_tool_output("session-1")
+
+        self.assertIn("Repository root: /tmp/repo", output)
+        self.assertIn("Lead branch: main", output)
+        self.assertIn("HEAD revision: abc123", output)
+        self.assertIn("Working tree status: dirty", output)
 
     def test_assemble_context_expands_document_asset_reference(self) -> None:
         retrieval = memory_retriever.RetrievalResult(stable=[], dynamic=[], counts_by_kind={})

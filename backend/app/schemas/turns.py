@@ -7,6 +7,7 @@ class TurnSummary(BaseModel):
     user_message_id: int | None
     workspace_path: str | None
     workspace_fingerprint: str | None
+    execution_mode: str = "normal"
     status: str
     started_at: str
     updated_at: str

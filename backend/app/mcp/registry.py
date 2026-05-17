@@ -40,6 +40,12 @@ class MCPServerConfig:
 def local_tool_definitions(*, allow_subagent_tool: bool = True) -> list[ToolDefinition]:
     tools = [
         ToolDefinition(
+            name="get_session_git_state",
+            description="Read the current session's Git repository state, including repo root, lead branch, HEAD state, and working tree cleanliness.",
+            input_schema={"type": "object", "properties": {}},
+            source="local",
+        ),
+        ToolDefinition(
             name="list_files",
             description="List files in the current session workspace. You may optionally pass an explicit absolute directory path for a read-only external reference mentioned by the user.",
             input_schema={
@@ -226,6 +232,7 @@ def local_tool_definitions(*, allow_subagent_tool: bool = True) -> list[ToolDefi
                     "properties": {
                         "name": {"type": "string"},
                         "prompt": {"type": "string"},
+                        "isolation_mode": {"type": "string", "enum": ["shared", "worktree"]},
                     },
                     "required": ["prompt"],
                 },

@@ -9,6 +9,7 @@ from app.db.session import create_session
 from app.models import EventLogRecord, MessageAssetRecord, MessageRecord, SessionAssetRecord, SessionRecord
 from app.schemas.events import MessageCreate, SessionCreate, SessionSummary, TimelineEvent
 import app.services.asset_service as asset_service
+import app.services.git_service as git_service
 
 
 def _to_session_summary(row: SessionRecord, updated_at: str) -> SessionSummary:
@@ -19,10 +20,34 @@ def _to_session_summary(row: SessionRecord, updated_at: str) -> SessionSummary:
         canonical_workspace_path=row.canonical_workspace_path,
         workspace_label=row.workspace_label,
         workspace_fingerprint=row.workspace_fingerprint,
+        repo_root=row.repo_root,
+        git_enabled=bool(row.git_enabled),
+        lead_branch=row.lead_branch,
+        head_revision=row.head_revision,
+        working_tree_status=row.working_tree_status,
+        detached_head=bool(row.detached_head),
         status=row.status,
         created_at=row.created_at.isoformat(),
         updated_at=updated_at,
     )
+
+
+def _apply_git_state(row: SessionRecord) -> bool:
+    state = git_service.inspect_workspace_git_state(row.canonical_workspace_path)
+    changed = False
+    mapping = {
+        "repo_root": state.repo_root,
+        "git_enabled": bool(state.git_enabled),
+        "lead_branch": state.lead_branch,
+        "head_revision": state.head_revision,
+        "working_tree_status": state.working_tree_status,
+        "detached_head": bool(state.detached_head),
+    }
+    for field, value in mapping.items():
+        if getattr(row, field) != value:
+            setattr(row, field, value)
+            changed = True
+    return changed
 
 
 def list_sessions() -> list[SessionSummary]:
@@ -44,6 +69,12 @@ def list_sessions() -> list[SessionSummary]:
                 SessionRecord.id.desc(),
             )
         ).all()
+        changed = False
+        for row, _updated_at in rows:
+            if _apply_git_state(row):
+                changed = True
+        if changed:
+            db.commit()
         return [
             _to_session_summary(
                 row,
@@ -58,6 +89,9 @@ def get_session(session_id: str) -> SessionRecord | None:
         row = db.get(SessionRecord, session_id)
         if row is None or row.hidden:
             return None
+        if _apply_git_state(row):
+            db.commit()
+            db.refresh(row)
         return row
 
 
@@ -75,6 +109,7 @@ def update_session_title(session_id: str, title: str) -> SessionSummary | None:
 def create_session_record(payload: SessionCreate) -> SessionSummary:
     workspace_mode = payload.workspace_mode
     workspace = workspace_utils.normalize_workspace_path(payload.workspace_path) if workspace_mode == "bound" else workspace_utils.normalize_workspace_path(settings.project_root)
+    git_state = git_service.inspect_workspace_git_state(workspace)
     with create_session() as db:
         row = SessionRecord(
             title=payload.title,
@@ -82,6 +117,12 @@ def create_session_record(payload: SessionCreate) -> SessionSummary:
             canonical_workspace_path=workspace.as_posix(),
             workspace_fingerprint=workspace_utils.workspace_fingerprint(workspace),
             workspace_label=workspace_utils.workspace_label(workspace) if workspace_mode == "bound" else "Default Conversations",
+            repo_root=git_state.repo_root,
+            git_enabled=git_state.git_enabled,
+            lead_branch=git_state.lead_branch,
+            head_revision=git_state.head_revision,
+            working_tree_status=git_state.working_tree_status,
+            detached_head=git_state.detached_head,
             status="idle",
         )
         db.add(row)

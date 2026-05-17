@@ -18,11 +18,14 @@ class MessageCreate(BaseModel):
     role: Literal["user", "assistant", "system"] = "user"
     content: str = ""
     asset_ids: list[str] = Field(default_factory=list)
+    execution_mode: Literal["normal", "plan"] = "normal"
 
     @model_validator(mode="after")
     def validate_message_payload(self) -> "MessageCreate":
         self.content = self.content.strip()
         self.asset_ids = [asset_id.strip() for asset_id in self.asset_ids if asset_id and asset_id.strip()]
+        if self.role != "user":
+            self.execution_mode = "normal"
         if not self.content and not self.asset_ids:
             raise ValueError("A message must include text or at least one asset reference.")
         return self
@@ -35,6 +38,12 @@ class SessionSummary(BaseModel):
     canonical_workspace_path: str
     workspace_label: str
     workspace_fingerprint: str
+    repo_root: str | None = None
+    git_enabled: bool = False
+    lead_branch: str | None = None
+    head_revision: str | None = None
+    working_tree_status: str | None = None
+    detached_head: bool = False
     status: str
     created_at: str
     updated_at: str

@@ -22,6 +22,12 @@ export type SessionSummary = {
   canonical_workspace_path: string;
   workspace_label: string;
   workspace_fingerprint: string;
+  repo_root: string | null;
+  git_enabled: boolean;
+  lead_branch: string | null;
+  head_revision: string | null;
+  working_tree_status: string | null;
+  detached_head: boolean;
   status: string;
   created_at: string;
   updated_at: string;
@@ -80,6 +86,13 @@ export type SubagentSummary = {
   role: string;
   kind: string;
   status: string;
+  base_workspace_path: string | null;
+  execution_workspace_path: string | null;
+  isolation_mode: "shared" | "worktree";
+  git_branch: string | null;
+  git_base_revision: string | null;
+  cleanup_status: string;
+  preserved_reason: string | null;
   created_at: string;
 };
 
@@ -160,6 +173,7 @@ export type TurnSummary = {
   user_message_id: number | null;
   workspace_path: string | null;
   workspace_fingerprint: string | null;
+  execution_mode: "normal" | "plan";
   status: string;
   started_at: string;
   updated_at: string;
@@ -275,6 +289,7 @@ export async function sendMessage(
   sessionId: string,
   content: string,
   assetIds: string[] = [],
+  executionMode: "normal" | "plan" = "normal",
 ): Promise<void> {
   const response = await fetch(`${API_BASE}/sessions/${sessionId}/messages`, {
     method: "POST",
@@ -285,6 +300,7 @@ export async function sendMessage(
       role: "user",
       content,
       asset_ids: assetIds,
+      execution_mode: executionMode,
     }),
   });
   if (!response.ok) {
@@ -581,6 +597,7 @@ export async function runSubagent(
   sessionId: string,
   name: string,
   prompt: string,
+  isolationMode: "shared" | "worktree" = "shared",
 ): Promise<{ subagent: SubagentSummary; summary: string }> {
   const response = await fetch(`${API_BASE}/subagents`, {
     method: "POST",
@@ -591,6 +608,7 @@ export async function runSubagent(
       session_id: sessionId,
       name,
       prompt,
+      isolation_mode: isolationMode,
     }),
   });
   if (!response.ok) {

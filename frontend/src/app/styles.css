@@ -51,6 +51,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -63,6 +64,7 @@ button {
 
 button:focus-visible,
 input:focus-visible,
+select:focus-visible,
 textarea:focus-visible {
   outline: 2px solid rgba(37, 99, 235, 0.28);
   outline-offset: 2px;
@@ -958,6 +960,27 @@ textarea:focus-visible {
   min-height: 28px;
 }
 
+.composer-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.composer-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-soft);
+  font-size: 0.86rem;
+}
+
+.composer-mode-toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 .composer-action-group {
   display: inline-flex;
   align-items: center;
@@ -1221,6 +1244,29 @@ textarea:focus-visible {
 
 .workbench-textarea {
   min-height: 110px;
+}
+
+.workbench-control-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.workbench-control-label {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.workbench-select {
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--text);
 }
 
 .detail-label {

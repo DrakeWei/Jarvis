@@ -83,4 +83,6 @@ class AgentServiceQueryTests(TestCase):
             summary = subagent_service.get_subagent_summary(2)
 
         self.assertEqual([item.name for item in subagents], ["Explorer 1"])
+        self.assertEqual(subagents[0].isolation_mode, "shared")
+        self.assertEqual(subagents[0].cleanup_status, "pending")
         self.assertEqual(summary, "Summary text")

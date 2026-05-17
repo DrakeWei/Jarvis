@@ -183,6 +183,12 @@ function startDraftSession(
     canonical_workspace_path: config.workspacePath ?? "",
     workspace_label: config.workspaceLabel,
     workspace_fingerprint: config.workspaceFingerprint ?? "",
+    repo_root: null,
+    git_enabled: false,
+    lead_branch: null,
+    head_revision: null,
+    working_tree_status: null,
+    detached_head: false,
     status: "draft",
     created_at: timestamp,
     updated_at: timestamp,
@@ -475,6 +481,16 @@ function nextSessionTitle(): string {
   return "New Session";
 }
 
+function formatGitSessionMeta(session: SessionSummary | null): string | null {
+  if (!session?.git_enabled) return null;
+  const parts: string[] = [];
+  parts.push(session.lead_branch || (session.detached_head ? "detached HEAD" : "Git repo"));
+  if (session.working_tree_status) {
+    parts.push(session.working_tree_status);
+  }
+  return parts.join(" · ");
+}
+
 export function App() {
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [activeSessionId, setActiveSessionId] = useState("");
@@ -488,6 +504,7 @@ export function App() {
   const [teammates, setTeammates] = useState<TeammateSummary[]>([]);
   const [subagents, setSubagents] = useState<SubagentSummary[]>([]);
   const [subagentDraft, setSubagentDraft] = useState("Investigate the current workspace, collect evidence, and return a concise summary with the next technical actions.");
+  const [subagentIsolationMode, setSubagentIsolationMode] = useState<"shared" | "worktree">("shared");
   const [selectedTeammateId, setSelectedTeammateId] = useState<number | null>(null);
   const [teammateMessages, setTeammateMessages] = useState<TeammateMessageSummary[]>([]);
   const [teammateDraft, setTeammateDraft] = useState("Review the latest runtime activity.");
@@ -496,6 +513,7 @@ export function App() {
   const [selectedExecutionId, setSelectedExecutionId] = useState<number | null>(null);
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [draft, setDraft] = useState("");
+  const [nextTurnExecutionMode, setNextTurnExecutionMode] = useState<"normal" | "plan">("normal");
   const [streamingBySession, setStreamingBySession] = useState<Record<string, { content: string; created_at: string } | null>>({});
   const [connectionState, setConnectionState] = useState("offline");
   const [bootstrapState, setBootstrapState] = useState("booting");
@@ -906,7 +924,9 @@ export function App() {
     const content = draft.trim();
     const sourceSessionId = activeSessionId;
     let targetSessionId = sourceSessionId;
+    const executionMode = nextTurnExecutionMode;
     setDraft("");
+    setNextTurnExecutionMode("normal");
     setAutoScrollTimeline(true);
     const optimisticCreatedAt = new Date().toISOString();
     const attachmentSummary = selectedAssets.length
@@ -942,7 +962,7 @@ export function App() {
         targetSessionId = await realizeDraftSession(sourceSessionId, content);
       }
 
-      await sendMessage(targetSessionId, content, selectedAssetIds);
+      await sendMessage(targetSessionId, content, selectedAssetIds, executionMode);
       setSelectedAssetIdsBySession((current) => ({ ...current, [targetSessionId]: [] }));
     } catch (error) {
       const rollbackSessionId = targetSessionId;
@@ -1168,6 +1188,19 @@ export function App() {
     await refreshSessionState(activeSessionId);
   }
 
+  function approvalActionLabels(approvalType: string) {
+    if (approvalType === "plan_execution") {
+      return {
+        approve: "Execute Plan",
+        reject: "Revise Plan",
+      };
+    }
+    return {
+      approve: "Allow",
+      reject: "Reject",
+    };
+  }
+
   async function onResumeInterruptedTurn() {
     if (!activeSessionId) return;
     const turnId = activeSessionState?.latest_interrupted_turn?.id;
@@ -1201,7 +1234,7 @@ export function App() {
 
   async function onRunSubagent() {
     if (!activeSessionId || !subagentDraft.trim()) return;
-    await runSubagent(activeSessionId, `Explorer ${subagents.length + 1}`, subagentDraft.trim());
+    await runSubagent(activeSessionId, `Explorer ${subagents.length + 1}`, subagentDraft.trim(), subagentIsolationMode);
     await refreshSessionState(activeSessionId);
     const timeline = await fetchTimeline(activeSessionId);
     setEventsBySession((current) => ({
@@ -1318,6 +1351,7 @@ export function App() {
     ...(liveAssistantCard ? [liveAssistantCard] : []),
   ]);
   const activeSessionStamp = activeSession ? formatSessionStamp(activeSession.updated_at ?? activeSession.created_at) : null;
+  const activeSessionGitMeta = formatGitSessionMeta(activeSession ?? null);
   const statusRailCards: Array<{
     tab: WorkbenchTabId;
     label: string;
@@ -1416,25 +1450,28 @@ export function App() {
             <span className="section-count">{pendingApprovals.length} pending</span>
           </div>
           <div className="workbench-list">
-            {approvals.map((approval) => (
-              <article key={approval.id} className="workbench-card">
-                <div className="workbench-card-header">
-                  <strong>#{approval.id} {approval.approval_type}</strong>
-                  <span className="mini-pill">{approval.status}</span>
-                </div>
-                <p>{approval.prompt}</p>
-                {approval.status === "pending" ? (
-                  <div className="inline-actions">
-                    <button type="button" className="primary-button" onClick={() => onDecision(approval.id, true)}>
-                      Approve
-                    </button>
-                    <button type="button" className="secondary-button" onClick={() => onDecision(approval.id, false)}>
-                      Reject
-                    </button>
+            {approvals.map((approval) => {
+              const labels = approvalActionLabels(approval.approval_type);
+              return (
+                <article key={approval.id} className="workbench-card">
+                  <div className="workbench-card-header">
+                    <strong>#{approval.id} {approval.approval_type}</strong>
+                    <span className="mini-pill">{approval.status}</span>
                   </div>
-                ) : null}
-              </article>
-            ))}
+                  <p>{approval.prompt}</p>
+                  {approval.status === "pending" ? (
+                    <div className="inline-actions">
+                      <button type="button" className="primary-button" onClick={() => onDecision(approval.id, true)}>
+                        {labels.approve}
+                      </button>
+                      <button type="button" className="secondary-button" onClick={() => onDecision(approval.id, false)}>
+                        {labels.reject}
+                      </button>
+                    </div>
+                  ) : null}
+                </article>
+              );
+            })}
             {!approvals.length ? <p className="empty-inline">No approvals in this session.</p> : null}
           </div>
         </section>
@@ -1554,6 +1591,20 @@ export function App() {
             </div>
             <button type="button" className="secondary-button" onClick={onRunSubagent}>Run subagent</button>
           </div>
+          <div className="workbench-control-row">
+            <label className="workbench-control-label" htmlFor="subagent-isolation-mode">
+              Isolation
+            </label>
+            <select
+              id="subagent-isolation-mode"
+              value={subagentIsolationMode}
+              onChange={(e) => setSubagentIsolationMode(e.target.value as "shared" | "worktree")}
+              className="workbench-select"
+            >
+              <option value="shared">Shared workspace</option>
+              <option value="worktree">Worktree isolation</option>
+            </select>
+          </div>
           <textarea
             value={subagentDraft}
             onChange={(e) => setSubagentDraft(e.target.value)}
@@ -1568,6 +1619,13 @@ export function App() {
                   <span className="mini-pill">{subagent.status}</span>
                 </div>
                 <p>{subagent.role}</p>
+                <p>{subagent.isolation_mode === "worktree" ? "Worktree isolation" : "Shared workspace"}</p>
+                {subagent.isolation_mode === "worktree" ? <p>Cleanup: {subagent.cleanup_status}</p> : null}
+                {subagent.git_branch ? <p>Branch: {subagent.git_branch}</p> : null}
+                {subagent.isolation_mode === "worktree" && subagent.execution_workspace_path ? (
+                  <p>Path: {subagent.execution_workspace_path}</p>
+                ) : null}
+                {subagent.preserved_reason ? <p>Reason: {subagent.preserved_reason}</p> : null}
               </article>
             ))}
             {!subagents.length ? <p className="empty-inline">No subagents yet.</p> : null}
@@ -1742,7 +1800,7 @@ export function App() {
             <h2 className="session-heading">{activeSession?.title ?? "Jarvis"}</h2>
             <p className="workspace-subtitle">
               {activeSession
-                ? `${activeSession.workspace_label || "Workspace pending"} · ${activeSession.status}${activeSessionStamp ? ` · Updated ${activeSessionStamp}` : ""}`
+                ? `${activeSession.workspace_label || "Workspace pending"}${activeSessionGitMeta ? ` · ${activeSessionGitMeta}` : ""} · ${activeSession.status}${activeSessionStamp ? ` · Updated ${activeSessionStamp}` : ""}`
                 : "Choose a session or create a new one to begin."}
             </p>
           </div>
@@ -1890,23 +1948,28 @@ export function App() {
 
         {pendingApprovals.length ? (
           <div className="inline-approval-stack">
-            {pendingApprovals.map((approval) => (
-              <article key={approval.id} className="inline-approval-bar">
-                <div className="approval-copy">
-                  <p className="micro-label">Pending approval</p>
-                  <strong>#{approval.id} {approval.approval_type}</strong>
-                  <p>{approval.prompt}</p>
-                </div>
-                <div className="inline-actions">
-                  <button type="button" className="primary-button" onClick={() => onDecision(approval.id, true)}>
-                    Allow
-                  </button>
-                  <button type="button" className="secondary-button" onClick={() => onDecision(approval.id, false)}>
-                    Reject
-                  </button>
-                </div>
-              </article>
-            ))}
+            {pendingApprovals.map((approval) => {
+              const labels = approvalActionLabels(approval.approval_type);
+              return (
+                <article key={approval.id} className="inline-approval-bar">
+                  <div className="approval-copy">
+                    <p className="micro-label">
+                      {approval.approval_type === "plan_execution" ? "Plan ready" : "Pending approval"}
+                    </p>
+                    <strong>#{approval.id} {approval.approval_type}</strong>
+                    <p>{approval.prompt}</p>
+                  </div>
+                  <div className="inline-actions">
+                    <button type="button" className="primary-button" onClick={() => onDecision(approval.id, true)}>
+                      {labels.approve}
+                    </button>
+                    <button type="button" className="secondary-button" onClick={() => onDecision(approval.id, false)}>
+                      {labels.reject}
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
           </div>
         ) : null}
 
@@ -1993,10 +2056,23 @@ export function App() {
                 ? assetUploadError
                 : isUploadingAssets
                   ? "Uploading attachments..."
+                  : nextTurnExecutionMode === "plan"
+                    ? "Plan Mode on · Next turn will inspect and propose a plan"
                   : selectedAssetIds.length
                     ? `${selectedAssetIds.length} attachment(s) selected · Enter to send`
                     : "Enter to send"}
             </span>
+            <div className="composer-mode-row">
+              <label className="composer-mode-toggle">
+                <input
+                  type="checkbox"
+                  checked={nextTurnExecutionMode === "plan"}
+                  onChange={(event) => setNextTurnExecutionMode(event.target.checked ? "plan" : "normal")}
+                  disabled={!activeSessionId || isActiveTurnRunning}
+                />
+                <span>Plan Mode</span>
+              </label>
+            </div>
             <div className="composer-action-group">
               <button
                 type="button"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import patch
@@ -10,6 +11,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import app.services.background_job_service as background_job_service
+from app.mcp import ToolDefinition
 from app.db.base import Base
 from app.models import SessionRecord
 from app.runtime.manager import RuntimeManager
@@ -161,6 +163,10 @@ class RuntimeTurnQueueTests(IsolatedAsyncioTestCase):
             return_value=created_job,
         ) as create_job_mock, patch.object(
             runtime,
+            "_session_workspace",
+            return_value=Path("/tmp/workspace"),
+        ), patch.object(
+            runtime,
             "_signal_dispatcher",
         ) as signal_dispatcher_mock, patch.object(
             runtime,
@@ -176,6 +182,48 @@ class RuntimeTurnQueueTests(IsolatedAsyncioTestCase):
 
         create_job_mock.assert_called_once()
         signal_dispatcher_mock.assert_called_once()
+
+    async def test_append_message_plan_mode_enqueues_plan_turn_execution_job(self) -> None:
+        runtime = RuntimeManager()
+        created_message = SimpleNamespace(id=101)
+        created_turn = SimpleNamespace(id=12)
+        created_job = SimpleNamespace(id=88)
+
+        with patch("app.runtime.manager.session_service.create_message_record", return_value=created_message), patch(
+            "app.runtime.manager.turn_service.latest_cancellable_turn",
+            return_value=None,
+        ), patch(
+            "app.runtime.manager.turn_service.create_turn",
+            return_value=created_turn,
+        ) as create_turn_mock, patch("app.runtime.manager.memory_service.remember_goal"), patch(
+            "app.runtime.manager.memory_service.refresh_rolling_summary"
+        ), patch("app.runtime.manager.RuntimeManager._capture_user_memory_signals"), patch(
+            "app.runtime.manager.RuntimeManager._should_autoname_session",
+            return_value=False,
+        ), patch(
+            "app.runtime.manager.background_job_service.create_job",
+            return_value=created_job,
+        ) as create_job_mock, patch.object(
+            runtime,
+            "_session_workspace",
+            return_value=Path("/tmp/workspace"),
+        ), patch.object(
+            runtime,
+            "_signal_dispatcher",
+        ), patch.object(
+            runtime,
+            "_ensure_dispatcher_started",
+        ), patch.object(
+            runtime,
+            "publish",
+        ):
+            await runtime.append_message(
+                "session-1",
+                MessageCreate(role="user", content="Refactor this module", execution_mode="plan"),
+            )
+
+        self.assertEqual(create_turn_mock.call_args.kwargs["execution_mode"], "plan")
+        self.assertEqual(create_job_mock.call_args.kwargs["payload"]["execution_mode"], "plan")
 
     async def test_retry_background_job_signals_dispatcher(self) -> None:
         runtime = RuntimeManager()
@@ -213,6 +261,47 @@ class RuntimeTurnQueueTests(IsolatedAsyncioTestCase):
         self.assertEqual(result.id, 77)
         request_cancel_mock.assert_called_once_with(12)
 
+    async def test_execute_tool_definition_blocks_side_effecting_tool_in_plan_mode(self) -> None:
+        runtime = RuntimeManager()
+        tool = ToolDefinition(
+            name="write_file",
+            description="write",
+            input_schema={"type": "object"},
+            source="local",
+        )
+
+        result = await runtime._execute_tool_definition(
+            session_id="session-1",
+            tool=tool,
+            tool_input={"path": "README.md", "content": "x"},
+            broker_for_workspace=SimpleNamespace(),
+            execution_mode="plan",
+        )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("Plan Mode", result.output)
+
+    async def test_execute_tool_definition_allows_git_state_tool_in_plan_mode(self) -> None:
+        runtime = RuntimeManager()
+        tool = ToolDefinition(
+            name="get_session_git_state",
+            description="git",
+            input_schema={"type": "object"},
+            source="local",
+        )
+
+        with patch.object(runtime, "_session_git_state_tool_output", return_value="Lead branch: main"):
+            result = await runtime._execute_tool_definition(
+                session_id="session-1",
+                tool=tool,
+                tool_input={},
+                broker_for_workspace=SimpleNamespace(),
+                execution_mode="plan",
+            )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.output, "Lead branch: main")
+
     async def test_append_message_requests_cancel_on_previous_turn(self) -> None:
         runtime = RuntimeManager()
         created_message = SimpleNamespace(id=101)
@@ -234,7 +323,7 @@ class RuntimeTurnQueueTests(IsolatedAsyncioTestCase):
         ), patch(
             "app.runtime.manager.background_job_service.create_job",
             return_value=created_job,
-        ), patch.object(runtime, "_signal_dispatcher"), patch.object(runtime, "_ensure_dispatcher_started"), patch.object(
+        ), patch.object(runtime, "_session_workspace", return_value=Path("/tmp/workspace")), patch.object(runtime, "_signal_dispatcher"), patch.object(runtime, "_ensure_dispatcher_started"), patch.object(
             runtime,
             "publish",
         ):
