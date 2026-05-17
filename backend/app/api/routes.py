@@ -14,8 +14,20 @@ router = APIRouter()
 
 
 @router.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health() -> dict[str, str | bool]:
+    summary = runtime.observability_summary()
+    return {
+        "status": "ok",
+        "dispatcher_running": runtime.dispatcher_running(),
+        "runtime_role": summary.runtime_role,
+        "configured_event_bus_backend": summary.configured_event_bus_backend,
+        "effective_event_bus_backend": summary.effective_event_bus_backend,
+    }
+
+
+@router.get("/observability/runtime")
+async def runtime_observability():
+    return runtime.observability_summary()
 
 
 @router.get("/bootstrap")
@@ -91,11 +103,8 @@ async def upload_session_assets(session_id: str, files: list[UploadFile] = File(
         raise HTTPException(status_code=400, detail="No files uploaded")
     if len(files) > settings.jarvis_asset_max_upload_count:
         raise HTTPException(status_code=400, detail="Too many files in one upload request")
-    uploads: list[tuple[str, str | None, bytes]] = []
-    for item in files:
-        uploads.append((item.filename or "", item.content_type, await item.read()))
     try:
-        return await runtime.upload_assets(session_id, uploads)
+        return await runtime.upload_asset_streams(session_id, files)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -156,6 +165,61 @@ async def create_task(payload: TaskCreate):
 @router.get("/tool-executions")
 async def list_tool_executions(session_id: str | None = None):
     return runtime.list_tool_executions(session_id)
+
+
+@router.get("/background-jobs")
+async def list_background_jobs(
+    session_id: str | None = None,
+    job_type: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+):
+    return runtime.list_background_jobs(
+        session_id=session_id,
+        job_type=job_type,
+        status=status,
+        limit=limit,
+    )
+
+
+@router.get("/background-jobs/{job_id}")
+async def get_background_job(job_id: int):
+    result = runtime.get_background_job(job_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Unknown background job")
+    return result
+
+
+@router.get("/execution-leases")
+async def list_execution_leases(scope_type: str | None = None, status: str | None = None):
+    return runtime.list_execution_leases(scope_type=scope_type, status=status)
+
+
+@router.post("/execution-leases/{lease_id}/force-release")
+async def force_release_execution_lease(lease_id: int):
+    result = runtime.force_release_execution_lease(lease_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Unknown execution lease")
+    return result
+
+
+@router.post("/background-jobs/{job_id}/retry")
+async def retry_background_job(job_id: int):
+    try:
+        result = await runtime.retry_background_job(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not result:
+        raise HTTPException(status_code=404, detail="Unknown background job")
+    return result
+
+
+@router.post("/background-jobs/{job_id}/cancel")
+async def cancel_background_job(job_id: int):
+    result = await runtime.cancel_background_job(job_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Unknown background job")
+    return result
 
 
 @router.get("/session-memory")

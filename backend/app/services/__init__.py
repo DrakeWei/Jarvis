@@ -1,8 +1,11 @@
 from app.services import (
-    asset_service,
     asset_ingestion_service,
+    asset_service,
     approval_service,
+    background_job_service,
     checkpoint_service,
+    ingestion_job_service,
+    lease_service,
     memory_service,
     session_service,
     subagent_service,
@@ -13,10 +16,13 @@ from app.services import (
 )
 
 __all__ = [
-    "asset_service",
     "asset_ingestion_service",
+    "asset_service",
     "approval_service",
+    "background_job_service",
     "checkpoint_service",
+    "ingestion_job_service",
+    "lease_service",
     "memory_service",
     "session_service",
     "subagent_service",

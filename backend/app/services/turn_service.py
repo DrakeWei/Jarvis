@@ -2,15 +2,19 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db.session import create_session
-from app.models import SessionRecord, TurnRecord
+from app.models import ExecutionLeaseRecord, SessionRecord, TurnRecord
 from app.schemas.turns import TurnSummary
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
 def _to_summary(row: TurnRecord) -> TurnSummary:
@@ -24,6 +28,7 @@ def _to_summary(row: TurnRecord) -> TurnSummary:
         started_at=row.started_at.isoformat(),
         updated_at=row.updated_at.isoformat(),
         completed_at=row.completed_at.isoformat() if row.completed_at else None,
+        cancel_requested=bool(row.cancel_requested),
         last_checkpoint_seq=row.last_checkpoint_seq,
         resume_hint=row.resume_hint,
         error_summary=row.error_summary,
@@ -103,6 +108,8 @@ def update_turn_status(
             return None
         row.status = status
         row.updated_at = _utcnow()
+        if status in {"completed", "cancelled", "failed", "interrupted"}:
+            row.cancel_requested = False
         if resume_hint is not None:
             row.resume_hint = resume_hint
         if error_summary is not None:
@@ -117,11 +124,28 @@ def update_turn_status(
 
 
 def recover_running_turns() -> list[TurnSummary]:
+    return recover_orphaned_running_turns()
+
+
+def recover_orphaned_running_turns() -> list[TurnSummary]:
     with create_session() as db:
         rows = db.scalars(select(TurnRecord).where(TurnRecord.status == "running")).all()
+        lease_rows = db.scalars(
+            select(ExecutionLeaseRecord).where(
+                ExecutionLeaseRecord.scope_type == "turn",
+                ExecutionLeaseRecord.status == "active",
+            )
+        ).all()
+        active_leases = {
+            row.scope_key
+            for row in lease_rows
+            if _as_utc(row.expires_at) > _utcnow()
+        }
         recovered: list[TurnSummary] = []
         now = _utcnow()
         for row in rows:
+            if str(row.id) in active_leases:
+                continue
             row.status = "interrupted"
             row.updated_at = now
             if not row.resume_hint:
@@ -141,3 +165,48 @@ def refresh_waiting_approval_sessions() -> list[TurnSummary]:
             summaries.append(_to_summary(row))
         db.commit()
         return summaries
+
+
+def request_turn_cancel(turn_id: int) -> TurnSummary | None:
+    with create_session() as db:
+        row = db.get(TurnRecord, turn_id)
+        if row is None:
+            return None
+        row.cancel_requested = True
+        row.updated_at = _utcnow()
+        db.commit()
+        db.refresh(row)
+        return _to_summary(row)
+
+
+def latest_cancellable_turn(session_id: str) -> TurnSummary | None:
+    return latest_turn_by_status(session_id, ("queued", "running", "waiting_approval"))
+
+
+def is_cancel_requested(turn_id: int) -> bool:
+    with create_session() as db:
+        row = db.get(TurnRecord, turn_id)
+        return bool(row and row.cancel_requested)
+
+
+def has_newer_turn(session_id: str, turn_id: int) -> bool:
+    with create_session() as db:
+        row = db.scalars(
+            select(TurnRecord.id)
+            .where(TurnRecord.session_id == session_id, TurnRecord.id > turn_id)
+            .order_by(TurnRecord.id.desc())
+            .limit(1)
+        ).first()
+        return row is not None
+
+
+def oldest_running_turn_age_seconds() -> float | None:
+    with create_session() as db:
+        oldest = db.execute(
+            select(func.min(TurnRecord.started_at)).where(TurnRecord.status == "running")
+        ).scalar_one_or_none()
+        if oldest is None:
+            return None
+        if oldest.tzinfo is None:
+            oldest = oldest.replace(tzinfo=timezone.utc)
+        return max(0.0, (_utcnow() - oldest).total_seconds())

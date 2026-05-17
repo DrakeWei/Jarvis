@@ -35,3 +35,18 @@ class SessionAssetChunkSummary(BaseModel):
     summary: str | None
     char_count: int
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class IngestionJobSummary(BaseModel):
+    id: int
+    session_id: str
+    asset_id: str
+    job_type: str
+    status: str
+    attempts: int
+    owner_id: str | None
+    last_error: str | None
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    started_at: str | None = None
+    completed_at: str | None = None

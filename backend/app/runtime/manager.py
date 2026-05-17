@@ -3,13 +3,17 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 from app.core.config import settings
 from app.core import workspace as workspace_utils
 from app.mcp import ToolDefinition, ToolExecutionResult, tool_registry
 from app.providers import ProviderConfigError, ProviderRequestError, TextBlock, ToolUseBlock, create_client
+from app.schemas.background_jobs import BackgroundJobSummary
 from app.schemas.assets import SessionAssetSummary
 from app.schemas.events import MessageCreate, SessionCreate, SessionSummary, TimelineEvent
+from app.schemas.leases import ExecutionLeaseSummary
+from app.schemas.observability import RuntimeObservabilitySummary
 from app.schemas.session_state import SessionStateSummary
 from app.schemas.subagents import SubagentRunCreate
 from app.schemas.tasks import TaskCreate
@@ -22,14 +26,8 @@ import app.services.asset_ingestion_service as asset_ingestion_service
 import app.services.memory_service as memory_service
 import app.services.memory_search_service as memory_search_service
 import app.services.turn_service as turn_service
-from app.services import approval_service, asset_service, session_service, subagent_service, teammate_service, tool_service
+from app.services import approval_service, asset_service, background_job_service, ingestion_job_service, lease_service, session_service, subagent_service, teammate_service, tool_service
 from app.tools.broker import ToolBroker, broker
-
-
-@dataclass
-class PendingApproval:
-    session_id: str
-    context: dict[str, object]
 
 
 @dataclass
@@ -46,14 +44,28 @@ class TurnCancelled(RuntimeError):
 
 class EventBroker:
     def __init__(self) -> None:
+        self.backend_name = "local"
         self._queues: dict[str, list[asyncio.Queue[TimelineEvent]]] = defaultdict(list)
+        self.dropped_events_total = 0
 
     async def publish(self, event: TimelineEvent) -> None:
         for queue in list(self._queues[event.session_id]):
-            await queue.put(event)
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    self.dropped_events_total += 1
+                    continue
+                self.dropped_events_total += 1
 
     def subscribe(self, session_id: str) -> asyncio.Queue[TimelineEvent]:
-        queue: asyncio.Queue[TimelineEvent] = asyncio.Queue()
+        queue: asyncio.Queue[TimelineEvent] = asyncio.Queue(maxsize=max(1, settings.jarvis_ephemeral_event_queue_size))
         self._queues[session_id].append(queue)
         return queue
 
@@ -62,33 +74,46 @@ class EventBroker:
         if queue in queues:
             queues.remove(queue)
 
+    def total_subscribers(self) -> int:
+        return sum(len(queues) for queues in self._queues.values())
+
+
+def build_event_broker():
+    if settings.jarvis_event_bus_backend != "redis" or not settings.jarvis_redis_url:
+        return EventBroker()
+    try:
+        from redis import asyncio as redis_asyncio
+        from app.realtime_redis_broker import RedisEventBroker
+
+        client = redis_asyncio.from_url(settings.jarvis_redis_url, decode_responses=True)
+        return RedisEventBroker(client)
+    except Exception:
+        return EventBroker()
+
 
 class RuntimeManager:
     def __init__(self) -> None:
-        self.events = EventBroker()
-        self.pending_approvals: dict[int, PendingApproval] = {}
+        self.instance_id = f"runtime-{uuid4()}"
+        self.events = build_event_broker()
         self.background_tasks: set[asyncio.Task[None]] = set()
         self.session_turns: dict[str, SessionTurn] = {}
+        self.dispatch_signal = asyncio.Event()
+        self.dispatcher_task: asyncio.Task[None] | None = None
+        self.scheduled_background_job_ids: set[int] = set()
+        self.scheduled_ingestion_job_ids: set[int] = set()
+        self._last_housekeeping_at = 0.0
 
     def restore_state(self) -> None:
-        self.pending_approvals = {}
-        for turn in turn_service.recover_running_turns():
-            memory_service.refresh_rolling_summary(turn.session_id, turn.id)
+        for recovered in turn_service.recover_orphaned_running_turns():
+            memory_service.refresh_rolling_summary(recovered.session_id, recovered.id)
             session_service.create_event_record(
                 TimelineEvent(
-                    session_id=turn.session_id,
+                    session_id=recovered.session_id,
                     type="turn.interrupted",
-                    content=turn.resume_hint or "Runtime restarted while a turn was in progress.",
+                    content=recovered.resume_hint or "Runtime restarted while a turn was in progress.",
                 )
             )
         turn_service.refresh_waiting_approval_sessions()
-        for approval_id, session_id, context in approval_service.list_pending_runtime_contexts():
-            if not session_id:
-                continue
-            self.pending_approvals[approval_id] = PendingApproval(
-                session_id=session_id,
-                context=context,
-            )
 
     def list_sessions(self) -> list[SessionSummary]:
         return session_service.list_sessions()
@@ -150,8 +175,111 @@ class RuntimeManager:
     def list_timeline(self, session_id: str) -> list[TimelineEvent]:
         return session_service.list_event_records(session_id)
 
+    def list_timeline_since(self, session_id: str, *, after_id: int | None = None, limit: int | None = None) -> list[TimelineEvent]:
+        return session_service.list_event_records(session_id, after_id=after_id, limit=limit)
+
     def list_tool_executions(self, session_id: str | None = None):
         return tool_service.list_tool_executions(session_id)
+
+    def list_background_jobs(
+        self,
+        *,
+        session_id: str | None = None,
+        job_type: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[BackgroundJobSummary]:
+        return background_job_service.list_job_summaries(
+            session_id=session_id,
+            job_type=job_type,
+            status=status,
+            limit=limit,
+        )
+
+    def get_background_job(self, job_id: int) -> BackgroundJobSummary | None:
+        return background_job_service.get_job_summary(job_id)
+
+    def list_execution_leases(self, *, scope_type: str | None = None, status: str | None = None) -> list[ExecutionLeaseSummary]:
+        return lease_service.list_leases(scope_type=scope_type, status=status)
+
+    def force_release_execution_lease(self, lease_id: int) -> ExecutionLeaseSummary | None:
+        return lease_service.force_release(lease_id)
+
+    def observability_summary(self) -> RuntimeObservabilitySummary:
+        sessions = self.list_sessions()
+        turns = self.list_turns()
+        turns_by_status: dict[str, int] = {}
+        for turn in turns:
+            turns_by_status[turn.status] = turns_by_status.get(turn.status, 0) + 1
+        background_jobs_by_status = background_job_service.status_counts("turn_execution")
+        ingestion_jobs_by_status = ingestion_job_service.status_counts()
+        return RuntimeObservabilitySummary(
+            runtime_role=settings.jarvis_runtime_role,
+            instance_id=self.instance_id,
+            configured_event_bus_backend=settings.jarvis_event_bus_backend,
+            effective_event_bus_backend=getattr(self.events, "backend_name", "local"),
+            dispatcher_running=self.dispatcher_running(),
+            total_sessions=len(sessions),
+            total_ws_subscribers=self.events.total_subscribers(),
+            ephemeral_events_dropped=self.events.dropped_events_total,
+            scheduled_background_jobs=len(self.scheduled_background_job_ids),
+            scheduled_ingestion_jobs=len(self.scheduled_ingestion_job_ids),
+            background_jobs_by_status=background_jobs_by_status,
+            ingestion_jobs_by_status=ingestion_jobs_by_status,
+            retrying_turn_jobs=background_job_service.retrying_count("turn_execution"),
+            retrying_ingestion_jobs=ingestion_job_service.retrying_count(),
+            oldest_queued_turn_job_age_seconds=background_job_service.oldest_queued_age_seconds("turn_execution"),
+            oldest_queued_ingestion_job_age_seconds=ingestion_job_service.oldest_queued_age_seconds(),
+            oldest_running_turn_job_age_seconds=background_job_service.oldest_running_age_seconds("turn_execution"),
+            oldest_running_ingestion_job_age_seconds=ingestion_job_service.oldest_running_age_seconds(),
+            oldest_running_turn_age_seconds=turn_service.oldest_running_turn_age_seconds(),
+            turns_by_status=turns_by_status,
+        )
+
+    async def retry_background_job(self, job_id: int) -> BackgroundJobSummary | None:
+        retried = background_job_service.retry_job_now(job_id)
+        if retried is None:
+            return None
+        self._ensure_dispatcher_started()
+        self._signal_dispatcher()
+        summary = background_job_service.get_job_summary(job_id)
+        if summary and summary.session_id:
+            await self.publish(
+                TimelineEvent(
+                    session_id=summary.session_id,
+                    type="background_job.retried",
+                    content=f"Retried background job #{summary.id} ({summary.job_type}).",
+                )
+            )
+        return summary
+
+    async def cancel_background_job(self, job_id: int) -> BackgroundJobSummary | None:
+        existing = background_job_service.get_job(job_id)
+        if existing is None:
+            return None
+        summary_before = background_job_service.get_job_summary(job_id)
+        payload = background_job_service.payload_dict(existing)
+        cancelled = background_job_service.cancel_job(job_id)
+        if cancelled is None:
+            return None
+        if cancelled.job_type == "turn_execution":
+            turn_id = payload.get("turn_id")
+            session_id = str(payload.get("session_id") or cancelled.session_id or "").strip()
+            if isinstance(turn_id, int) and session_id:
+                turn_service.request_turn_cancel(turn_id)
+                local_turn = self.session_turns.get(session_id)
+                if local_turn and local_turn.turn_id == turn_id:
+                    local_turn.cancel_event.set()
+        summary = background_job_service.get_job_summary(job_id)
+        if summary and summary.session_id:
+            await self.publish(
+                TimelineEvent(
+                    session_id=summary.session_id,
+                    type="background_job.cancelled",
+                    content=f"Cancelled background job #{summary.id} ({summary.job_type}).",
+                )
+            )
+        return summary or summary_before
 
     def list_memory(self, session_id: str):
         return memory_service.list_memory(session_id)
@@ -191,51 +319,54 @@ class RuntimeManager:
         if checkpoint is None:
             return False
         checkpoint_row, context = checkpoint
-        self._start_resumed_turn(turn.session_id, turn_id, context, checkpoint_row.phase)
+        self._enqueue_turn_resume_job(turn.session_id, turn_id, context, checkpoint_row.phase)
         return True
 
     async def decide_approval(self, approval_id: int, approve: bool, feedback: str = ""):
-        decision = approval_service.update_approval(approval_id, approve=approve, feedback=feedback)
-        if not decision:
+        if not lease_service.try_acquire("approval", str(approval_id), self.instance_id):
             return None
-        pending = self.pending_approvals.pop(approval_id, None)
-        turn_id = pending.context.get("turn_id") if pending else None
-        summary_session_id = decision.session_id or (pending.session_id if pending else None)
-        if isinstance(turn_id, int):
-            if approve:
-                turn_service.update_turn_status(turn_id, "running", resume_hint="Bash approval granted; resuming turn.")
-            else:
-                turn_service.update_turn_status(turn_id, "interrupted", resume_hint="Bash approval was rejected.")
-                if summary_session_id:
-                    memory_service.remember_constraint(
-                        summary_session_id,
-                        "Shell commands require explicit approval. The last bash request was rejected.",
-                        source_turn_id=turn_id,
+        try:
+            pending_context = approval_service.get_pending_runtime_context(approval_id)
+            decision, changed = approval_service.apply_approval_decision(approval_id, approve=approve, feedback=feedback)
+            if not decision:
+                return None
+            if not changed:
+                return decision
+            pending_session_id = pending_context[0] if pending_context else None
+            pending_payload = pending_context[1] if pending_context else None
+            turn_id = pending_payload.get("turn_id") if isinstance(pending_payload, dict) else None
+            summary_session_id = decision.session_id or pending_session_id
+            if isinstance(turn_id, int):
+                if approve:
+                    turn_service.update_turn_status(turn_id, "queued", resume_hint="Bash approval granted; queued to resume.")
+                else:
+                    turn_service.update_turn_status(turn_id, "interrupted", resume_hint="Bash approval was rejected.")
+                    if summary_session_id:
+                        memory_service.remember_constraint(
+                            summary_session_id,
+                            "Shell commands require explicit approval. The last bash request was rejected.",
+                            source_turn_id=turn_id,
+                        )
+                    if summary_session_id:
+                        memory_service.refresh_rolling_summary(summary_session_id, turn_id)
+            if decision.session_id:
+                await self.publish(
+                    TimelineEvent(
+                        session_id=decision.session_id,
+                        type="approval.resolved",
+                        content=f"Approval #{approval_id} {decision.status}.",
                     )
-                if summary_session_id:
-                    memory_service.refresh_rolling_summary(summary_session_id, turn_id)
-        if decision.session_id:
-            await self.publish(
-                TimelineEvent(
-                    session_id=decision.session_id,
-                    type="approval.resolved",
-                    content=f"Approval #{approval_id} {decision.status}.",
                 )
-            )
-        if approve and pending:
-            reply = await self._resume_agent_loop_after_approval(pending.session_id, pending.context)
-            if reply:
-                await self._publish_assistant_reply(
-                    pending.session_id,
-                    reply,
-                    source_turn_id=turn_id if isinstance(turn_id, int) else None,
-                    emit_deltas=False,
+            if approve and pending_session_id and pending_payload:
+                self._enqueue_turn_resume_job(
+                    pending_session_id,
+                    turn_id if isinstance(turn_id, int) else None,
+                    pending_payload,
+                    "waiting_approval",
                 )
-                if isinstance(turn_id, int):
-                    current_turn = turn_service.get_turn(turn_id)
-                    if current_turn and current_turn.status == "running":
-                        turn_service.update_turn_status(turn_id, "completed", completed=True)
-        return decision
+            return decision
+        finally:
+            lease_service.release("approval", str(approval_id), self.instance_id)
 
     async def create_teammate(self, payload: TeammateCreate):
         teammate = teammate_service.create_teammate(payload)
@@ -317,8 +448,129 @@ class RuntimeManager:
         return stored
 
     async def emit_ephemeral(self, event: TimelineEvent) -> TimelineEvent:
-        await self.events.publish(event)
-        return event
+        stored = session_service.create_event_record(event, ephemeral=True)
+        await self.events.publish(stored)
+        return stored
+
+    def _ensure_dispatcher_started(self) -> None:
+        if self.dispatcher_task and not self.dispatcher_task.done():
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self.dispatcher_task = asyncio.create_task(self._dispatch_loop())
+        self.background_tasks.add(self.dispatcher_task)
+        self.dispatcher_task.add_done_callback(self.background_tasks.discard)
+
+    def dispatcher_running(self) -> bool:
+        return bool(self.dispatcher_task and not self.dispatcher_task.done())
+
+    def start_dispatcher(self) -> None:
+        self._ensure_dispatcher_started()
+        self._signal_dispatcher()
+
+    async def stop_dispatcher(self) -> None:
+        task = self.dispatcher_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    def _signal_dispatcher(self) -> None:
+        self.dispatch_signal.set()
+
+    async def _dispatch_loop(self) -> None:
+        poll_seconds = max(0.1, settings.jarvis_job_dispatch_poll_seconds)
+        while True:
+            try:
+                await asyncio.wait_for(self.dispatch_signal.wait(), timeout=poll_seconds)
+            except asyncio.TimeoutError:
+                pass
+            self.dispatch_signal.clear()
+            self._run_housekeeping_if_due()
+            self._dispatch_recoverable_jobs()
+
+    def _run_housekeeping_if_due(self) -> None:
+        now = time.monotonic()
+        if now - self._last_housekeeping_at < 60:
+            return
+        self._last_housekeeping_at = now
+        session_service.purge_expired_ephemeral_events()
+        background_job_service.purge_terminal_jobs()
+        ingestion_job_service.purge_terminal_jobs()
+
+    def _dispatch_recoverable_jobs(self) -> None:
+        active_turn_sessions = {session_id for session_id, turn in self.session_turns.items() if not turn.task.done()}
+        available_turn_slots = max(0, settings.jarvis_max_concurrent_turn_jobs - len(self.scheduled_background_job_ids))
+        seen_turn_sessions = set(active_turn_sessions)
+        if available_turn_slots > 0:
+            for job in background_job_service.list_recoverable_jobs("turn_execution"):
+                if available_turn_slots <= 0:
+                    break
+                if job.id in self.scheduled_background_job_ids:
+                    continue
+                if lease_service.is_active("background_job", str(job.id)):
+                    continue
+                if job.session_id and lease_service.is_active("session_turn_lane", job.session_id):
+                    continue
+                if job.session_id and job.session_id in seen_turn_sessions:
+                    continue
+                self._start_background_job(job.id)
+                available_turn_slots -= 1
+                if job.session_id:
+                    seen_turn_sessions.add(job.session_id)
+
+        available_ingestion_slots = max(0, settings.jarvis_max_concurrent_ingestion_jobs - len(self.scheduled_ingestion_job_ids))
+        if available_ingestion_slots > 0:
+            for job in ingestion_job_service.list_recoverable_jobs():
+                if available_ingestion_slots <= 0:
+                    break
+                if job.id in self.scheduled_ingestion_job_ids:
+                    continue
+                if lease_service.is_active("asset_ingestion_job", str(job.id)):
+                    continue
+                self._start_asset_ingestion(job.session_id, job.id)
+                available_ingestion_slots -= 1
+
+    async def _lease_heartbeat_loop(
+        self,
+        scope_type: str,
+        scope_key: str,
+        stop_event: asyncio.Event,
+        *,
+        cancel_event: asyncio.Event | None = None,
+    ) -> None:
+        interval = max(1, settings.jarvis_execution_lease_heartbeat_seconds)
+        while True:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                return
+            except asyncio.TimeoutError:
+                renewed = await asyncio.to_thread(
+                    lease_service.renew,
+                    scope_type,
+                    scope_key,
+                    self.instance_id,
+                )
+                if renewed:
+                    continue
+                if cancel_event is not None:
+                    cancel_event.set()
+                return
+
+    def _should_cancel_turn(self, turn_id: int | None, cancel_event: asyncio.Event) -> bool:
+        if cancel_event.is_set():
+            return True
+        if turn_id is None:
+            return False
+        if turn_service.is_cancel_requested(turn_id):
+            cancel_event.set()
+            return True
+        return False
 
     def _start_background_turn(self, session_id: str, content: str, turn_id: int) -> None:
         existing = self.session_turns.get(session_id)
@@ -330,74 +582,215 @@ class RuntimeManager:
                 completed=True,
             )
             existing.cancel_event.set()
+        if not lease_service.try_acquire("turn", str(turn_id), self.instance_id):
+            return
         cancel_event = asyncio.Event()
         task = asyncio.create_task(self._run_lead_turn(session_id, turn_id, content, cancel_event))
         self.session_turns[session_id] = SessionTurn(turn_id=turn_id, task=task, cancel_event=cancel_event)
         self.background_tasks.add(task)
         task.add_done_callback(self.background_tasks.discard)
 
-    def _start_asset_ingestion(self, session_id: str, asset_id: str) -> None:
-        task = asyncio.create_task(self._run_asset_ingestion(session_id, asset_id))
+    def _start_background_job(self, job_id: int) -> None:
+        self.scheduled_background_job_ids.add(job_id)
+        task = asyncio.create_task(self._run_background_job(job_id))
         self.background_tasks.add(task)
         task.add_done_callback(self.background_tasks.discard)
+        task.add_done_callback(lambda _: self.scheduled_background_job_ids.discard(job_id))
+
+    def _start_asset_ingestion(self, session_id: str, job_id: int) -> None:
+        self.scheduled_ingestion_job_ids.add(job_id)
+        task = asyncio.create_task(self._run_asset_ingestion(session_id, job_id))
+        self.background_tasks.add(task)
+        task.add_done_callback(self.background_tasks.discard)
+        task.add_done_callback(lambda _: self.scheduled_ingestion_job_ids.discard(job_id))
 
     def _start_resumed_turn(self, session_id: str, turn_id: int, context: dict[str, object], phase: str) -> None:
+        if not lease_service.try_acquire("turn", str(turn_id), self.instance_id):
+            return
         cancel_event = asyncio.Event()
         task = asyncio.create_task(self._run_resumed_turn(session_id, turn_id, context, phase, cancel_event))
         self.session_turns[session_id] = SessionTurn(turn_id=turn_id, task=task, cancel_event=cancel_event)
         self.background_tasks.add(task)
         task.add_done_callback(self.background_tasks.discard)
 
-    async def _run_asset_ingestion(self, session_id: str, asset_id: str) -> None:
-        asset = asset_service.get_asset(asset_id, session_id=session_id)
-        if asset is None:
+    async def _run_asset_ingestion(self, session_id: str, job_id: int) -> None:
+        if not lease_service.try_acquire("asset_ingestion_job", str(job_id), self.instance_id):
             return
-        await self.publish(
-            TimelineEvent(
-                session_id=session_id,
-                type="asset.processing",
-                content=f"Processing attachment '{asset.filename}'.",
-            )
+        heartbeat_stop = asyncio.Event()
+        heartbeat_task = asyncio.create_task(
+            self._lease_heartbeat_loop("asset_ingestion_job", str(job_id), heartbeat_stop)
         )
-        result = await asyncio.to_thread(asset_ingestion_service.ingest_asset, asset_id)
-        event_type = "asset.ready" if result.status == "ready" else "asset.failed"
-        if result.status == "ready":
-            content = f"Attachment '{result.filename}' is ready."
-        else:
-            content = f"Attachment '{result.filename}' failed to process: {result.error_message or 'Unknown error.'}"
-        await self.publish(
-            TimelineEvent(
-                session_id=session_id,
-                type=event_type,
-                content=content,
-            )
-        )
-
-    async def cancel_session_turn(self, session_id: str) -> bool:
-        turn = self.session_turns.get(session_id)
-        if turn is None or turn.task.done():
-            return False
-        turn.cancel_event.set()
-        partial_text = turn.partial_text.strip()
-        if partial_text:
-            session_service.create_message_record(session_id, MessageCreate(role="assistant", content=partial_text))
+        try:
+            job = ingestion_job_service.update_job_running(job_id, self.instance_id)
+            if job is None:
+                return
+            asset = asset_service.get_asset(job.asset_id, session_id=session_id)
+            if asset is None:
+                ingestion_job_service.update_job_failed(job_id, f"Unknown session asset '{job.asset_id}'.")
+                return
             await self.publish(
                 TimelineEvent(
                     session_id=session_id,
-                    type="message.assistant",
-                    content=partial_text,
+                    type="asset.processing",
+                    content=f"Processing attachment '{asset.filename}'.",
                 )
             )
-        turn_service.update_turn_status(turn.turn_id, "cancelled", resume_hint="User stopped the current turn.", completed=True)
-        turn.task.cancel()
-        await self.publish(
-            TimelineEvent(
-                session_id=session_id,
-                type="turn.cancelled",
-                content="Stopped the current turn.",
+            result = await asyncio.to_thread(asset_ingestion_service.ingest_asset, asset.id)
+            if result.status == "ready":
+                ingestion_job_service.update_job_completed(job_id)
+                event_type = "asset.ready"
+                content = f"Attachment '{result.filename}' is ready."
+            else:
+                ingestion_job_service.update_job_failed(job_id, result.error_message or "Unknown error.")
+                event_type = "asset.failed"
+                content = f"Attachment '{result.filename}' failed to process: {result.error_message or 'Unknown error.'}"
+            await self.publish(
+                TimelineEvent(
+                    session_id=session_id,
+                    type=event_type,
+                    content=content,
+                )
             )
+        finally:
+            heartbeat_stop.set()
+            await heartbeat_task
+            lease_service.release("asset_ingestion_job", str(job_id), self.instance_id)
+
+    async def _run_background_job(self, job_id: int) -> None:
+        if not lease_service.try_acquire("background_job", str(job_id), self.instance_id):
+            return
+        heartbeat_stop = asyncio.Event()
+        heartbeat_task = asyncio.create_task(
+            self._lease_heartbeat_loop("background_job", str(job_id), heartbeat_stop)
         )
-        memory_service.refresh_rolling_summary(session_id, turn.turn_id)
+        session_lane_acquired = False
+        session_lane_task: asyncio.Task[None] | None = None
+        session_lane_key = ""
+        try:
+            existing_job = background_job_service.get_job(job_id)
+            if existing_job is None or existing_job.status == "cancelled":
+                return
+            job = background_job_service.update_job_running(job_id, self.instance_id)
+            if job is None:
+                return
+            payload = background_job_service.payload_dict(job)
+            if job.job_type != "turn_execution":
+                background_job_service.update_job_dead_lettered(job_id, f"Unsupported background job type '{job.job_type}'.")
+                return
+            session_id = str(payload.get("session_id") or job.session_id or "").strip()
+            turn_id = payload.get("turn_id")
+            content = str(payload.get("content") or "")
+            resume_context = payload.get("resume_context")
+            resume_phase = str(payload.get("resume_phase") or "")
+            if not session_id or not isinstance(turn_id, int):
+                background_job_service.update_job_dead_lettered(job_id, "Turn execution job payload is incomplete.")
+                return
+            current_turn = turn_service.get_turn(turn_id)
+            if current_turn is None:
+                background_job_service.update_job_dead_lettered(job_id, f"Unknown turn #{turn_id}.")
+                return
+            if current_turn.status in {"completed", "cancelled"}:
+                background_job_service.update_job_completed(job_id, current_turn.status)
+                return
+            if current_turn.status == "failed":
+                background_job_service.update_job_failed(job_id, current_turn.error_summary or "Turn failed.")
+                return
+            if turn_service.has_newer_turn(session_id, turn_id):
+                turn_service.update_turn_status(
+                    turn_id,
+                    "cancelled",
+                    resume_hint="A newer user message replaced this unfinished turn.",
+                    completed=True,
+                )
+                background_job_service.update_job_completed(job_id, "superseded")
+                return
+            session_lane_key = session_id
+            if not lease_service.try_acquire("session_turn_lane", session_lane_key, self.instance_id):
+                background_job_service.requeue_job(
+                    job_id,
+                    f"Session {session_lane_key} already has an active turn lane; retrying later.",
+                    delay_seconds=settings.jarvis_background_job_base_backoff_seconds,
+                )
+                return
+            session_lane_acquired = True
+            session_lane_task = asyncio.create_task(
+                self._lease_heartbeat_loop("session_turn_lane", session_lane_key, heartbeat_stop)
+            )
+            if lease_service.is_active("turn", str(turn_id)):
+                background_job_service.requeue_job(
+                    job_id,
+                    f"Turn lease for {turn_id} is still active; retrying later.",
+                    delay_seconds=settings.jarvis_background_job_base_backoff_seconds,
+                )
+                return
+            if isinstance(resume_context, dict) and resume_phase:
+                self._start_resumed_turn(session_id, turn_id, resume_context, resume_phase)
+            else:
+                self._start_background_turn(session_id, content, turn_id)
+            turn = self.session_turns.get(session_id)
+            if turn is not None and turn.turn_id == turn_id:
+                try:
+                    await turn.task
+                except Exception:
+                    pass
+            latest_job = background_job_service.get_job(job_id)
+            if latest_job and latest_job.status == "cancelled":
+                return
+            current_turn = turn_service.get_turn(turn_id)
+            if current_turn and current_turn.status in {"completed", "cancelled"}:
+                background_job_service.update_job_completed(job_id, current_turn.status)
+            elif current_turn and current_turn.status == "failed":
+                background_job_service.update_job_failed(job_id, current_turn.error_summary or "Turn failed.")
+            else:
+                if background_job_service.should_retry(job):
+                    delay_seconds = settings.jarvis_background_job_base_backoff_seconds * max(1, int(job.attempts or 0))
+                    background_job_service.requeue_job(
+                        job_id,
+                        "Turn execution ended without a terminal status; retrying.",
+                        delay_seconds=delay_seconds,
+                    )
+                else:
+                    background_job_service.update_job_dead_lettered(job_id, "Turn execution ended without a terminal status.")
+        except Exception as exc:
+            current_job = background_job_service.get_job(job_id)
+            if background_job_service.should_retry(current_job):
+                attempts = int(current_job.attempts or 1) if current_job else 1
+                delay_seconds = settings.jarvis_background_job_base_backoff_seconds * max(1, attempts)
+                background_job_service.requeue_job(
+                    job_id,
+                    f"Background job execution failed transiently: {exc}",
+                    delay_seconds=delay_seconds,
+                )
+            else:
+                background_job_service.update_job_dead_lettered(job_id, f"Background job execution failed: {exc}")
+        finally:
+            heartbeat_stop.set()
+            await heartbeat_task
+            if session_lane_task is not None:
+                await session_lane_task
+            if session_lane_acquired and session_lane_key:
+                lease_service.release("session_turn_lane", session_lane_key, self.instance_id)
+            lease_service.release("background_job", str(job_id), self.instance_id)
+
+    async def cancel_session_turn(self, session_id: str) -> bool:
+        latest_turn = turn_service.latest_cancellable_turn(session_id)
+        if latest_turn is None:
+            return False
+        turn_service.request_turn_cancel(latest_turn.id)
+        turn = self.session_turns.get(session_id)
+        if turn is None or turn.task.done():
+            if latest_turn.status == "waiting_approval":
+                turn_service.update_turn_status(latest_turn.id, "cancelled", resume_hint="User stopped the current turn.", completed=True)
+                await self.publish(
+                    TimelineEvent(
+                        session_id=session_id,
+                        type="turn.cancelled",
+                        content="Stopped the current turn.",
+                    )
+                )
+                memory_service.refresh_rolling_summary(session_id, latest_turn.id)
+            return True
+        turn.cancel_event.set()
         return True
 
     async def create_session(self, payload: SessionCreate) -> SessionSummary:
@@ -413,9 +806,11 @@ class RuntimeManager:
 
     async def upload_assets(self, session_id: str, uploads: list[tuple[str, str | None, bytes]]) -> list[SessionAssetSummary]:
         uploaded: list[SessionAssetSummary] = []
+        self._ensure_dispatcher_started()
         for filename, mime_type, data in uploads:
             asset = asset_ingestion_service.stage_uploaded_asset(session_id, filename, mime_type, data)
             uploaded.append(asset)
+            job = ingestion_job_service.create_job(session_id, asset.id)
             await self.publish(
                 TimelineEvent(
                     session_id=session_id,
@@ -423,7 +818,24 @@ class RuntimeManager:
                     content=f"Uploaded attachment '{asset.filename}'.",
                 )
             )
-            self._start_asset_ingestion(session_id, asset.id)
+            self._signal_dispatcher()
+        return uploaded
+
+    async def upload_asset_streams(self, session_id: str, uploads: list[asset_ingestion_service.AsyncUploadLike]) -> list[SessionAssetSummary]:
+        uploaded: list[SessionAssetSummary] = []
+        self._ensure_dispatcher_started()
+        for upload in uploads:
+            asset = await asset_ingestion_service.stage_uploaded_asset_stream(session_id, upload)
+            uploaded.append(asset)
+            job = ingestion_job_service.create_job(session_id, asset.id)
+            await self.publish(
+                TimelineEvent(
+                    session_id=session_id,
+                    type="asset.uploaded",
+                    content=f"Uploaded attachment '{asset.filename}'.",
+                )
+            )
+            self._signal_dispatcher()
         return uploaded
 
     async def delete_asset(self, session_id: str, asset_id: str) -> bool:
@@ -440,6 +852,7 @@ class RuntimeManager:
         return deleted
 
     async def append_message(self, session_id: str, payload: MessageCreate) -> None:
+        self._ensure_dispatcher_started()
         should_autoname = payload.role == "user" and bool(payload.content.strip()) and self._should_autoname_session(session_id)
         created_message = session_service.create_message_record(session_id, payload)
         await self.publish(
@@ -450,6 +863,12 @@ class RuntimeManager:
             )
         )
         if payload.role == "user":
+            previous_turn = turn_service.latest_cancellable_turn(session_id)
+            if previous_turn is not None:
+                turn_service.request_turn_cancel(previous_turn.id)
+                existing = self.session_turns.get(session_id)
+                if existing and existing.turn_id == previous_turn.id:
+                    existing.cancel_event.set()
             workspace = self._session_workspace(session_id)
             turn = turn_service.create_turn(
                 session_id=session_id,
@@ -463,7 +882,41 @@ class RuntimeManager:
             memory_service.refresh_rolling_summary(session_id, turn.id)
             if should_autoname:
                 self._start_autoname_session(session_id, payload.content)
-            self._start_background_turn(session_id, payload.content, turn.id)
+            job = background_job_service.create_job(
+                session_id=session_id,
+                job_type="turn_execution",
+                payload={
+                    "session_id": session_id,
+                    "turn_id": turn.id,
+                    "content": payload.content,
+                },
+                command=f"turn_execution:{turn.id}",
+            )
+            self._signal_dispatcher()
+
+    def _enqueue_turn_resume_job(
+        self,
+        session_id: str,
+        turn_id: int | None,
+        context: dict[str, object],
+        phase: str,
+    ) -> bool:
+        if not session_id or not isinstance(turn_id, int):
+            return False
+        self._ensure_dispatcher_started()
+        background_job_service.create_job(
+            session_id=session_id,
+            job_type="turn_execution",
+            payload={
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "resume_context": context,
+                "resume_phase": phase,
+            },
+            command=f"turn_resume:{turn_id}",
+        )
+        self._signal_dispatcher()
+        return True
 
     def _timeline_message_content(self, session_id: str, payload: MessageCreate) -> str:
         text = payload.content.strip()
@@ -481,7 +934,38 @@ class RuntimeManager:
             return ", ".join(asset_names)
         return f"{len(payload.asset_ids)} attachment(s)"
 
+    async def _finalize_cancelled_turn(self, session_id: str, turn_id: int) -> None:
+        current_turn = turn_service.get_turn(turn_id)
+        if current_turn is not None and current_turn.status == "cancelled":
+            return
+        turn = self.session_turns.get(session_id)
+        partial_text = turn.partial_text.strip() if turn else ""
+        if partial_text:
+            session_service.create_message_record(session_id, MessageCreate(role="assistant", content=partial_text))
+            await self.publish(
+                TimelineEvent(
+                    session_id=session_id,
+                    type="message.assistant",
+                    content=partial_text,
+                )
+            )
+        turn_service.update_turn_status(turn_id, "cancelled", resume_hint="User stopped the current turn.", completed=True)
+        await self.publish(
+            TimelineEvent(
+                session_id=session_id,
+                type="turn.cancelled",
+                content="Stopped the current turn.",
+            )
+        )
+        memory_service.refresh_rolling_summary(session_id, turn_id)
+
     async def _run_lead_turn(self, session_id: str, turn_id: int, content: str, cancel_event: asyncio.Event) -> None:
+        if self._should_cancel_turn(turn_id, cancel_event):
+            raise TurnCancelled
+        heartbeat_stop = asyncio.Event()
+        heartbeat_task = asyncio.create_task(
+            self._lease_heartbeat_loop("turn", str(turn_id), heartbeat_stop, cancel_event=cancel_event)
+        )
         await self.emit_ephemeral(
             TimelineEvent(
                 session_id=session_id,
@@ -512,6 +996,7 @@ class RuntimeManager:
                 )
             return
         except TurnCancelled:
+            await self._finalize_cancelled_turn(session_id, turn_id)
             return
         except asyncio.CancelledError:
             return
@@ -526,9 +1011,12 @@ class RuntimeManager:
             )
             reply = f"Lead runtime failed: {exc}"
         finally:
+            heartbeat_stop.set()
+            await heartbeat_task
             current = self.session_turns.get(session_id)
             if current and current.cancel_event is cancel_event:
                 self.session_turns.pop(session_id, None)
+            lease_service.release("turn", str(turn_id), self.instance_id)
 
         await self._publish_assistant_reply(session_id, reply, source_turn_id=turn_id)
 
@@ -540,6 +1028,12 @@ class RuntimeManager:
         phase: str,
         cancel_event: asyncio.Event,
     ) -> None:
+        if self._should_cancel_turn(turn_id, cancel_event):
+            raise TurnCancelled
+        heartbeat_stop = asyncio.Event()
+        heartbeat_task = asyncio.create_task(
+            self._lease_heartbeat_loop("turn", str(turn_id), heartbeat_stop, cancel_event=cancel_event)
+        )
         await self.emit_ephemeral(
             TimelineEvent(
                 session_id=session_id,
@@ -570,6 +1064,7 @@ class RuntimeManager:
                 )
             return
         except TurnCancelled:
+            await self._finalize_cancelled_turn(session_id, turn_id)
             return
         except asyncio.CancelledError:
             return
@@ -584,9 +1079,12 @@ class RuntimeManager:
             )
             reply = f"Lead runtime failed while resuming: {exc}"
         finally:
+            heartbeat_stop.set()
+            await heartbeat_task
             current = self.session_turns.get(session_id)
             if current and current.cancel_event is cancel_event:
                 self.session_turns.pop(session_id, None)
+            lease_service.release("turn", str(turn_id), self.instance_id)
 
         await self._publish_assistant_reply(session_id, reply, source_turn_id=turn_id)
 
@@ -1306,6 +1804,7 @@ class RuntimeManager:
         *,
         client,
         session_id: str,
+        turn_id: int | None,
         system_prompt: str,
         messages: list[dict[str, object]],
         tools: list[dict[str, object]],
@@ -1335,32 +1834,52 @@ class RuntimeManager:
         worker_task = asyncio.create_task(asyncio.to_thread(worker))
         text_parts: list[str] = []
         tool_blocks: list[object] = []
+        event_text_buffer: list[str] = []
+
+        async def flush_event_text_buffer() -> None:
+            if not event_text_buffer:
+                return
+            chunk = "".join(event_text_buffer)
+            event_text_buffer.clear()
+            if not chunk:
+                return
+            if emit_stream_events:
+                turn = self.session_turns.get(session_id)
+                if turn and turn.cancel_event is cancel_event:
+                    turn.partial_text += chunk
+                await self.emit_ephemeral(
+                    TimelineEvent(
+                        session_id=session_id,
+                        type="message.assistant.delta",
+                        content=chunk,
+                    )
+                )
 
         try:
             while True:
-                if cancel_event.is_set():
+                if self._should_cancel_turn(None, cancel_event):
                     raise TurnCancelled
                 try:
                     kind, payload = await asyncio.wait_for(queue.get(), timeout=0.1)
                 except asyncio.TimeoutError:
+                    if turn_id is not None and self._should_cancel_turn(turn_id, cancel_event):
+                        raise TurnCancelled
                     continue
                 if kind == "text_delta" and isinstance(payload, dict):
                     delta = str(payload.get("delta") or "")
                     if delta:
                         text_parts.append(delta)
-                        if emit_stream_events:
-                            turn = self.session_turns.get(session_id)
-                            if turn and turn.cancel_event is cancel_event:
-                                turn.partial_text += delta
-                            await self.emit_ephemeral(
-                                TimelineEvent(
-                                    session_id=session_id,
-                                    type="message.assistant.delta",
-                                    content=delta,
-                                )
-                            )
+                        event_text_buffer.append(delta)
+                        should_flush = (
+                            len("".join(event_text_buffer)) >= 48
+                            or "\n" in delta
+                            or delta.endswith((".", "!", "?", "。", "！", "？"))
+                        )
+                        if should_flush:
+                            await flush_event_text_buffer()
                     continue
                 if kind == "tool_use" and isinstance(payload, dict):
+                    await flush_event_text_buffer()
                     tool_blocks.append(
                         ToolUseBlock(
                             id=str(payload.get("id") or ""),
@@ -1370,12 +1889,14 @@ class RuntimeManager:
                     )
                     continue
                 if kind == "error":
+                    await flush_event_text_buffer()
                     return [TextBlock(text=str(payload or "LLM provider request failed."))]
                 if kind == "done":
                     break
         finally:
             if not cancel_event.is_set():
                 await worker_task
+        await flush_event_text_buffer()
 
         blocks: list[object] = []
         if text_parts:
@@ -1419,7 +1940,7 @@ class RuntimeManager:
         )
 
         for _ in range(iteration_limit):
-            if cancel_event.is_set():
+            if self._should_cancel_turn(turn_id, cancel_event):
                 raise TurnCancelled
             self._write_checkpoint(
                 turn_id=turn_id,
@@ -1452,6 +1973,7 @@ class RuntimeManager:
             streamed_blocks = await self._stream_agent_response(
                 client=client,
                 session_id=session_id,
+                turn_id=turn_id,
                 system_prompt=assembled.system_prompt,
                 messages=assembled.messages,
                 tools=tools,
@@ -1587,6 +2109,7 @@ class RuntimeManager:
                 workspace=workspace,
                 messages=messages,
                 allowed_external_reads=allowed_external_reads,
+                write_enabled=write_enabled,
                 allow_subagent_tool=allow_subagent_tool,
                 agent_kind=agent_kind,
                 emit_stream_events=emit_stream_events,
@@ -1661,10 +2184,6 @@ class RuntimeManager:
                     content=f"Turn #{turn_id} is waiting for bash approval.",
                 )
             )
-        self.pending_approvals[approval.id] = PendingApproval(
-            session_id=session_id,
-            context=context,
-        )
         await self.publish(
             TimelineEvent(
                 session_id=session_id,

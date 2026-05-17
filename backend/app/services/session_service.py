@@ -1,9 +1,11 @@
-from sqlalchemy import func, select
+from datetime import timedelta
+
+from sqlalchemy import delete, func, select
 
 from app.core.config import settings
 from app.core import workspace as workspace_utils
 from app.db.session import create_session
-from app.models import EventLogRecord, MessageRecord, SessionRecord
+from app.models import EventLogRecord, MessageAssetRecord, MessageRecord, SessionAssetRecord, SessionRecord
 from app.schemas.events import MessageCreate, SessionCreate, SessionSummary, TimelineEvent
 import app.services.asset_service as asset_service
 
@@ -24,21 +26,29 @@ def _to_session_summary(row: SessionRecord, updated_at: str) -> SessionSummary:
 
 def list_sessions() -> list[SessionSummary]:
     with create_session() as db:
-        message_activity = {
-            session_id: updated_at
-            for session_id, updated_at in db.execute(
-                select(MessageRecord.session_id, func.max(MessageRecord.created_at)).group_by(MessageRecord.session_id)
-            ).all()
-        }
-        rows = db.scalars(select(SessionRecord).where(SessionRecord.hidden.is_(False))).all()
-        rows = sorted(
-            rows,
-            key=lambda row: message_activity.get(row.id) or row.created_at,
-            reverse=True,
+        message_activity = (
+            select(
+                MessageRecord.session_id.label("session_id"),
+                func.max(MessageRecord.created_at).label("updated_at"),
+            )
+            .group_by(MessageRecord.session_id)
+            .subquery()
         )
+        rows = db.execute(
+            select(SessionRecord, message_activity.c.updated_at)
+            .outerjoin(message_activity, message_activity.c.session_id == SessionRecord.id)
+            .where(SessionRecord.hidden.is_(False))
+            .order_by(
+                func.coalesce(message_activity.c.updated_at, SessionRecord.created_at).desc(),
+                SessionRecord.id.desc(),
+            )
+        ).all()
         return [
-            _to_session_summary(row, (message_activity.get(row.id) or row.created_at).isoformat())
-            for row in rows
+            _to_session_summary(
+                row,
+                (updated_at or row.created_at).isoformat(),
+            )
+            for row, updated_at in rows
         ]
 
 
@@ -114,10 +124,33 @@ def list_message_records(session_id: str, limit: int | None = None) -> list[dict
         ).all()
         if limit is not None and limit > 0:
             rows = rows[-limit:]
+        message_ids = [row.id for row in rows]
+        asset_refs_by_message_id: dict[int, list[dict[str, object]]] = {}
+        if message_ids:
+            linked_assets = db.execute(
+                select(MessageAssetRecord.message_id, SessionAssetRecord)
+                .join(SessionAssetRecord, SessionAssetRecord.id == MessageAssetRecord.asset_id)
+                .where(
+                    MessageAssetRecord.message_id.in_(message_ids),
+                    SessionAssetRecord.session_id == session_id,
+                    SessionAssetRecord.hidden.is_(False),
+                )
+                .order_by(MessageAssetRecord.id.asc())
+            ).all()
+            for message_id, asset_row in linked_assets:
+                asset_refs_by_message_id.setdefault(int(message_id), []).append(
+                    {
+                        "type": "asset_ref",
+                        "asset_id": asset_row.id,
+                        "filename": asset_row.filename,
+                        "kind": asset_row.kind,
+                        "status": asset_row.status,
+                    }
+                )
         messages: list[dict[str, object]] = []
         for row in rows:
-            asset_ids = asset_service.list_message_asset_ids(row.id)
-            if not asset_ids:
+            asset_refs = asset_refs_by_message_id.get(row.id, [])
+            if not asset_refs:
                 messages.append(
                     {
                         "role": row.role,
@@ -129,19 +162,7 @@ def list_message_records(session_id: str, limit: int | None = None) -> list[dict
             content_parts: list[dict[str, object]] = []
             if row.content.strip():
                 content_parts.append({"type": "text", "text": row.content})
-            for asset_id in asset_ids:
-                asset = asset_service.get_asset(asset_id, session_id=session_id)
-                if asset is None:
-                    continue
-                content_parts.append(
-                    {
-                        "type": "asset_ref",
-                        "asset_id": asset.id,
-                        "filename": asset.filename,
-                        "kind": asset.kind,
-                        "status": asset.status,
-                    }
-                )
+            content_parts.extend(asset_refs)
             messages.append(
                 {
                     "role": row.role,
@@ -161,15 +182,29 @@ def has_user_messages(session_id: str) -> bool:
         return row is not None
 
 
-def list_event_records(session_id: str) -> list[TimelineEvent]:
+def list_event_records(
+    session_id: str,
+    *,
+    after_id: int | None = None,
+    limit: int | None = None,
+    include_ephemeral: bool = False,
+) -> list[TimelineEvent]:
     with create_session() as db:
-        rows = db.scalars(
+        stmt = (
             select(EventLogRecord)
             .where(EventLogRecord.session_id == session_id)
             .order_by(EventLogRecord.created_at.asc(), EventLogRecord.id.asc())
-        ).all()
+        )
+        if not include_ephemeral:
+            stmt = stmt.where(EventLogRecord.ephemeral.is_(False))
+        if after_id is not None:
+            stmt = stmt.where(EventLogRecord.id > after_id)
+        if limit is not None and limit > 0:
+            stmt = stmt.limit(limit)
+        rows = db.scalars(stmt).all()
         return [
             TimelineEvent(
+                event_id=row.id,
                 session_id=row.session_id,
                 type=row.event_type,
                 content=row.content,
@@ -179,19 +214,36 @@ def list_event_records(session_id: str) -> list[TimelineEvent]:
         ]
 
 
-def create_event_record(event: TimelineEvent) -> TimelineEvent:
+def create_event_record(event: TimelineEvent, *, ephemeral: bool = False) -> TimelineEvent:
     with create_session() as db:
         row = EventLogRecord(
             session_id=event.session_id,
             event_type=event.type,
             content=event.content,
+            ephemeral=ephemeral,
         )
         db.add(row)
         db.commit()
         db.refresh(row)
         return TimelineEvent(
+            event_id=row.id,
             session_id=row.session_id,
             type=row.event_type,
             content=row.content,
             created_at=row.created_at.isoformat(),
         )
+
+
+def purge_expired_ephemeral_events() -> int:
+    with create_session() as db:
+        from datetime import datetime, timezone
+
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.jarvis_ephemeral_event_ttl_seconds)
+        result = db.execute(
+            delete(EventLogRecord).where(
+                EventLogRecord.ephemeral.is_(True),
+                EventLogRecord.created_at < cutoff,
+            )
+        )
+        db.commit()
+        return int(result.rowcount or 0)

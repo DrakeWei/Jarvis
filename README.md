@@ -80,3 +80,35 @@ By default it serves:
 ```
 
 More detail is in [services/feishu_mcp_server/README.md](/Users/bytedance/Desktop/python/Jarvis/services/feishu_mcp_server/README.md:1).
+
+## Postgres Concurrency Tests
+
+The backend now includes Postgres-only concurrency tests for lease and approval races in [backend/tests/test_postgres_concurrency.py](/Users/bytedance/Desktop/python/Jarvis/backend/tests/test_postgres_concurrency.py:1).
+
+### Run With Docker
+
+Use the helper script:
+
+```bash
+bash backend/scripts/run_postgres_concurrency_tests.sh
+```
+
+The script will:
+
+1. Start a temporary Postgres 16 container from [backend/docker-compose.postgres-test.yml](/Users/bytedance/Desktop/python/Jarvis/backend/docker-compose.postgres-test.yml:1)
+2. Wait for the database to become ready
+3. Export `JARVIS_TEST_POSTGRES_URL`
+4. Run `backend/tests/test_postgres_concurrency.py`
+5. Tear the container down automatically
+
+### Run Against An Existing Postgres Instance
+
+If you already have Postgres available, set `JARVIS_TEST_POSTGRES_URL` and run:
+
+```bash
+PYTHONPATH=backend \
+JARVIS_TEST_POSTGRES_URL='postgresql+psycopg://postgres:postgres@127.0.0.1:55432/postgres' \
+python3 -m pytest backend/tests/test_postgres_concurrency.py
+```
+
+When `JARVIS_TEST_POSTGRES_URL` is unset, the Postgres-only tests are skipped by default.

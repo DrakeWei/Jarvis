@@ -105,3 +105,33 @@ class AssetIngestionServiceTests(TestCase):
         self.assertEqual(ingested.status, "ready")
         self.assertGreaterEqual(len(chunks), 1)
         self.assertTrue(any("asset aware" in chunk.content for chunk in chunks))
+
+    def test_stage_uploaded_asset_stream_writes_file_incrementally(self) -> None:
+        class FakeUpload:
+            def __init__(self, filename: str, content_type: str, chunks: list[bytes]) -> None:
+                self.filename = filename
+                self.content_type = content_type
+                self._chunks = list(chunks)
+
+            async def read(self, size: int = -1) -> bytes:
+                return self._chunks.pop(0) if self._chunks else b""
+
+        upload = FakeUpload("streamed.txt.pdf", "application/pdf", [b"%PDF-1.4\n", b"body", b"tail"])
+
+        with patch.object(asset_service, "create_session", self._create_session), patch.object(
+            session_asset_utils.settings,
+            "data_dir",
+            Path(self.tempdir.name),
+        ):
+            asset = self._run_async(
+                asset_ingestion_service.stage_uploaded_asset_stream(self.session_id, upload, chunk_size=4)
+            )
+
+        self.assertEqual(asset.status, "uploaded")
+        self.assertEqual(asset.size_bytes, len(b"%PDF-1.4\nbodytail"))
+        self.assertTrue(Path(asset.storage_path).exists())
+
+    def _run_async(self, awaitable):
+        import asyncio
+
+        return asyncio.run(awaitable)

@@ -7,8 +7,26 @@ from app.db.base import Base
 import app.models  # noqa: F401
 
 
-connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
-engine = create_engine(settings.database_url, future=True, connect_args=connect_args)
+def _is_sqlite(url: str) -> bool:
+    return url.startswith("sqlite")
+
+
+def _engine_kwargs() -> dict[str, object]:
+    if _is_sqlite(settings.database_url):
+        return {
+            "future": True,
+            "connect_args": {"check_same_thread": False},
+        }
+    return {
+        "future": True,
+        "pool_pre_ping": True,
+        "pool_size": max(1, settings.db_pool_size),
+        "max_overflow": max(0, settings.db_max_overflow),
+        "pool_timeout": max(1, settings.db_pool_timeout_seconds),
+    }
+
+
+engine = create_engine(settings.database_url, **_engine_kwargs())
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 
@@ -21,6 +39,9 @@ def init_db() -> None:
     _migrate_turn_columns()
     _migrate_approval_columns()
     _migrate_tool_execution_columns()
+    _migrate_background_job_columns()
+    _migrate_event_log_columns()
+    _ensure_query_indexes()
 
 
 def create_session():
@@ -97,6 +118,84 @@ def _migrate_tool_execution_columns() -> None:
         with engine.begin() as connection:
             for statement in statements:
                 connection.execute(text(statement))
+
+
+def _migrate_background_job_columns() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("background_jobs")}
+    except Exception:
+        return
+
+    statements: list[str] = []
+    if "job_type" not in columns:
+        statements.append("ALTER TABLE background_jobs ADD COLUMN job_type VARCHAR(40) NOT NULL DEFAULT 'generic'")
+    if "payload_json" not in columns:
+        statements.append("ALTER TABLE background_jobs ADD COLUMN payload_json TEXT")
+    if "owner_id" not in columns:
+        statements.append("ALTER TABLE background_jobs ADD COLUMN owner_id VARCHAR(80)")
+    if "attempts" not in columns:
+        statements.append("ALTER TABLE background_jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+    if "next_attempt_at" not in columns:
+        statements.append("ALTER TABLE background_jobs ADD COLUMN next_attempt_at DATETIME")
+    if "updated_at" not in columns:
+        statements.append("ALTER TABLE background_jobs ADD COLUMN updated_at DATETIME")
+    if "started_at" not in columns:
+        statements.append("ALTER TABLE background_jobs ADD COLUMN started_at DATETIME")
+    if "completed_at" not in columns:
+        statements.append("ALTER TABLE background_jobs ADD COLUMN completed_at DATETIME")
+
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+            connection.execute(
+                text(
+                    """
+                    UPDATE background_jobs
+                    SET job_type = COALESCE(job_type, 'generic'),
+                        attempts = COALESCE(attempts, 0),
+                        updated_at = COALESCE(updated_at, created_at),
+                        next_attempt_at = COALESCE(next_attempt_at, created_at)
+                    """
+                )
+            )
+
+
+def _migrate_event_log_columns() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("event_log")}
+    except Exception:
+        return
+
+    statements: list[str] = []
+    if "ephemeral" not in columns:
+        statements.append("ALTER TABLE event_log ADD COLUMN ephemeral BOOLEAN NOT NULL DEFAULT 0")
+
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+            connection.execute(text("UPDATE event_log SET ephemeral = COALESCE(ephemeral, 0)"))
+
+
+def _ensure_query_indexes() -> None:
+    statements = [
+        "CREATE INDEX IF NOT EXISTS idx_turns_session_status_started ON turns(session_id, status, started_at)",
+        "CREATE INDEX IF NOT EXISTS idx_background_jobs_type_status_next_attempt ON background_jobs(job_type, status, next_attempt_at)",
+        "CREATE INDEX IF NOT EXISTS idx_background_jobs_status_created ON background_jobs(status, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_status_created ON ingestion_jobs(status, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_event_log_session_ephemeral_id ON event_log(session_id, ephemeral, id)",
+        "CREATE INDEX IF NOT EXISTS idx_event_log_ephemeral_created ON event_log(ephemeral, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_approvals_session_status_created ON approvals(session_id, status, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_tool_executions_session_created ON tool_executions(session_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_session_memory_session_kind_status_updated ON session_memory(session_id, kind, status, updated_at)",
+        "CREATE INDEX IF NOT EXISTS idx_agent_messages_agent_created ON agent_messages(agent_id, created_at)",
+    ]
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
 
 
 def _migrate_session_asset_columns() -> None:
@@ -210,6 +309,8 @@ def _migrate_turn_columns() -> None:
         statements.append("ALTER TABLE turns ADD COLUMN workspace_fingerprint VARCHAR(40)")
     if "updated_at" not in columns:
         statements.append("ALTER TABLE turns ADD COLUMN updated_at DATETIME")
+    if "cancel_requested" not in columns:
+        statements.append("ALTER TABLE turns ADD COLUMN cancel_requested BOOLEAN NOT NULL DEFAULT 0")
     if "last_checkpoint_seq" not in columns:
         statements.append("ALTER TABLE turns ADD COLUMN last_checkpoint_seq INTEGER NOT NULL DEFAULT 0")
     if "resume_hint" not in columns:
@@ -222,6 +323,7 @@ def _migrate_turn_columns() -> None:
             for statement in statements:
                 connection.execute(text(statement))
             connection.execute(text("UPDATE turns SET updated_at = COALESCE(updated_at, started_at)"))
+            connection.execute(text("UPDATE turns SET cancel_requested = COALESCE(cancel_requested, 0)"))
             connection.execute(text("UPDATE turns SET status = COALESCE(status, 'queued')"))
 
 
