@@ -43,6 +43,7 @@ import {
   type TeammateMessageSummary,
   type TeammateSummary,
   type TimelineEvent,
+  type TimelinePart,
   type TurnSummary,
   type ToolExecutionSummary,
 } from "../lib/api";
@@ -92,6 +93,7 @@ type TimelineCard = {
   label: string;
   title: string;
   content: string;
+  parts?: TimelinePart[];
 };
 
 type TimelineRenderItem =
@@ -253,6 +255,54 @@ function summarizeExecution(content: string): string {
   return `${toolLabel} ${status}.`;
 }
 
+function normalizeTimelineParts(event: TimelineEvent): TimelinePart[] {
+  if (Array.isArray(event.parts) && event.parts.length) {
+    return event.parts;
+  }
+  if (!event.content.trim()) {
+    return [];
+  }
+  return [{ type: "text", text: event.content }];
+}
+
+function renderTimelineParts(parts: TimelinePart[], fallbackContent: string) {
+  if (!parts.length) {
+    return <p>{fallbackContent}</p>;
+  }
+  return (
+    <div className="timeline-message-stack">
+      {parts.map((part, index) => {
+        if (part.type === "text") {
+          return (
+            <div key={`text-${index}`} className="markdown-body">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {part.text}
+              </ReactMarkdown>
+            </div>
+          );
+        }
+        if (part.kind === "image") {
+          const imagePath = part.preview_path ?? part.storage_path ?? "";
+          return (
+            <figure key={`${part.asset_id}-${index}`} className="timeline-image-block">
+              {imagePath ? (
+                <img src={`file://${imagePath}`} alt={part.filename} className="timeline-image" />
+              ) : null}
+              <figcaption>{part.filename}</figcaption>
+            </figure>
+          );
+        }
+        return (
+          <div key={`${part.asset_id}-${index}`} className="timeline-asset-chip">
+            <strong>{part.filename}</strong>
+            <span>{part.status}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function buildTimelineCard(event: TimelineEvent): TimelineCard {
   if (event.type === "message.user" || event.type === "message.user.local") {
     return {
@@ -261,6 +311,7 @@ function buildTimelineCard(event: TimelineEvent): TimelineCard {
       label: "Instruction",
       title: "You",
       content: event.content,
+      parts: normalizeTimelineParts(event),
     };
   }
 
@@ -271,6 +322,7 @@ function buildTimelineCard(event: TimelineEvent): TimelineCard {
       label: "Response",
       title: "Jarvis",
       content: event.content,
+      parts: normalizeTimelineParts(event),
     };
   }
 
@@ -1785,11 +1837,7 @@ export function App() {
                               </div>
                             </details>
                           ) : card.tone === "assistant" ? (
-                            <div className="markdown-body">
-                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                {card.content}
-                              </ReactMarkdown>
-                            </div>
+                            renderTimelineParts(card.parts ?? [], card.content)
                           ) : (
                             <p>{card.content}</p>
                           )}

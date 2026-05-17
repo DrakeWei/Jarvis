@@ -1,3 +1,20 @@
+export type TimelineTextPart = {
+  type: "text";
+  text: string;
+};
+
+export type TimelineAssetPart = {
+  type: "asset_ref";
+  asset_id: string;
+  filename: string;
+  kind: string;
+  status: string;
+  preview_path?: string | null;
+  storage_path?: string | null;
+};
+
+export type TimelinePart = TimelineTextPart | TimelineAssetPart;
+
 export type SessionSummary = {
   session_id: string;
   title: string;
@@ -15,6 +32,7 @@ export type TimelineEvent = {
   session_id: string;
   type: string;
   content: string;
+  parts?: TimelinePart[] | null;
   created_at: string;
 };
 

@@ -45,6 +45,7 @@ class TimelineEvent(BaseModel):
     session_id: str
     type: str
     content: str
+    parts: list[dict[str, object]] | None = None
     created_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )

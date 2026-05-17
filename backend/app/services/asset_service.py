@@ -50,6 +50,18 @@ def _to_chunk_summary(row: AssetChunkRecord) -> SessionAssetChunkSummary:
     )
 
 
+def build_asset_reference(asset: SessionAssetSummary) -> dict[str, object]:
+    return {
+        "type": "asset_ref",
+        "asset_id": asset.id,
+        "filename": asset.filename,
+        "kind": asset.kind,
+        "status": asset.status,
+        "preview_path": asset.preview_path,
+        "storage_path": asset.storage_path,
+    }
+
+
 def create_asset_record(
     session_id: str,
     *,

@@ -76,6 +76,24 @@ class DurableEventRecordTests(TestCase):
         self.assertFalse(any(event.event_id == ephemeral.event_id for event in normal))
         self.assertTrue(any(event.event_id == ephemeral.event_id for event in with_ephemeral))
 
+    def test_event_parts_round_trip_through_durable_storage(self) -> None:
+        with patch.object(session_service, "create_session", self._create_session):
+            stored = session_service.create_event_record(
+                TimelineEvent(
+                    session_id="session-1",
+                    type="message.assistant",
+                    content="Generated image.",
+                    parts=[
+                        {"type": "text", "text": "Generated image."},
+                        {"type": "asset_ref", "asset_id": "asset-1", "filename": "generated.png", "kind": "image", "status": "ready"},
+                    ],
+                )
+            )
+            events = session_service.list_event_records("session-1")
+
+        self.assertIsNotNone(stored.parts)
+        self.assertEqual(events[0].parts[1]["asset_id"] if events and events[0].parts else None, "asset-1")
+
 
 class EphemeralEventBrokerTests(IsolatedAsyncioTestCase):
     async def test_bounded_ephemeral_queue_drops_oldest(self) -> None:
@@ -104,6 +122,34 @@ class RuntimeEventDeliveryTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(result.event_id, 7)
         publish_mock.assert_awaited_once_with(stored)
+
+    async def test_publish_assistant_reply_includes_image_parts(self) -> None:
+        runtime = RuntimeManager()
+        asset = SimpleNamespace(
+            id="asset-1",
+            filename="generated.png",
+            kind="image",
+            status="ready",
+            preview_path="/tmp/generated-preview.png",
+            storage_path="/tmp/generated.png",
+        )
+
+        with patch("app.runtime.manager.asset_service.get_asset", return_value=asset), patch(
+            "app.runtime.manager.session_service.create_message_record"
+        ), patch("app.runtime.manager.memory_service.remember_progress"), patch(
+            "app.runtime.manager.memory_service.refresh_rolling_summary"
+        ), patch.object(runtime, "publish") as publish_mock:
+            await runtime._publish_assistant_reply(
+                "session-1",
+                "Generated image.",
+                emit_deltas=False,
+                asset_ids=["asset-1"],
+            )
+
+        published_event = publish_mock.await_args.args[0]
+        self.assertEqual(published_event.type, "message.assistant")
+        self.assertTrue(published_event.parts)
+        self.assertEqual(published_event.parts[1]["asset_id"], "asset-1")
 
     def test_list_timeline_since_uses_durable_replay_only(self) -> None:
         runtime = RuntimeManager()
