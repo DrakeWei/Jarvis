@@ -8,6 +8,9 @@ export type TimelineAssetPart = {
   asset_id: string;
   filename: string;
   kind: string;
+  origin?: string;
+  source_asset_id?: string | null;
+  metadata_json?: Record<string, unknown>;
   status: string;
   preview_path?: string | null;
   storage_path?: string | null;
@@ -155,12 +158,15 @@ export type SessionAssetSummary = {
   id: string;
   session_id: string;
   kind: string;
+  origin: string;
+  source_asset_id: string | null;
   mime_type: string;
   filename: string;
   size_bytes: number;
   sha256: string;
   storage_path: string;
   preview_path: string | null;
+  metadata_json: Record<string, unknown>;
   status: string;
   error_message: string | null;
   created_at: string;
@@ -399,6 +405,14 @@ export async function fetchSessionAssets(sessionId: string): Promise<SessionAsse
   const response = await fetch(`${API_BASE}/sessions/${sessionId}/assets`);
   if (!response.ok) {
     throw new Error("Failed to load session assets");
+  }
+  return response.json();
+}
+
+export async function fetchSessionAsset(sessionId: string, assetId: string): Promise<SessionAssetSummary> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/assets/${assetId}`);
+  if (!response.ok) {
+    throw new Error("Failed to load session asset");
   }
   return response.json();
 }

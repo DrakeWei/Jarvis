@@ -99,6 +99,8 @@ class ImageGenerationServiceTests(TestCase):
         self.assertTrue(result.asset.preview_path)
         self.assertTrue(Path(result.asset.preview_path or "").exists())
         self.assertEqual(result.asset.kind, "image")
+        self.assertEqual(result.asset.origin, "generated")
+        self.assertEqual(result.asset.metadata_json.get("model"), image_generation_service.settings.jarvis_image_model)
         self.assertEqual(result.asset.status, "ready")
 
     def test_generate_image_with_asset_ids_uses_edit_endpoint(self) -> None:
@@ -151,12 +153,14 @@ class ImageGenerationServiceTests(TestCase):
                 "session-1",
                 "make the cat wear sunglasses",
                 asset_ids=[source_asset.id],
+                size="1024x1792",
             )
 
         self.assertIn("/images/edits", str(seen.get("url")))
         body = seen.get("body") if isinstance(seen.get("body"), dict) else {}
         images = body.get("images", []) if isinstance(body, dict) else []
         self.assertTrue(images)
+        self.assertEqual(body.get("size"), "1024x1536")
         self.assertTrue(str(images[0].get("image_url", "")).startswith("data:image/png;base64,"))
         self.assertEqual(result.asset.kind, "image")
 
@@ -219,6 +223,55 @@ class ImageGenerationServiceTests(TestCase):
 
         body = seen.get("body") if isinstance(seen.get("body"), dict) else {}
         self.assertEqual(body.get("input_fidelity"), "high")
+        self.assertTrue(str(body.get("mask", {}).get("image_url", "")).startswith("data:image/png;base64,"))
+
+    def test_generate_image_auto_builds_outpaint_canvas_mask_for_single_image_edit(self) -> None:
+        payload = {"data": [{"b64_json": PNG_1X1_BASE64}]}
+        seen: dict[str, object] = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps(payload).encode("utf-8")
+
+        def fake_urlopen(request, timeout=None, context=None):
+            seen["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse()
+
+        source_bytes = base64.b64decode(PNG_1X1_BASE64)
+        with patch.object(asset_service, "create_session", self._create_session), patch.object(
+            session_asset_utils.settings,
+            "data_dir",
+            Path(self.tempdir.name),
+        ), patch(
+            "app.services.image_generation_service.urllib.request.urlopen",
+            side_effect=fake_urlopen,
+        ):
+            source_asset = asset_service.create_asset_record(
+                "session-1",
+                kind="image",
+                mime_type="image/png",
+                filename="source.png",
+                size_bytes=len(source_bytes),
+                status="ready",
+            )
+            Path(source_asset.storage_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(source_asset.storage_path).write_bytes(source_bytes)
+
+            image_generation_service.generate_image(
+                "session-1",
+                "extend the canvas",
+                asset_ids=[source_asset.id],
+                size="1024x1792",
+            )
+
+        body = seen.get("body") if isinstance(seen.get("body"), dict) else {}
+        self.assertEqual(body.get("size"), "1024x1536")
         self.assertTrue(str(body.get("mask", {}).get("image_url", "")).startswith("data:image/png;base64,"))
 
     def test_generate_image_rejects_non_png_mask_asset(self) -> None:

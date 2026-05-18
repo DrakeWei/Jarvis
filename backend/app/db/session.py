@@ -253,6 +253,12 @@ def _migrate_session_asset_columns() -> None:
         statements.append("ALTER TABLE session_assets ADD COLUMN sha256 VARCHAR(64) NOT NULL DEFAULT ''")
     if "size_bytes" not in columns:
         statements.append("ALTER TABLE session_assets ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0")
+    if "origin" not in columns:
+        statements.append("ALTER TABLE session_assets ADD COLUMN origin VARCHAR(20) NOT NULL DEFAULT 'uploaded'")
+    if "source_asset_id" not in columns:
+        statements.append("ALTER TABLE session_assets ADD COLUMN source_asset_id VARCHAR(36)")
+    if "metadata_json" not in columns:
+        statements.append("ALTER TABLE session_assets ADD COLUMN metadata_json TEXT")
 
     if statements:
         with engine.begin() as connection:
@@ -266,7 +272,8 @@ def _migrate_session_asset_columns() -> None:
                         hidden = COALESCE(hidden, 0),
                         updated_at = COALESCE(updated_at, created_at),
                         sha256 = COALESCE(sha256, ''),
-                        size_bytes = COALESCE(size_bytes, 0)
+                        size_bytes = COALESCE(size_bytes, 0),
+                        origin = COALESCE(origin, 'uploaded')
                     """
                 )
             )
@@ -341,6 +348,16 @@ def _migrate_asset_chunk_columns() -> None:
         statements.append("ALTER TABLE asset_chunks ADD COLUMN char_count INTEGER NOT NULL DEFAULT 0")
     if "created_at" not in columns:
         statements.append("ALTER TABLE asset_chunks ADD COLUMN created_at DATETIME")
+    if "start_ms" not in columns:
+        statements.append("ALTER TABLE asset_chunks ADD COLUMN start_ms INTEGER")
+    if "end_ms" not in columns:
+        statements.append("ALTER TABLE asset_chunks ADD COLUMN end_ms INTEGER")
+    if "speaker" not in columns:
+        statements.append("ALTER TABLE asset_chunks ADD COLUMN speaker VARCHAR(120)")
+    if "frame_index" not in columns:
+        statements.append("ALTER TABLE asset_chunks ADD COLUMN frame_index INTEGER")
+    if "frame_timestamp_ms" not in columns:
+        statements.append("ALTER TABLE asset_chunks ADD COLUMN frame_timestamp_ms INTEGER")
 
     if statements:
         with engine.begin() as connection:

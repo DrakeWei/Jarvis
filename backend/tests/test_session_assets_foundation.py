@@ -91,6 +91,28 @@ class SessionAssetFoundationTests(TestCase):
         self.assertEqual(asset.filename, "中文计划?.pdf")
         self.assertIn("中文计划_.pdf", asset.storage_path)
 
+    def test_create_asset_record_persists_origin_source_and_metadata(self) -> None:
+        with patch.object(asset_service, "create_session", self._create_session), patch.object(
+            session_asset_utils.settings,
+            "data_dir",
+            Path(self.tempdir.name),
+        ):
+            asset = asset_service.create_asset_record(
+                self.session_id,
+                kind="generated_audio",
+                origin="generated",
+                source_asset_id="asset-source-1",
+                metadata_json={"voice": "alloy", "provider": "volcengine"},
+                mime_type="audio/mpeg",
+                filename="reply.mp3",
+                size_bytes=4096,
+            )
+
+        self.assertEqual(asset.origin, "generated")
+        self.assertEqual(asset.source_asset_id, "asset-source-1")
+        self.assertEqual(asset.metadata_json["voice"], "alloy")
+        self.assertEqual(asset.metadata_json["provider"], "volcengine")
+
     def test_create_message_record_links_assets_atomically(self) -> None:
         with patch.object(asset_service, "create_session", self._create_session), patch.object(
             session_service,
@@ -162,6 +184,37 @@ class SessionAssetFoundationTests(TestCase):
         parts = transcript[0]["content"]
         self.assertTrue(isinstance(parts, list))
         self.assertTrue(any(isinstance(part, dict) and part.get("type") == "asset_ref" and part.get("asset_id") == asset.id for part in parts))
+
+    def test_create_asset_chunk_persists_time_and_frame_metadata(self) -> None:
+        with patch.object(asset_service, "create_session", self._create_session), patch.object(
+            session_asset_utils.settings,
+            "data_dir",
+            Path(self.tempdir.name),
+        ):
+            asset = asset_service.create_asset_record(
+                self.session_id,
+                kind="audio",
+                mime_type="audio/wav",
+                filename="voice.wav",
+                size_bytes=256,
+            )
+            chunk = asset_service.create_asset_chunk(
+                asset.id,
+                chunk_index=0,
+                content="hello world",
+                start_ms=120,
+                end_ms=640,
+                speaker="speaker-1",
+                frame_index=2,
+                frame_timestamp_ms=500,
+                summary="hello",
+            )
+
+        self.assertEqual(chunk.start_ms, 120)
+        self.assertEqual(chunk.end_ms, 640)
+        self.assertEqual(chunk.speaker, "speaker-1")
+        self.assertEqual(chunk.frame_index, 2)
+        self.assertEqual(chunk.frame_timestamp_ms, 500)
 
     def test_list_sessions_orders_by_latest_message_activity_in_sql(self) -> None:
         with self._create_session() as db:

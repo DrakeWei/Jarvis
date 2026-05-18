@@ -8,7 +8,7 @@ from uuid import uuid4
 from app.core.config import settings
 from app.core import workspace as workspace_utils
 from app.mcp import ToolDefinition, ToolExecutionResult, tool_registry
-from app.providers import ProviderConfigError, ProviderRequestError, TextBlock, ToolUseBlock, create_client
+from app.providers import ProviderConfigError, ProviderRequestError, SpeechSynthesisRequest, TextBlock, ToolUseBlock, VideoGenerationRequest, create_client
 from app.schemas.background_jobs import BackgroundJobSummary
 from app.schemas.assets import SessionAssetSummary
 from app.schemas.events import MessageCreate, SessionCreate, SessionSummary, TimelineEvent
@@ -28,7 +28,9 @@ import app.services.image_generation_service as image_generation_service
 import app.services.git_service as git_service
 import app.services.memory_service as memory_service
 import app.services.memory_search_service as memory_search_service
+import app.services.speech_generation_service as speech_generation_service
 import app.services.turn_service as turn_service
+import app.services.video_generation_service as video_generation_service
 import app.services.worktree_service as worktree_service
 from app.services import approval_service, asset_service, background_job_service, ingestion_job_service, lease_service, session_service, subagent_service, teammate_service, tool_service
 from app.tools.broker import ToolBroker, broker
@@ -1204,11 +1206,13 @@ class RuntimeManager:
         self._ensure_dispatcher_started()
         should_autoname = payload.role == "user" and bool(payload.content.strip()) and self._should_autoname_session(session_id)
         created_message = session_service.create_message_record(session_id, payload)
+        parts = self._build_user_message_parts(session_id, payload)
         await self.publish(
             TimelineEvent(
                 session_id=session_id,
                 type=f"message.{payload.role}",
                 content=self._timeline_message_content(session_id, payload),
+                parts=parts,
             )
         )
         if payload.role == "user":
@@ -1279,17 +1283,36 @@ class RuntimeManager:
         text = payload.content.strip()
         if not payload.asset_ids:
             return text
-        asset_names = [
-            asset.filename
+        assets = [
+            asset
             for asset_id in payload.asset_ids
             for asset in [asset_service.get_asset(asset_id, session_id=session_id)]
             if asset is not None
         ]
+        asset_names = [asset.filename for asset in assets]
         if text:
             return text
+        if assets and all(asset.kind == "audio" for asset in assets):
+            transcript_preview = str((assets[0].metadata_json or {}).get("transcript_preview") or "").strip()
+            return transcript_preview or "正在转写语音…"
         if asset_names:
             return ", ".join(asset_names)
         return f"{len(payload.asset_ids)} attachment(s)"
+
+    def _build_user_message_parts(
+        self,
+        session_id: str,
+        payload: MessageCreate,
+    ) -> list[dict[str, object]] | None:
+        parts: list[dict[str, object]] = []
+        if payload.content.strip():
+            parts.append({"type": "text", "text": payload.content.strip()})
+        for asset_id in payload.asset_ids:
+            asset = asset_service.get_asset(asset_id, session_id=session_id)
+            if asset is None:
+                continue
+            parts.append(asset_service.build_asset_reference(asset))
+        return parts or None
 
     async def _finalize_cancelled_turn(self, session_id: str, turn_id: int) -> None:
         current_turn = turn_service.get_turn(turn_id)
@@ -2121,10 +2144,18 @@ class RuntimeManager:
                 f"id={asset.id}",
                 f"name={asset.filename}",
                 f"kind={asset.kind}",
+                f"origin={asset.origin}",
                 f"mime_type={asset.mime_type}",
                 f"status={asset.status}",
                 f"size_bytes={asset.size_bytes}",
             ]
+            if asset.source_asset_id:
+                lines.append(f"source_asset_id={asset.source_asset_id}")
+            metadata = asset.metadata_json or {}
+            for key in ("container", "duration_ms", "sample_rate", "channels", "transcript_status", "keyframe_status"):
+                value = metadata.get(key)
+                if value not in {None, ""}:
+                    lines.append(f"{key}={value}")
             if asset.error_message:
                 lines.append(f"error={asset.error_message}")
             chunks = asset_service.list_asset_chunks(asset.id)[:2]
@@ -2148,12 +2179,31 @@ class RuntimeManager:
             lines = [f"Attachment '{asset.filename}' matching chunks:"]
             for chunk in chunks:
                 location_bits: list[str] = []
-                if chunk.page_number is not None:
-                    location_bits.append(f"page={chunk.page_number}")
-                if chunk.sheet_name:
-                    location_bits.append(f"sheet={chunk.sheet_name}")
-                if chunk.slide_number is not None:
-                    location_bits.append(f"slide={chunk.slide_number}")
+                page_number = getattr(chunk, "page_number", None)
+                sheet_name = getattr(chunk, "sheet_name", None)
+                slide_number = getattr(chunk, "slide_number", None)
+                section_path = getattr(chunk, "section_path", None)
+                start_ms = getattr(chunk, "start_ms", None)
+                end_ms = getattr(chunk, "end_ms", None)
+                speaker = getattr(chunk, "speaker", None)
+                frame_index = getattr(chunk, "frame_index", None)
+                frame_timestamp_ms = getattr(chunk, "frame_timestamp_ms", None)
+                if page_number is not None:
+                    location_bits.append(f"page={page_number}")
+                if sheet_name:
+                    location_bits.append(f"sheet={sheet_name}")
+                if slide_number is not None:
+                    location_bits.append(f"slide={slide_number}")
+                if section_path:
+                    location_bits.append(f"section={section_path}")
+                if start_ms is not None or end_ms is not None:
+                    location_bits.append(f"time={start_ms or 0}-{end_ms or '?'}ms")
+                if speaker:
+                    location_bits.append(f"speaker={speaker}")
+                if frame_index is not None:
+                    location_bits.append(f"frame={frame_index}")
+                if frame_timestamp_ms is not None:
+                    location_bits.append(f"frame_ts={frame_timestamp_ms}ms")
                 location = f" ({', '.join(location_bits)})" if location_bits else ""
                 lines.append(f"- chunk_index={chunk.chunk_index}{location}: {chunk.content[:600]}")
             return "completed", "\n".join(lines)
@@ -2205,6 +2255,69 @@ class RuntimeManager:
                     "assets": [asset_service.build_asset_reference(generated.asset)],
                     "model": generated.model,
                     "revised_prompt": generated.revised_prompt,
+                },
+            )
+        if tool_name == "generate_speech":
+            text = str(tool_input.get("text", "")).strip()
+            voice = str(tool_input.get("voice", "")).strip() or None
+            audio_format = str(tool_input.get("format", "")).strip() or "mp3"
+            raw_speed = tool_input.get("speed", 1.0)
+            raw_pitch = tool_input.get("pitch", 1.0)
+            speed = float(raw_speed) if isinstance(raw_speed, (int, float)) else 1.0
+            pitch = float(raw_pitch) if isinstance(raw_pitch, (int, float)) else 1.0
+            if not text:
+                return "error", "generate_speech requires a non-empty text value."
+            request = SpeechSynthesisRequest(
+                text=text,
+                voice=voice,
+                audio_format=audio_format,
+                speed=speed,
+                pitch=pitch,
+                stream=True,
+            )
+            try:
+                generated = speech_generation_service.generate_speech(session_id, request)
+            except speech_generation_service.SpeechGenerationError as exc:
+                return "error", str(exc)
+            summary = f"Generated speech asset {generated.asset.id} ({generated.asset.filename})."
+            return ToolExecutionResult(
+                status="completed",
+                output=summary,
+                payload={
+                    "asset_ids": [generated.asset.id],
+                    "assets": [asset_service.build_asset_reference(generated.asset)],
+                    "format": audio_format,
+                    "provider": generated.provider_name,
+                },
+            )
+        if tool_name == "generate_video":
+            prompt = str(tool_input.get("prompt", "")).strip()
+            raw_asset_ids = tool_input.get("asset_ids", [])
+            asset_ids = [str(asset_id).strip() for asset_id in raw_asset_ids] if isinstance(raw_asset_ids, list) else []
+            raw_duration = tool_input.get("duration_seconds")
+            duration_seconds = raw_duration if isinstance(raw_duration, int) else None
+            aspect_ratio = str(tool_input.get("aspect_ratio", "")).strip() or None
+            if not prompt:
+                return "error", "generate_video requires a non-empty prompt."
+            try:
+                job = video_generation_service.submit_video_generation(
+                    VideoGenerationRequest(
+                        prompt=prompt,
+                        duration_seconds=duration_seconds,
+                        aspect_ratio=aspect_ratio,
+                        asset_ids=asset_ids,
+                    )
+                )
+            except video_generation_service.VideoGenerationError as exc:
+                return "error", str(exc)
+            return ToolExecutionResult(
+                status="completed",
+                output=f"Queued video generation job {job.job_id} with status {job.status}.",
+                payload={
+                    "asset_ids": [],
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "provider": job.provider_name,
                 },
             )
         if tool_name == "create_task":
@@ -2302,7 +2415,7 @@ class RuntimeManager:
         asset_ids: list[str] | None = None,
     ) -> None:
         resolved_asset_ids = self._normalize_asset_ids(asset_ids or [])
-        text = reply.strip() or ("Generated image." if resolved_asset_ids else "LLM provider returned no text output.")
+        text = reply.strip() or ("Generated attachment." if resolved_asset_ids else "LLM provider returned no text output.")
         if emit_deltas:
             for chunk in self._chunk_text(text):
                 await self.emit_ephemeral(
@@ -2387,6 +2500,8 @@ class RuntimeManager:
                 "When the user asks about the current repository, Git branch, HEAD state, or working tree cleanliness, use get_session_git_state instead of guessing or shelling out.",
                 "When the session has uploaded attachments and the current prompt depends on them, use the session attachment tools to inspect extracted content instead of guessing from filenames alone.",
                 "When the user asks you to create a brand-new image, render a visual, or edit an uploaded image, use the generate_image tool instead of claiming the image exists.",
+                "When the user asks you to speak a reply aloud, output narration audio, or convert text into spoken audio, use the generate_speech tool.",
+                "When the user explicitly asks you to create a video, use the generate_video tool instead of describing a video concept as if it already exists.",
                 (
                     "When the user asks you to create or modify files, do the work directly inside the target workspace when it is safe."
                     if execution_mode != "plan"

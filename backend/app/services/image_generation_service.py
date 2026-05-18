@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import ssl
 import urllib.error
@@ -11,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
+
+from PIL import Image
 
 from app.core import session_assets as session_asset_utils
 from app.core.config import settings
@@ -47,21 +50,29 @@ def generate_image(
         raise ImageGenerationError("generate_image requires a non-empty prompt.")
 
     model = settings.jarvis_image_model.strip() or "gpt-image-2"
+    resolved_size = _normalize_image_size(size)
     resolved_asset_ids = [str(asset_id).strip() for asset_id in (asset_ids or []) if str(asset_id).strip()]
     resolved_mask_asset_id = str(mask_asset_id or "").strip() or None
     resolved_input_fidelity = str(input_fidelity or "").strip().lower() or None
     if resolved_asset_ids:
+        prepared_inputs = _prepare_edit_inputs(
+            session_id,
+            resolved_asset_ids,
+            size=resolved_size,
+            mask_asset_id=resolved_mask_asset_id,
+        )
         request_body = {
             "model": model,
             "prompt": normalized_prompt,
+            "size": resolved_size,
             "background": (background or settings.jarvis_image_default_background).strip() or "auto",
             "quality": (quality or settings.jarvis_image_default_quality).strip() or "auto",
             "output_format": "png",
             "n": 1,
-            "images": _edit_images(session_id, resolved_asset_ids),
+            "images": prepared_inputs["images"],
         }
-        if resolved_mask_asset_id:
-            request_body["mask"] = _edit_mask(session_id, resolved_mask_asset_id)
+        if prepared_inputs.get("mask") is not None:
+            request_body["mask"] = prepared_inputs["mask"]
         if resolved_input_fidelity:
             if resolved_input_fidelity not in {"high", "low"}:
                 raise ImageGenerationError("input_fidelity must be either 'high' or 'low'.")
@@ -75,7 +86,7 @@ def generate_image(
         request_body = {
             "model": model,
             "prompt": normalized_prompt,
-            "size": (size or settings.jarvis_image_default_size).strip() or "1024x1024",
+            "size": resolved_size or _normalize_image_size(settings.jarvis_image_default_size) or "1024x1024",
             "background": (background or settings.jarvis_image_default_background).strip() or "auto",
             "quality": (quality or settings.jarvis_image_default_quality).strip() or "auto",
             "output_format": "png",
@@ -101,6 +112,16 @@ def generate_image(
     asset = asset_service.create_asset_record(
         session_id,
         kind="image",
+        origin="generated",
+        source_asset_id=resolved_asset_ids[0] if resolved_asset_ids else None,
+        metadata_json={
+            "provider": "openai_compatible",
+            "model": model,
+            "prompt": normalized_prompt,
+            "size": request_body.get("size"),
+            "quality": request_body.get("quality"),
+            "background": request_body.get("background"),
+        },
         mime_type="image/png",
         filename=filename,
         size_bytes=len(image_bytes),
@@ -191,6 +212,25 @@ def _edit_mask(session_id: str, asset_id: str) -> dict[str, str]:
     return _asset_image_url_part(asset)
 
 
+def _prepare_edit_inputs(
+    session_id: str,
+    asset_ids: list[str],
+    *,
+    size: str | None,
+    mask_asset_id: str | None,
+) -> dict[str, object]:
+    if mask_asset_id:
+        return {
+            "images": _edit_images(session_id, asset_ids),
+            "mask": _edit_mask(session_id, mask_asset_id),
+        }
+    if len(asset_ids) == 1 and size:
+        auto = _build_outpaint_canvas_inputs(session_id, asset_ids[0], target_size=size)
+        if auto is not None:
+            return auto
+    return {"images": _edit_images(session_id, asset_ids)}
+
+
 def _load_session_image_asset(session_id: str, asset_id: str) -> SessionAssetSummary:
     asset = asset_service.get_asset(asset_id, session_id=session_id)
     if asset is None:
@@ -209,12 +249,45 @@ def _asset_image_url_part(asset: SessionAssetSummary) -> dict[str, str]:
     return {"image_url": f"data:{asset.mime_type};base64,{encoded}"}
 
 
+def _build_outpaint_canvas_inputs(session_id: str, asset_id: str, *, target_size: str) -> dict[str, object] | None:
+    asset = _load_session_image_asset(session_id, asset_id)
+    target = _parse_image_size(target_size)
+    if target is None:
+        return None
+    target_width, target_height = target
+    image_path = Path(asset.storage_path)
+    with Image.open(image_path) as original:
+        source = original.convert("RGBA")
+        if source.width >= target_width or source.height >= target_height:
+            return None
+        canvas = Image.new("RGBA", (target_width, target_height), (0, 0, 0, 0))
+        offset_x = (target_width - source.width) // 2
+        offset_y = (target_height - source.height) // 2
+        canvas.alpha_composite(source, (offset_x, offset_y))
+        mask = Image.new("RGBA", (target_width, target_height), (0, 0, 0, 0))
+        preserved = Image.new("RGBA", source.size, (255, 255, 255, 255))
+        mask.alpha_composite(preserved, (offset_x, offset_y))
+    return {
+        "images": [{"image_url": _pil_image_data_url(canvas, "PNG")}],
+        "mask": {"image_url": _pil_image_data_url(mask, "PNG")},
+    }
+
+
+def _pil_image_data_url(image: Image.Image, format_name: str) -> str:
+    buffer = io.BytesIO()
+    image.save(buffer, format=format_name)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    mime_type = f"image/{format_name.lower()}"
+    return f"data:{mime_type};base64,{encoded}"
+
+
 def _openai_headers() -> dict[str, str]:
     headers = {
         "Content-Type": "application/json",
     }
-    if settings.openai_api_key:
-        headers["Authorization"] = f"Bearer {settings.openai_api_key}"
+    api_key = settings.jarvis_image_api_key or settings.openai_api_key
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     headers.update(_image_http_headers())
     return headers
 
@@ -248,6 +321,33 @@ def _should_reuse_openai_provider_for_images() -> bool:
     parsed = urlparse(settings.openai_base_url)
     host = (parsed.netloc or "").lower()
     return host in {"api.openai.com", "platform.openai.com"}
+
+
+def _normalize_image_size(size: str | None) -> str | None:
+    raw = str(size or "").strip().lower()
+    if not raw:
+        return None
+    if raw == "auto":
+        return "auto"
+    parsed = _parse_image_size(raw)
+    if parsed is None:
+        return None
+    width, height = parsed
+    if width == height:
+        return "1024x1024"
+    return "1024x1536" if height > width else "1536x1024"
+
+
+def _parse_image_size(size: str) -> tuple[int, int] | None:
+    try:
+        left, right = size.lower().split("x", 1)
+        width = int(left)
+        height = int(right)
+    except Exception:
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
 
 
 def _build_ssl_context() -> ssl.SSLContext:

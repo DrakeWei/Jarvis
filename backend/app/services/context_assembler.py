@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from app.core.config import settings
+from app.schemas.assets import SessionAssetSummary
 from app.services import asset_service, session_service
 from app.services import memory_retriever
 from app.services.context_budget import (
@@ -313,24 +314,99 @@ def _attachment_summary_text(asset_id: str, query_text: str) -> list[dict[str, s
             },
         ]
 
+    metadata_bits = _asset_metadata_bits(asset)
     chunks = asset_service.search_asset_chunks(asset.id, query_text, limit=3)
     if not chunks:
-        return [{"type": "text", "text": f"Attached file: {asset.filename} ({asset.kind}). No extracted text is available yet."}]
+        summary = f"Attached file: {asset.filename} ({asset.kind})."
+        if metadata_bits:
+            summary += f" Metadata: {', '.join(metadata_bits)}."
+        summary += " No extracted text is available yet."
+        return [{"type": "text", "text": summary}]
 
     lines = [f"Attached file: {asset.filename} ({asset.kind}). Relevant extracted excerpts:"]
+    if metadata_bits:
+        lines.insert(1, f"Metadata: {', '.join(metadata_bits)}")
     for chunk in chunks:
-        location_bits: list[str] = []
-        if chunk.page_number is not None:
-            location_bits.append(f"page {chunk.page_number}")
-        if chunk.sheet_name:
-            location_bits.append(f"sheet {chunk.sheet_name}")
-        if chunk.slide_number is not None:
-            location_bits.append(f"slide {chunk.slide_number}")
-        if chunk.section_path:
-            location_bits.append(chunk.section_path)
+        location_bits = _chunk_location_bits(chunk)
         location = f" ({', '.join(location_bits)})" if location_bits else ""
         lines.append(f"- {chunk.content[:500]}{location}")
-    return [{"type": "text", "text": "\n".join(lines)}]
+    parts: list[dict[str, str]] = [{"type": "text", "text": "\n".join(lines)}]
+    if asset.kind == "video":
+        for keyframe_path in _video_keyframe_paths(asset)[:2]:
+            parts.append(
+                {
+                    "type": "input_image",
+                    "asset_id": asset.id,
+                    "filename": asset.filename,
+                    "mime_type": "image/png",
+                    "path": keyframe_path,
+                }
+            )
+    return parts
+
+
+def _asset_metadata_bits(asset: SessionAssetSummary) -> list[str]:
+    raw_metadata = getattr(asset, "metadata_json", {}) or {}
+    metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+    bits: list[str] = []
+    duration_ms = metadata.get("duration_ms")
+    if isinstance(duration_ms, int) and duration_ms >= 0:
+        bits.append(f"duration_ms {duration_ms}")
+    sample_rate = metadata.get("sample_rate")
+    if isinstance(sample_rate, int) and sample_rate > 0:
+        bits.append(f"sample_rate {sample_rate}")
+    channels = metadata.get("channels")
+    if isinstance(channels, int) and channels > 0:
+        bits.append(f"channels {channels}")
+    container = metadata.get("container")
+    if isinstance(container, str) and container.strip():
+        bits.append(f"container {container}")
+    transcript_status = metadata.get("transcript_status")
+    if isinstance(transcript_status, str) and transcript_status.strip():
+        bits.append(f"transcript_status {transcript_status}")
+    keyframe_status = metadata.get("keyframe_status")
+    if isinstance(keyframe_status, str) and keyframe_status.strip():
+        bits.append(f"keyframe_status {keyframe_status}")
+    return bits
+
+
+def _chunk_location_bits(chunk) -> list[str]:
+    location_bits: list[str] = []
+    page_number = getattr(chunk, "page_number", None)
+    sheet_name = getattr(chunk, "sheet_name", None)
+    slide_number = getattr(chunk, "slide_number", None)
+    section_path = getattr(chunk, "section_path", None)
+    start_ms = getattr(chunk, "start_ms", None)
+    end_ms = getattr(chunk, "end_ms", None)
+    speaker = getattr(chunk, "speaker", None)
+    frame_index = getattr(chunk, "frame_index", None)
+    frame_timestamp_ms = getattr(chunk, "frame_timestamp_ms", None)
+    if page_number is not None:
+        location_bits.append(f"page {page_number}")
+    if sheet_name:
+        location_bits.append(f"sheet {sheet_name}")
+    if slide_number is not None:
+        location_bits.append(f"slide {slide_number}")
+    if section_path:
+        location_bits.append(str(section_path))
+    if start_ms is not None or end_ms is not None:
+        location_bits.append(f"time {start_ms or 0}-{end_ms or '?'}ms")
+    if speaker:
+        location_bits.append(f"speaker {speaker}")
+    if frame_index is not None:
+        location_bits.append(f"frame {frame_index}")
+    if frame_timestamp_ms is not None:
+        location_bits.append(f"frame_ts {frame_timestamp_ms}ms")
+    return location_bits
+
+
+def _video_keyframe_paths(asset: SessionAssetSummary) -> list[str]:
+    raw_metadata = getattr(asset, "metadata_json", {}) or {}
+    metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+    raw_paths = metadata.get("keyframe_paths")
+    if not isinstance(raw_paths, list):
+        return []
+    return [str(path).strip() for path in raw_paths if str(path).strip()]
 
 
 def _expand_asset_references(messages: list[dict[str, Any]], query_text: str) -> list[dict[str, Any]]:
