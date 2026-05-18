@@ -571,6 +571,9 @@ class Phase1LeaseHeartbeatAsyncTests(IsolatedAsyncioTestCase):
         ), patch(
             "app.runtime.manager.turn_service.get_turn",
             return_value=SimpleNamespace(status="running"),
+        ), patch(
+            "app.runtime.manager.turn_service.is_cancel_requested",
+            return_value=False,
         ), patch.object(
             runtime,
             "publish",

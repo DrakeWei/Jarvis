@@ -3,7 +3,7 @@ import json
 from sqlalchemy import select, update
 
 from app.db.session import create_session
-from app.models import ApprovalRecord
+from app.models import ApprovalRecord, SessionRecord
 from app.schemas.approvals import ApprovalSummary
 import app.services.checkpoint_service as checkpoint_service
 
@@ -22,8 +22,11 @@ def _runtime_feedback(context: dict[str, object] | None) -> str | None:
     return RUNTIME_PREFIX + json.dumps(context, ensure_ascii=True)
 
 
-def list_approvals(session_id: str | None = None) -> list[ApprovalSummary]:
+def list_approvals(session_id: str | None = None, *, branch_context_id: str | None = None) -> list[ApprovalSummary]:
     with create_session() as db:
+        if session_id and branch_context_id is None:
+            session_row = db.get(SessionRecord, session_id)
+            branch_context_id = session_row.branch_context_id if session_row else None
         stmt = (
             select(
                 ApprovalRecord.id,
@@ -38,6 +41,8 @@ def list_approvals(session_id: str | None = None) -> list[ApprovalSummary]:
         )
         if session_id:
             stmt = stmt.where(ApprovalRecord.session_id == session_id)
+        if branch_context_id is not None:
+            stmt = stmt.where(ApprovalRecord.branch_context_id == branch_context_id)
         rows = db.execute(stmt).all()
         return [
             ApprovalSummary(
@@ -63,8 +68,10 @@ def create_approval(
     context: dict[str, object] | None = None,
 ) -> ApprovalSummary:
     with create_session() as db:
+        session_row = db.get(SessionRecord, session_id)
         row = ApprovalRecord(
             session_id=session_id,
+            branch_context_id=session_row.branch_context_id if session_row else None,
             turn_id=turn_id,
             checkpoint_id=checkpoint_id,
             approval_type=approval_type,

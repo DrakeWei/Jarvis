@@ -851,6 +851,110 @@ textarea:focus-visible {
   box-shadow: none;
 }
 
+.composer-branch-shell {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+}
+
+.composer-branch-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--text-soft);
+}
+
+.branch-trigger-icon,
+.branch-trigger-caret,
+.branch-item-check {
+  color: var(--text-muted);
+}
+
+.branch-picker-card {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 15;
+  width: min(420px, calc(100vw - 56px));
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: var(--shadow);
+}
+
+.branch-picker-search input,
+.branch-picker-create input {
+  width: 100%;
+  min-height: 38px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--text);
+}
+
+.branch-picker-section,
+.branch-picker-create {
+  display: grid;
+  gap: 10px;
+}
+
+.branch-picker-list {
+  display: grid;
+  gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.branch-picker-item,
+.branch-picker-create-trigger {
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.3);
+  color: var(--text);
+}
+
+.branch-picker-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+}
+
+.branch-item-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.active-branch-item {
+  border-color: var(--line-strong);
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.branch-picker-create-trigger {
+  padding: 12px;
+  color: var(--text-soft);
+}
+
+.branch-picker-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
 .composer-frame {
   border: 1px solid var(--line);
   border-radius: 10px;

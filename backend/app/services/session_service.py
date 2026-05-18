@@ -1,5 +1,6 @@
 import json
 from datetime import timedelta
+from uuid import uuid4
 
 from sqlalchemy import delete, func, select
 
@@ -30,6 +31,13 @@ def _to_session_summary(row: SessionRecord, updated_at: str) -> SessionSummary:
         created_at=row.created_at.isoformat(),
         updated_at=updated_at,
     )
+
+
+def _ensure_branch_context_id(row: SessionRecord) -> bool:
+    if row.branch_context_id:
+        return False
+    row.branch_context_id = str(uuid4())
+    return True
 
 
 def _apply_git_state(row: SessionRecord) -> bool:
@@ -71,6 +79,8 @@ def list_sessions() -> list[SessionSummary]:
         ).all()
         changed = False
         for row, _updated_at in rows:
+            if _ensure_branch_context_id(row):
+                changed = True
             if _apply_git_state(row):
                 changed = True
         if changed:
@@ -89,10 +99,40 @@ def get_session(session_id: str) -> SessionRecord | None:
         row = db.get(SessionRecord, session_id)
         if row is None or row.hidden:
             return None
-        if _apply_git_state(row):
+        if _ensure_branch_context_id(row) or _apply_git_state(row):
             db.commit()
             db.refresh(row)
         return row
+
+
+def get_branch_context_id(session_id: str) -> str | None:
+    session = get_session(session_id)
+    return session.branch_context_id if session else None
+
+
+def rotate_branch_context(
+    session_id: str,
+    *,
+    repo_root: str | None,
+    lead_branch: str | None,
+    head_revision: str | None,
+    working_tree_status: str | None,
+    detached_head: bool,
+) -> SessionSummary | None:
+    with create_session() as db:
+        row = db.get(SessionRecord, session_id)
+        if row is None or row.hidden:
+            return None
+        row.repo_root = repo_root
+        row.git_enabled = bool(repo_root)
+        row.lead_branch = lead_branch
+        row.head_revision = head_revision
+        row.working_tree_status = working_tree_status
+        row.detached_head = detached_head
+        row.branch_context_id = str(uuid4())
+        db.commit()
+        db.refresh(row)
+        return _to_session_summary(row, row.created_at.isoformat())
 
 
 def update_session_title(session_id: str, title: str) -> SessionSummary | None:
@@ -100,6 +140,7 @@ def update_session_title(session_id: str, title: str) -> SessionSummary | None:
         row = db.get(SessionRecord, session_id)
         if row is None or row.hidden:
             return None
+        _ensure_branch_context_id(row)
         row.title = title
         db.commit()
         db.refresh(row)
@@ -123,6 +164,7 @@ def create_session_record(payload: SessionCreate) -> SessionSummary:
             head_revision=git_state.head_revision,
             working_tree_status=git_state.working_tree_status,
             detached_head=git_state.detached_head,
+            branch_context_id=str(uuid4()),
             status="idle",
         )
         db.add(row)
@@ -144,7 +186,16 @@ def soft_delete_session(session_id: str) -> bool:
 def create_message_record(session_id: str, payload: MessageCreate) -> MessageRecord:
     with create_session() as db:
         try:
-            row = MessageRecord(session_id=session_id, role=payload.role, content=payload.content)
+            session_row = db.get(SessionRecord, session_id)
+            if session_row is not None:
+                _ensure_branch_context_id(session_row)
+            branch_context_id = session_row.branch_context_id if session_row else None
+            row = MessageRecord(
+                session_id=session_id,
+                branch_context_id=branch_context_id,
+                role=payload.role,
+                content=payload.content,
+            )
             db.add(row)
             db.flush()
             if payload.asset_ids:
@@ -157,13 +208,19 @@ def create_message_record(session_id: str, payload: MessageCreate) -> MessageRec
             raise
 
 
-def list_message_records(session_id: str, limit: int | None = None) -> list[dict[str, object]]:
+def list_message_records(session_id: str, limit: int | None = None, *, branch_context_id: str | None = None) -> list[dict[str, object]]:
     with create_session() as db:
-        rows = db.scalars(
+        if branch_context_id is None:
+            session_row = db.get(SessionRecord, session_id)
+            branch_context_id = session_row.branch_context_id if session_row else None
+        stmt = (
             select(MessageRecord)
             .where(MessageRecord.session_id == session_id)
             .order_by(MessageRecord.created_at.asc(), MessageRecord.id.asc())
-        ).all()
+        )
+        if branch_context_id is not None:
+            stmt = stmt.where(MessageRecord.branch_context_id == branch_context_id)
+        rows = db.scalars(stmt).all()
         if limit is not None and limit > 0:
             rows = rows[-limit:]
         message_ids = [row.id for row in rows]

@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
@@ -33,12 +35,14 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, futu
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _migrate_session_columns()
+    _migrate_message_columns()
     _migrate_session_asset_columns()
     _migrate_message_asset_columns()
     _migrate_asset_chunk_columns()
     _migrate_turn_columns()
     _migrate_agent_columns()
     _migrate_approval_columns()
+    _migrate_session_memory_columns()
     _migrate_tool_execution_columns()
     _migrate_background_job_columns()
     _migrate_event_log_columns()
@@ -78,6 +82,8 @@ def _migrate_session_columns() -> None:
         statements.append("ALTER TABLE sessions ADD COLUMN working_tree_status VARCHAR(20)")
     if "detached_head" not in columns:
         statements.append("ALTER TABLE sessions ADD COLUMN detached_head BOOLEAN NOT NULL DEFAULT 0")
+    if "branch_context_id" not in columns:
+        statements.append("ALTER TABLE sessions ADD COLUMN branch_context_id VARCHAR(36)")
     if "status" not in columns:
         statements.append("ALTER TABLE sessions ADD COLUMN status VARCHAR(40) NOT NULL DEFAULT 'idle'")
 
@@ -110,6 +116,12 @@ def _migrate_session_columns() -> None:
                 "label": default_label,
             },
         )
+        session_ids = [row[0] for row in connection.execute(text("SELECT id FROM sessions WHERE branch_context_id IS NULL")).all()]
+        for session_id in session_ids:
+            connection.execute(
+                text("UPDATE sessions SET branch_context_id = :branch_context_id WHERE id = :session_id"),
+                {"branch_context_id": str(uuid4()), "session_id": session_id},
+            )
 
 
 def _migrate_tool_execution_columns() -> None:
@@ -200,14 +212,18 @@ def _migrate_event_log_columns() -> None:
 def _ensure_query_indexes() -> None:
     statements = [
         "CREATE INDEX IF NOT EXISTS idx_turns_session_status_started ON turns(session_id, status, started_at)",
+        "CREATE INDEX IF NOT EXISTS idx_turns_session_branch_status_started ON turns(session_id, branch_context_id, status, started_at)",
         "CREATE INDEX IF NOT EXISTS idx_background_jobs_type_status_next_attempt ON background_jobs(job_type, status, next_attempt_at)",
         "CREATE INDEX IF NOT EXISTS idx_background_jobs_status_created ON background_jobs(status, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_status_created ON ingestion_jobs(status, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_event_log_session_ephemeral_id ON event_log(session_id, ephemeral, id)",
         "CREATE INDEX IF NOT EXISTS idx_event_log_ephemeral_created ON event_log(ephemeral, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_approvals_session_status_created ON approvals(session_id, status, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_approvals_session_branch_status_created ON approvals(session_id, branch_context_id, status, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_tool_executions_session_created ON tool_executions(session_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_session_memory_session_kind_status_updated ON session_memory(session_id, kind, status, updated_at)",
+        "CREATE INDEX IF NOT EXISTS idx_session_memory_session_branch_kind_status_updated ON session_memory(session_id, branch_context_id, kind, status, updated_at)",
+        "CREATE INDEX IF NOT EXISTS idx_messages_session_branch_created ON messages(session_id, branch_context_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_agent_messages_agent_created ON agent_messages(agent_id, created_at)",
     ]
     with engine.begin() as connection:
@@ -251,6 +267,36 @@ def _migrate_session_asset_columns() -> None:
                         updated_at = COALESCE(updated_at, created_at),
                         sha256 = COALESCE(sha256, ''),
                         size_bytes = COALESCE(size_bytes, 0)
+                    """
+                )
+            )
+
+
+def _migrate_message_columns() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("messages")}
+    except Exception:
+        return
+
+    statements: list[str] = []
+    if "branch_context_id" not in columns:
+        statements.append("ALTER TABLE messages ADD COLUMN branch_context_id VARCHAR(36)")
+
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+            connection.execute(
+                text(
+                    """
+                    UPDATE messages
+                    SET branch_context_id = (
+                        SELECT sessions.branch_context_id
+                        FROM sessions
+                        WHERE sessions.id = messages.session_id
+                    )
+                    WHERE branch_context_id IS NULL
                     """
                 )
             )
@@ -324,6 +370,8 @@ def _migrate_turn_columns() -> None:
         statements.append("ALTER TABLE turns ADD COLUMN workspace_path TEXT")
     if "workspace_fingerprint" not in columns:
         statements.append("ALTER TABLE turns ADD COLUMN workspace_fingerprint VARCHAR(40)")
+    if "branch_context_id" not in columns:
+        statements.append("ALTER TABLE turns ADD COLUMN branch_context_id VARCHAR(36)")
     if "execution_mode" not in columns:
         statements.append("ALTER TABLE turns ADD COLUMN execution_mode VARCHAR(20) NOT NULL DEFAULT 'normal'")
     if "updated_at" not in columns:
@@ -345,6 +393,19 @@ def _migrate_turn_columns() -> None:
             connection.execute(text("UPDATE turns SET cancel_requested = COALESCE(cancel_requested, 0)"))
             connection.execute(text("UPDATE turns SET status = COALESCE(status, 'queued')"))
             connection.execute(text("UPDATE turns SET execution_mode = COALESCE(execution_mode, 'normal')"))
+            connection.execute(
+                text(
+                    """
+                    UPDATE turns
+                    SET branch_context_id = (
+                        SELECT sessions.branch_context_id
+                        FROM sessions
+                        WHERE sessions.id = turns.session_id
+                    )
+                    WHERE branch_context_id IS NULL
+                    """
+                )
+            )
 
 
 def _migrate_agent_columns() -> None:
@@ -393,6 +454,8 @@ def _migrate_approval_columns() -> None:
         return
 
     statements: list[str] = []
+    if "branch_context_id" not in columns:
+        statements.append("ALTER TABLE approvals ADD COLUMN branch_context_id VARCHAR(36)")
     if "turn_id" not in columns:
         statements.append("ALTER TABLE approvals ADD COLUMN turn_id INTEGER")
     if "checkpoint_id" not in columns:
@@ -402,3 +465,46 @@ def _migrate_approval_columns() -> None:
         with engine.begin() as connection:
             for statement in statements:
                 connection.execute(text(statement))
+            connection.execute(
+                text(
+                    """
+                    UPDATE approvals
+                    SET branch_context_id = (
+                        SELECT sessions.branch_context_id
+                        FROM sessions
+                        WHERE sessions.id = approvals.session_id
+                    )
+                    WHERE branch_context_id IS NULL
+                    """
+                )
+            )
+
+
+def _migrate_session_memory_columns() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("session_memory")}
+    except Exception:
+        return
+
+    statements: list[str] = []
+    if "branch_context_id" not in columns:
+        statements.append("ALTER TABLE session_memory ADD COLUMN branch_context_id VARCHAR(36)")
+
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+            connection.execute(
+                text(
+                    """
+                    UPDATE session_memory
+                    SET branch_context_id = (
+                        SELECT sessions.branch_context_id
+                        FROM sessions
+                        WHERE sessions.id = session_memory.session_id
+                    )
+                    WHERE branch_context_id IS NULL
+                    """
+                )
+            )

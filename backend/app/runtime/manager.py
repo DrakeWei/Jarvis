@@ -12,6 +12,7 @@ from app.providers import ProviderConfigError, ProviderRequestError, TextBlock, 
 from app.schemas.background_jobs import BackgroundJobSummary
 from app.schemas.assets import SessionAssetSummary
 from app.schemas.events import MessageCreate, SessionCreate, SessionSummary, TimelineEvent
+from app.schemas.git import GitBranchListSummary, GitBranchSwitchResult
 from app.schemas.leases import ExecutionLeaseSummary
 from app.schemas.observability import RuntimeObservabilitySummary
 from app.schemas.session_state import SessionStateSummary
@@ -24,6 +25,7 @@ import app.services.conversation_search_service as conversation_search_service
 import app.services.checkpoint_service as checkpoint_service
 import app.services.asset_ingestion_service as asset_ingestion_service
 import app.services.image_generation_service as image_generation_service
+import app.services.git_service as git_service
 import app.services.memory_service as memory_service
 import app.services.memory_search_service as memory_search_service
 import app.services.turn_service as turn_service
@@ -187,6 +189,124 @@ class RuntimeManager:
             )
         return updated
 
+    def list_session_branches(self, session_id: str) -> GitBranchListSummary:
+        session = session_service.get_session(session_id)
+        if session is None:
+            raise ValueError("Unknown session")
+        if not session.git_enabled:
+            raise ValueError("This session workspace is not inside a Git repository.")
+        branch_state = git_service.list_local_branches(session.canonical_workspace_path)
+        return GitBranchListSummary(current_branch=branch_state.current_branch, branches=branch_state.branches)
+
+    def _validate_session_branch_switch(self, session_id: str) -> tuple[SessionSummary | None, str | None]:
+        session_row = session_service.get_session(session_id)
+        if session_row is None:
+            raise ValueError("Unknown session")
+        session_summary = SessionSummary(
+            session_id=session_row.id,
+            title=session_row.title,
+            workspace_mode=session_row.workspace_mode,
+            canonical_workspace_path=session_row.canonical_workspace_path,
+            workspace_label=session_row.workspace_label,
+            workspace_fingerprint=session_row.workspace_fingerprint,
+            repo_root=session_row.repo_root,
+            git_enabled=bool(session_row.git_enabled),
+            lead_branch=session_row.lead_branch,
+            head_revision=session_row.head_revision,
+            working_tree_status=session_row.working_tree_status,
+            detached_head=bool(session_row.detached_head),
+            status=session_row.status,
+            created_at=session_row.created_at.isoformat(),
+            updated_at=session_row.created_at.isoformat(),
+        )
+        if not session_summary.git_enabled:
+            raise ValueError("This session workspace is not inside a Git repository.")
+        if git_service.has_blocking_branch_switch_changes(session_summary.canonical_workspace_path):
+            raise ValueError("Branch switching is blocked because the working tree has tracked or staged changes.")
+        branch_context_id = self._session_branch_context_id(session_id)
+        active_turn = turn_service.latest_cancellable_turn(session_id, branch_context_id=branch_context_id)
+        if active_turn is not None:
+            raise ValueError("Branch switching is blocked because the session has an active or queued turn.")
+        latest_interrupted = turn_service.latest_turn_by_status(
+            session_id,
+            ("interrupted",),
+            branch_context_id=branch_context_id,
+        )
+        if latest_interrupted and checkpoint_service.latest_resumable_checkpoint_context(latest_interrupted.id):
+            raise ValueError("Branch switching is blocked because the session has a resumable interrupted turn.")
+        pending_approvals = [item for item in approval_service.list_approvals(session_id, branch_context_id=branch_context_id) if item.status == "pending"]
+        if pending_approvals:
+            raise ValueError("Branch switching is blocked because the session has pending approvals.")
+        return session_summary, branch_context_id
+
+    async def switch_session_branch(self, session_id: str, branch_name: str) -> GitBranchSwitchResult:
+        session_summary, _branch_context_id = self._validate_session_branch_switch(session_id)
+        if session_summary is None:
+            raise ValueError("Unknown session")
+        target = branch_name.strip()
+        if not target:
+            raise ValueError("Target branch is required.")
+        if target == (session_summary.lead_branch or ""):
+            raise ValueError("The selected branch is already active.")
+        state = git_service.switch_branch(session_summary.canonical_workspace_path, target)
+        updated = session_service.rotate_branch_context(
+            session_id,
+            repo_root=state.repo_root,
+            lead_branch=state.lead_branch,
+            head_revision=state.head_revision,
+            working_tree_status=state.working_tree_status,
+            detached_head=state.detached_head,
+        )
+        if updated is None:
+            raise ValueError("Unknown session")
+        await self.publish(
+            TimelineEvent(
+                session_id=session_id,
+                type="session.branch_switched",
+                content=f"Switched branch from {session_summary.lead_branch or '(unknown)'} to {updated.lead_branch or '(unknown)'}.",
+            )
+        )
+        return GitBranchSwitchResult(
+            session=updated,
+            source_branch=session_summary.lead_branch,
+            target_branch=updated.lead_branch,
+            created_new_branch=False,
+        )
+
+    async def create_and_switch_session_branch(self, session_id: str, branch_name: str) -> GitBranchSwitchResult:
+        session_summary, _branch_context_id = self._validate_session_branch_switch(session_id)
+        if session_summary is None:
+            raise ValueError("Unknown session")
+        target = branch_name.strip()
+        if not target:
+            raise ValueError("Branch name is required.")
+        if target == (session_summary.lead_branch or ""):
+            raise ValueError("The requested branch is already active.")
+        state = git_service.create_and_switch_branch(session_summary.canonical_workspace_path, target)
+        updated = session_service.rotate_branch_context(
+            session_id,
+            repo_root=state.repo_root,
+            lead_branch=state.lead_branch,
+            head_revision=state.head_revision,
+            working_tree_status=state.working_tree_status,
+            detached_head=state.detached_head,
+        )
+        if updated is None:
+            raise ValueError("Unknown session")
+        await self.publish(
+            TimelineEvent(
+                session_id=session_id,
+                type="session.branch_switched",
+                content=f"Created and switched branch from {session_summary.lead_branch or '(unknown)'} to {updated.lead_branch or '(unknown)'}.",
+            )
+        )
+        return GitBranchSwitchResult(
+            session=updated,
+            source_branch=session_summary.lead_branch,
+            target_branch=updated.lead_branch,
+            created_new_branch=True,
+        )
+
     async def soft_delete_session(self, session_id: str) -> bool:
         deleted = session_service.soft_delete_session(session_id)
         if deleted:
@@ -315,7 +435,8 @@ class RuntimeManager:
         return asset_service.get_asset(asset_id, session_id=session_id)
 
     def list_approvals(self, session_id: str | None = None):
-        return approval_service.list_approvals(session_id)
+        branch_context_id = self._session_branch_context_id(session_id) if session_id else None
+        return approval_service.list_approvals(session_id, branch_context_id=branch_context_id)
 
     def list_teammates(self, session_id: str | None = None):
         return teammate_service.list_teammates(session_id)
@@ -327,7 +448,8 @@ class RuntimeManager:
         return subagent_service.list_subagents(session_id)
 
     def list_turns(self, session_id: str | None = None):
-        return turn_service.list_turns(session_id)
+        branch_context_id = self._session_branch_context_id(session_id) if session_id else None
+        return turn_service.list_turns(session_id, branch_context_id=branch_context_id)
 
     def get_turn(self, turn_id: int):
         return turn_service.get_turn(turn_id)
@@ -423,11 +545,13 @@ class RuntimeManager:
             return False
         self._ensure_dispatcher_started()
         workspace = self._session_workspace(session_id)
+        branch_context_id = self._session_branch_context_id(session_id)
         turn = turn_service.create_turn(
             session_id=session_id,
             user_message_id=None,
             workspace_path=workspace.as_posix(),
             workspace_fingerprint=workspace_utils.workspace_fingerprint(workspace),
+            branch_context_id=branch_context_id,
             execution_mode="normal",
         )
         background_job_service.create_job(
@@ -436,6 +560,7 @@ class RuntimeManager:
             payload={
                 "session_id": session_id,
                 "turn_id": turn.id,
+                "branch_context_id": branch_context_id,
                 "content": original_request,
                 "execution_mode": "normal",
                 "plan_context": {
@@ -891,6 +1016,7 @@ class RuntimeManager:
                 return
             session_id = str(payload.get("session_id") or job.session_id or "").strip()
             turn_id = payload.get("turn_id")
+            branch_context_id = str(payload.get("branch_context_id") or "").strip() or None
             content = str(payload.get("content") or "")
             execution_mode = str(payload.get("execution_mode") or "normal").strip().lower() or "normal"
             plan_context = payload.get("plan_context")
@@ -909,7 +1035,7 @@ class RuntimeManager:
             if current_turn.status == "failed":
                 background_job_service.update_job_failed(job_id, current_turn.error_summary or "Turn failed.")
                 return
-            if turn_service.has_newer_turn(session_id, turn_id):
+            if turn_service.has_newer_turn(session_id, turn_id, branch_context_id=branch_context_id):
                 turn_service.update_turn_status(
                     turn_id,
                     "cancelled",
@@ -993,7 +1119,10 @@ class RuntimeManager:
             lease_service.release("background_job", str(job_id), self.instance_id)
 
     async def cancel_session_turn(self, session_id: str) -> bool:
-        latest_turn = turn_service.latest_cancellable_turn(session_id)
+        latest_turn = turn_service.latest_cancellable_turn(
+            session_id,
+            branch_context_id=self._session_branch_context_id(session_id),
+        )
         if latest_turn is None:
             return False
         turn_service.request_turn_cancel(latest_turn.id)
@@ -1083,18 +1212,23 @@ class RuntimeManager:
             )
         )
         if payload.role == "user":
-            previous_turn = turn_service.latest_cancellable_turn(session_id)
+            previous_turn = turn_service.latest_cancellable_turn(
+                session_id,
+                branch_context_id=self._session_branch_context_id(session_id),
+            )
             if previous_turn is not None:
                 turn_service.request_turn_cancel(previous_turn.id)
                 existing = self.session_turns.get(session_id)
                 if existing and existing.turn_id == previous_turn.id:
                     existing.cancel_event.set()
             workspace = self._session_workspace(session_id)
+            branch_context_id = self._session_branch_context_id(session_id)
             turn = turn_service.create_turn(
                 session_id=session_id,
                 user_message_id=created_message.id if created_message else None,
                 workspace_path=workspace.as_posix(),
                 workspace_fingerprint=workspace_utils.workspace_fingerprint(workspace),
+                branch_context_id=branch_context_id,
                 execution_mode=payload.execution_mode,
             )
             if payload.content.strip():
@@ -1109,6 +1243,7 @@ class RuntimeManager:
                 payload={
                     "session_id": session_id,
                     "turn_id": turn.id,
+                    "branch_context_id": branch_context_id,
                     "content": payload.content,
                     "execution_mode": payload.execution_mode,
                 },
@@ -1435,6 +1570,9 @@ class RuntimeManager:
         if session is None:
             return settings.project_root
         return workspace_utils.normalize_workspace_path(session.canonical_workspace_path)
+
+    def _session_branch_context_id(self, session_id: str) -> str | None:
+        return session_service.get_branch_context_id(session_id)
 
     def _session_workspace_mode(self, session_id: str) -> str:
         session = session_service.get_session(session_id)
