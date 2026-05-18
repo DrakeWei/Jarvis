@@ -102,11 +102,12 @@ type SessionDialogState =
 type TimelineCard = {
   tone: "user" | "assistant" | "result" | "status";
   kind: "message" | "result" | "status";
-  layout?: "card" | "inline";
-  label: string;
-  title: string;
+  layout?: "card" | "trace";
+  label?: string;
+  title?: string;
   content: string;
   parts?: TimelinePart[];
+  working?: boolean;
 };
 
 type TimelineRenderItem =
@@ -121,6 +122,13 @@ type TimelineRenderItem =
       key: string;
       events: TimelineEvent[];
     };
+
+type UserQuestionNavigatorItem = {
+  key: string;
+  content: string;
+  preview: string;
+  createdAt: string;
+};
 
 const sessionStampFormatter = new Intl.DateTimeFormat(DISPLAY_LOCALE, {
   timeZone: DISPLAY_TIME_ZONE,
@@ -322,13 +330,29 @@ function renderTimelineParts(parts: TimelinePart[], fallbackContent: string) {
   );
 }
 
+function renderAssistantHeader(working = false) {
+  return (
+    <div className="assistant-message-head">
+      <span className="assistant-message-brand">
+        <img src={APP_LOGO_SRC} alt="" aria-hidden="true" className="assistant-message-logo" />
+        <span>{working ? "Jarvis · Working" : "Jarvis"}</span>
+      </span>
+      {working ? (
+        <span className="assistant-working-dots" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 function buildTimelineCard(event: TimelineEvent): TimelineCard {
   if (event.type === "message.user" || event.type === "message.user.local") {
     return {
       tone: "user",
       kind: "message",
-      label: "Instruction",
-      title: "You",
       content: event.content,
       parts: normalizeTimelineParts(event),
     };
@@ -338,8 +362,6 @@ function buildTimelineCard(event: TimelineEvent): TimelineCard {
     return {
       tone: "assistant",
       kind: "message",
-      label: "Response",
-      title: "Jarvis",
       content: event.content,
       parts: normalizeTimelineParts(event),
     };
@@ -369,9 +391,8 @@ function buildTimelineCard(event: TimelineEvent): TimelineCard {
     return {
       tone: "status",
       kind: "status",
-      layout: "inline",
+      layout: "trace",
       label: "Tool Activity",
-      title: "Execution summary",
       content: summarizeExecution(event.content),
     };
   }
@@ -380,9 +401,8 @@ function buildTimelineCard(event: TimelineEvent): TimelineCard {
     return {
       tone: "status",
       kind: "status",
-      layout: "inline",
+      layout: "trace",
       label: "Approval",
-      title: "Approval requested",
       content: event.content,
     };
   }
@@ -391,9 +411,8 @@ function buildTimelineCard(event: TimelineEvent): TimelineCard {
     return {
       tone: "status",
       kind: "status",
-      layout: "inline",
+      layout: "trace",
       label: "Approval",
-      title: "Approval resolved",
       content: event.content,
     };
   }
@@ -402,8 +421,8 @@ function buildTimelineCard(event: TimelineEvent): TimelineCard {
     return {
       tone: "status",
       kind: "status",
+      layout: "trace",
       label: "Runtime",
-      title: "Lead runtime",
       content: event.content,
     };
   }
@@ -412,8 +431,8 @@ function buildTimelineCard(event: TimelineEvent): TimelineCard {
     return {
       tone: "status",
       kind: "status",
+      layout: "trace",
       label: "Scout",
-      title: "Teammate activity",
       content: event.content,
     };
   }
@@ -422,8 +441,8 @@ function buildTimelineCard(event: TimelineEvent): TimelineCard {
     return {
       tone: "status",
       kind: "status",
+      layout: "trace",
       label: "Explorer",
-      title: "Subagent running",
       content: event.content,
     };
   }
@@ -432,8 +451,8 @@ function buildTimelineCard(event: TimelineEvent): TimelineCard {
     return {
       tone: "status",
       kind: "status",
+      layout: "trace",
       label: "Runtime",
-      title: "Turn stopped",
       content: event.content,
     };
   }
@@ -441,8 +460,8 @@ function buildTimelineCard(event: TimelineEvent): TimelineCard {
   return {
     tone: "status",
     kind: "status",
+    layout: "trace",
     label: event.type.replace(".", " / "),
-    title: "System event",
     content: event.content,
   };
 }
@@ -549,12 +568,14 @@ export function App() {
   const [activeWorkbenchTab, setActiveWorkbenchTab] = useState<WorkbenchTabId>("approvals");
   const [autoScrollTimeline, setAutoScrollTimeline] = useState(true);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [activeQuestionKey, setActiveQuestionKey] = useState<string | null>(null);
   const [createSessionError, setCreateSessionError] = useState("");
   const [assetUploadError, setAssetUploadError] = useState("");
   const [isUploadingAssets, setIsUploadingAssets] = useState(false);
   const [sessionContextMenu, setSessionContextMenu] = useState<SessionContextMenuState>(null);
   const [sessionDialog, setSessionDialog] = useState<SessionDialogState>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
+  const questionAnchorRefs = useRef<Record<string, HTMLElement | null>>({});
   const composerFileInputRef = useRef<HTMLInputElement | null>(null);
   const sessionContextMenuRef = useRef<HTMLDivElement | null>(null);
   const branchPickerRef = useRef<HTMLDivElement | null>(null);
@@ -1411,6 +1432,11 @@ export function App() {
     setShowScrollToBottom(false);
   }, [events, streamingAssistant, autoScrollTimeline]);
 
+  useEffect(() => {
+    questionAnchorRefs.current = {};
+    setActiveQuestionKey(null);
+  }, [activeSessionId]);
+
   function onTimelineScroll() {
     if (!timelineRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = timelineRef.current;
@@ -1424,6 +1450,15 @@ export function App() {
     timelineRef.current.scrollTop = timelineRef.current.scrollHeight;
     setAutoScrollTimeline(true);
     setShowScrollToBottom(false);
+  }
+
+  function scrollToQuestion(key: string) {
+    const anchor = questionAnchorRefs.current[key];
+    if (!anchor) return;
+    setAutoScrollTimeline(false);
+    setShowScrollToBottom(true);
+    setActiveQuestionKey(key);
+    anchor.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
   const activeSession = sessions.find((session) => session.session_id === activeSessionId) ?? null;
@@ -1466,9 +1501,11 @@ export function App() {
           tone: "assistant" as const,
           kind: "message" as const,
           layout: "card" as const,
-          label: "Response",
-          title: "Jarvis",
           content: streamingAssistant.content,
+          working: true,
+          parts: streamingAssistant.content.trim()
+            ? [{ type: "text" as const, text: streamingAssistant.content }]
+            : [],
         },
       }
     : null;
@@ -1476,6 +1513,16 @@ export function App() {
     ...timelineCards,
     ...(liveAssistantCard ? [liveAssistantCard] : []),
   ]);
+  const questionNavigatorItems: UserQuestionNavigatorItem[] = timelineItems.flatMap((item) =>
+    item.kind === "single" && item.card.tone === "user"
+      ? [{
+          key: item.key,
+          content: item.card.content,
+          preview: previewText(item.card.content, 68),
+          createdAt: item.event.created_at,
+        }]
+      : [],
+  );
   const activeSessionStamp = activeSession ? formatSessionStamp(activeSession.updated_at ?? activeSession.created_at) : null;
   const activeSessionGitMeta = formatGitSessionMeta(activeSession ?? null);
   const filteredBranches = (branchPicker.branches?.branches ?? []).filter((branch) =>
@@ -1961,19 +2008,20 @@ export function App() {
             </div>
           ) : (
             <div className="conversation-frame">
+              <div className="conversation-body">
               <div className="timeline-stream" ref={timelineRef} onScroll={onTimelineScroll}>
                 {timelineItems.map((item) => {
                   if (item.kind === "tool-group") {
                     const startedAt = item.events[0]?.created_at ?? "";
                     return (
-                      <article key={item.key} className="timeline-collapsible-card status">
+                      <article key={item.key} className="timeline-trace-group">
                         <details>
                           <summary>
-                            <div className="timeline-inline-meta">
-                              <span>Tool Activity</span>
-                              <span>{item.events.length} events</span>
+                            <div className="timeline-trace-summary">
+                              <span className="timeline-trace-label">Tool Activity</span>
+                              <span className="timeline-trace-preview">{item.events.length} events</span>
                             </div>
-                            <span className="timeline-collapse-stamp">{formatTimelineStamp(startedAt)}</span>
+                            <span className="timeline-trace-stamp">{formatTimelineStamp(startedAt)}</span>
                           </summary>
                           <div className="grouped-activity-list">
                             {item.events.map((event, index) => (
@@ -1990,45 +2038,72 @@ export function App() {
 
                   const { event, card } = item;
                   const isSubagentSummary = event.type === "subagent.summary";
-                  return (
-                    <article
-                      key={item.key}
-                      className={
-                        card.layout === "inline"
-                          ? `timeline-inline-row ${card.tone}`
-                          : `timeline-card ${card.kind} ${card.tone}`
-                      }
-                    >
-                      {card.layout === "inline" ? (
-                        <>
-                          <div className="timeline-inline-meta">
-                            <span>{card.label}</span>
-                            <span>{formatTimelineStamp(event.created_at)}</span>
-                          </div>
-                          <p>{card.content}</p>
-                        </>
-                      ) : (
-                        <>
-                          <div className="timeline-meta">
-                            <span className="mini-pill">{card.label}</span>
-                            <span>{formatTimelineStamp(event.created_at)}</span>
-                          </div>
-                          <h3>{card.title}</h3>
-                          {isSubagentSummary ? (
-                            <details className="summary-collapsible">
-                              <summary>{previewText(card.content)}</summary>
-                              <div className="markdown-body">
-                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                  {card.content}
-                                </ReactMarkdown>
-                              </div>
-                            </details>
-                          ) : card.tone === "assistant" ? (
-                            renderTimelineParts(card.parts ?? [], card.content)
-                          ) : (
+                  const isTrace = card.layout === "trace";
+
+                  if (card.tone === "user") {
+                    return (
+                      <article
+                        key={item.key}
+                        className="timeline-user-message"
+                        ref={(node) => {
+                          if (node) {
+                            questionAnchorRefs.current[item.key] = node;
+                          } else {
+                            delete questionAnchorRefs.current[item.key];
+                          }
+                        }}
+                      >
+                        {renderTimelineParts(card.parts ?? [], card.content)}
+                      </article>
+                    );
+                  }
+
+                  if (card.tone === "assistant") {
+                    return (
+                      <article key={item.key} className={card.working ? "timeline-assistant-message is-working" : "timeline-assistant-message"}>
+                        {renderAssistantHeader(card.working)}
+                        {(card.parts?.length || card.content.trim()) ? renderTimelineParts(card.parts ?? [], card.content) : null}
+                      </article>
+                    );
+                  }
+
+                  if (isTrace) {
+                    return (
+                      <article key={item.key} className="timeline-trace-row">
+                        <details>
+                          <summary>
+                            <div className="timeline-trace-summary">
+                              <span className="timeline-trace-label">{card.label ?? "System"}</span>
+                              <span className="timeline-trace-preview">{previewText(card.content, 84)}</span>
+                            </div>
+                            <span className="timeline-trace-stamp">{formatTimelineStamp(event.created_at)}</span>
+                          </summary>
+                          <div className="timeline-trace-body">
                             <p>{card.content}</p>
-                          )}
-                        </>
+                          </div>
+                        </details>
+                      </article>
+                    );
+                  }
+
+                  return (
+                    <article key={item.key} className={`timeline-card ${card.kind} ${card.tone}`}>
+                      <div className="timeline-meta">
+                        {card.label ? <span className="mini-pill">{card.label}</span> : null}
+                        <span>{formatTimelineStamp(event.created_at)}</span>
+                      </div>
+                      {card.title ? <h3>{card.title}</h3> : null}
+                      {isSubagentSummary ? (
+                        <details className="summary-collapsible">
+                          <summary>{previewText(card.content)}</summary>
+                          <div className="markdown-body">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {card.content}
+                            </ReactMarkdown>
+                          </div>
+                        </details>
+                      ) : (
+                        <p>{card.content}</p>
                       )}
                     </article>
                   );
@@ -2040,6 +2115,41 @@ export function App() {
                     <p>Use the composer below to ask Jarvis to inspect files, run tools, or summarize work.</p>
                   </div>
                 ) : null}
+              </div>
+              {questionNavigatorItems.length ? (
+                <aside className="question-navigator" aria-label="Question navigation">
+                  <div className="question-navigator-rail">
+                    {questionNavigatorItems.map((question) => (
+                      <button
+                        key={question.key}
+                        type="button"
+                        className={question.key === activeQuestionKey ? "question-navigator-tick active" : "question-navigator-tick"}
+                        onClick={() => scrollToQuestion(question.key)}
+                        aria-label={`Jump to question: ${question.preview}`}
+                      />
+                    ))}
+                  </div>
+                  <div className="question-navigator-popover">
+                    <div className="question-navigator-header">
+                      <span className="micro-label">Questions</span>
+                      <span className="section-count">{questionNavigatorItems.length}</span>
+                    </div>
+                    <div className="question-navigator-list">
+                      {questionNavigatorItems.map((question) => (
+                        <button
+                          key={`${question.key}-entry`}
+                          type="button"
+                          className={question.key === activeQuestionKey ? "question-navigator-entry active" : "question-navigator-entry"}
+                          onClick={() => scrollToQuestion(question.key)}
+                        >
+                          <strong>{question.preview}</strong>
+                          <span>{formatTimelineStamp(question.createdAt)}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </aside>
+              ) : null}
               </div>
               {showScrollToBottom ? (
                 <button type="button" className="scroll-to-bottom" onClick={scrollTimelineToBottom}>
