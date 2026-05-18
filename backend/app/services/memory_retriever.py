@@ -8,7 +8,7 @@ from typing import Iterable
 from sqlalchemy import select
 
 from app.db.session import create_session
-from app.models import SessionMemoryRecord
+from app.models import SessionMemoryRecord, SessionRecord
 
 
 STATUS_PRIORITY = {
@@ -127,12 +127,12 @@ def rank_session_memories(
     query_tokens = _tokenize_text(query_text)
     related_path_terms = _path_terms(related_paths or [])
     with create_session() as db:
-        stmt = (
-            select(SessionMemoryRecord)
-            .where(SessionMemoryRecord.session_id == session_id)
-            .order_by(SessionMemoryRecord.updated_at.desc(), SessionMemoryRecord.id.desc())
-            .limit(limit)
-        )
+        session_row = db.get(SessionRecord, session_id)
+        branch_context_id = session_row.branch_context_id if session_row else None
+        stmt = select(SessionMemoryRecord).where(SessionMemoryRecord.session_id == session_id)
+        if branch_context_id is not None:
+            stmt = stmt.where(SessionMemoryRecord.branch_context_id == branch_context_id)
+        stmt = stmt.order_by(SessionMemoryRecord.updated_at.desc(), SessionMemoryRecord.id.desc()).limit(limit)
         rows = list(db.scalars(stmt).all())
 
     ranked: list[RankedMemory] = []

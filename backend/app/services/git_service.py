@@ -17,6 +17,12 @@ class GitWorkspaceState:
     detached_head: bool
 
 
+@dataclass(frozen=True)
+class GitBranchListState:
+    current_branch: str | None
+    branches: list[str]
+
+
 def _run_git(args: list[str], *, cwd: Path) -> tuple[bool, str]:
     try:
         result = subprocess.run(
@@ -74,3 +80,58 @@ def inspect_workspace_git_state(workspace: Path | str | None) -> GitWorkspaceSta
         working_tree_status=working_tree_status,
         detached_head=detached_head,
     )
+
+
+def has_blocking_branch_switch_changes(workspace: Path | str | None) -> bool:
+    base = _require_git_workspace(workspace)
+    ok, output = _run_git(["status", "--porcelain", "--untracked-files=no"], cwd=base)
+    if not ok:
+        raise ValueError(output or "Failed to inspect Git working tree state.")
+    return bool(output.strip())
+
+
+def _require_git_workspace(workspace: Path | str | None) -> Path:
+    state = inspect_workspace_git_state(workspace)
+    if not state.git_enabled or not state.repo_root:
+        raise ValueError("The workspace is not inside a Git repository.")
+    return Path(state.repo_root)
+
+
+def list_local_branches(workspace: Path | str | None) -> GitBranchListState:
+    base = _require_git_workspace(workspace)
+    ok, output = _run_git(["for-each-ref", "refs/heads", "--format=%(refname:short)"], cwd=base)
+    if not ok:
+        raise ValueError(output or "Failed to list Git branches.")
+    branches = sorted({line.strip() for line in output.splitlines() if line.strip()})
+    state = inspect_workspace_git_state(base)
+    return GitBranchListState(current_branch=state.lead_branch, branches=branches)
+
+
+def validate_new_branch_name(name: str) -> str:
+    candidate = name.strip()
+    if not candidate:
+        raise ValueError("Branch name is required.")
+    ok, output = _run_git(["check-ref-format", "--branch", candidate], cwd=Path.cwd())
+    if not ok:
+        raise ValueError(output or f"Invalid Git branch name: {candidate}")
+    return candidate
+
+
+def switch_branch(workspace: Path | str | None, branch_name: str) -> GitWorkspaceState:
+    base = _require_git_workspace(workspace)
+    target = branch_name.strip()
+    if not target:
+        raise ValueError("Target branch is required.")
+    ok, output = _run_git(["switch", target], cwd=base)
+    if not ok:
+        raise ValueError(output or f"Failed to switch to branch '{target}'.")
+    return inspect_workspace_git_state(base)
+
+
+def create_and_switch_branch(workspace: Path | str | None, branch_name: str) -> GitWorkspaceState:
+    base = _require_git_workspace(workspace)
+    target = validate_new_branch_name(branch_name)
+    ok, output = _run_git(["switch", "-c", target], cwd=base)
+    if not ok:
+        raise ValueError(output or f"Failed to create and switch to branch '{target}'.")
+    return inspect_workspace_git_state(base)

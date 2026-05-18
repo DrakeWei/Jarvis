@@ -6,7 +6,7 @@ import re
 from sqlalchemy import select
 
 from app.db.session import create_session
-from app.models import MessageRecord, SessionMemoryRecord
+from app.models import MessageRecord, SessionMemoryRecord, SessionRecord
 from app.schemas.memory import SessionMemorySummary
 
 ROLLING_SUMMARY_KIND = "rolling_summary"
@@ -54,6 +54,7 @@ def _to_summary(row: SessionMemoryRecord) -> SessionMemorySummary:
     return SessionMemorySummary(
         id=row.id,
         session_id=row.session_id,
+        branch_context_id=row.branch_context_id,
         kind=row.kind,
         content=row.content,
         source_turn_id=row.source_turn_id,
@@ -65,12 +66,19 @@ def _to_summary(row: SessionMemoryRecord) -> SessionMemorySummary:
     )
 
 
+def _session_branch_context_id(db, session_id: str) -> str | None:
+    session = db.get(SessionRecord, session_id)
+    return session.branch_context_id if session else None
+
+
 def _archive_excess_active_memories(session_id: str, kind: str, *, keep: int) -> None:
     with create_session() as db:
+        branch_context_id = _session_branch_context_id(db, session_id)
         rows = db.scalars(
             select(SessionMemoryRecord)
             .where(
                 SessionMemoryRecord.session_id == session_id,
+                SessionMemoryRecord.branch_context_id == branch_context_id,
                 SessionMemoryRecord.kind == kind,
                 SessionMemoryRecord.status == "active",
             )
@@ -84,9 +92,11 @@ def _archive_excess_active_memories(session_id: str, kind: str, *, keep: int) ->
 
 def resolve_active_memory(session_id: str, kind: str) -> None:
     with create_session() as db:
+        branch_context_id = _session_branch_context_id(db, session_id)
         rows = db.scalars(
             select(SessionMemoryRecord).where(
                 SessionMemoryRecord.session_id == session_id,
+                SessionMemoryRecord.branch_context_id == branch_context_id,
                 SessionMemoryRecord.kind == kind,
                 SessionMemoryRecord.status == "active",
             )
@@ -99,10 +109,12 @@ def resolve_active_memory(session_id: str, kind: str) -> None:
 
 def get_active_memory(session_id: str, kind: str = ROLLING_SUMMARY_KIND) -> str | None:
     with create_session() as db:
+        branch_context_id = _session_branch_context_id(db, session_id)
         row = db.scalars(
             select(SessionMemoryRecord)
             .where(
                 SessionMemoryRecord.session_id == session_id,
+                SessionMemoryRecord.branch_context_id == branch_context_id,
                 SessionMemoryRecord.kind == kind,
                 SessionMemoryRecord.status == "active",
             )
@@ -123,10 +135,12 @@ def upsert_active_memory(
 ) -> str:
     normalized = normalize_text(content)
     with create_session() as db:
+        branch_context_id = _session_branch_context_id(db, session_id)
         row = db.scalars(
             select(SessionMemoryRecord)
             .where(
                 SessionMemoryRecord.session_id == session_id,
+                SessionMemoryRecord.branch_context_id == branch_context_id,
                 SessionMemoryRecord.kind == kind,
                 SessionMemoryRecord.status == "active",
             )
@@ -137,6 +151,7 @@ def upsert_active_memory(
         if row is None:
             row = SessionMemoryRecord(
                 session_id=session_id,
+                branch_context_id=branch_context_id,
                 kind=kind,
                 content=normalized,
                 source_turn_id=source_turn_id,
@@ -169,8 +184,10 @@ def append_memory(
     normalized = normalize_text(content)
     with create_session() as db:
         now = _utcnow()
+        branch_context_id = _session_branch_context_id(db, session_id)
         row = SessionMemoryRecord(
             session_id=session_id,
+            branch_context_id=branch_context_id,
             kind=kind,
             content=normalized,
             source_turn_id=source_turn_id,
@@ -225,10 +242,12 @@ def remember_artifact(
     normalized = normalize_text(content)
     if path_ref:
         with create_session() as db:
+            branch_context_id = _session_branch_context_id(db, session_id)
             row = db.scalars(
                 select(SessionMemoryRecord)
                 .where(
                     SessionMemoryRecord.session_id == session_id,
+                    SessionMemoryRecord.branch_context_id == branch_context_id,
                     SessionMemoryRecord.kind == ARTIFACT_KIND,
                     SessionMemoryRecord.status == "active",
                     SessionMemoryRecord.path_ref == path_ref,
@@ -240,6 +259,7 @@ def remember_artifact(
             if row is None:
                 row = SessionMemoryRecord(
                     session_id=session_id,
+                    branch_context_id=branch_context_id,
                     kind=ARTIFACT_KIND,
                     content=normalized,
                     source_turn_id=source_turn_id,
@@ -294,10 +314,12 @@ def remember_open_question(session_id: str, content: str, *, source_turn_id: int
 
 def list_active_memories(session_id: str, kind: str, *, limit: int = 3) -> list[str]:
     with create_session() as db:
+        branch_context_id = _session_branch_context_id(db, session_id)
         rows = db.scalars(
             select(SessionMemoryRecord)
             .where(
                 SessionMemoryRecord.session_id == session_id,
+                SessionMemoryRecord.branch_context_id == branch_context_id,
                 SessionMemoryRecord.kind == kind,
                 SessionMemoryRecord.status == "active",
             )
@@ -309,9 +331,13 @@ def list_active_memories(session_id: str, kind: str, *, limit: int = 3) -> list[
 
 def list_memory(session_id: str, *, limit: int = 80) -> list[SessionMemorySummary]:
     with create_session() as db:
+        branch_context_id = _session_branch_context_id(db, session_id)
         rows = db.scalars(
             select(SessionMemoryRecord)
-            .where(SessionMemoryRecord.session_id == session_id)
+            .where(
+                SessionMemoryRecord.session_id == session_id,
+                SessionMemoryRecord.branch_context_id == branch_context_id,
+            )
             .order_by(SessionMemoryRecord.updated_at.desc(), SessionMemoryRecord.id.desc())
             .limit(limit)
         ).all()
@@ -320,9 +346,11 @@ def list_memory(session_id: str, *, limit: int = 80) -> list[SessionMemorySummar
 
 def refresh_rolling_summary(session_id: str, source_turn_id: int | None = None) -> str:
     with create_session() as db:
+        branch_context_id = _session_branch_context_id(db, session_id)
         messages = db.scalars(
             select(MessageRecord)
             .where(MessageRecord.session_id == session_id)
+            .where(MessageRecord.branch_context_id == branch_context_id)
             .order_by(MessageRecord.created_at.desc(), MessageRecord.id.desc())
             .limit(10)
         ).all()

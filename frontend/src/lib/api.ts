@@ -198,6 +198,18 @@ export type WorkspaceResolveSummary = {
   workspace_fingerprint: string;
 };
 
+export type GitBranchListSummary = {
+  current_branch: string | null;
+  branches: string[];
+};
+
+export type GitBranchSwitchResult = {
+  session: SessionSummary;
+  source_branch: string | null;
+  target_branch: string | null;
+  created_new_branch: boolean;
+};
+
 const API_BASE = "http://127.0.0.1:8731/api";
 
 export async function fetchBootstrap(): Promise<{
@@ -262,6 +274,18 @@ export async function fetchSessions(): Promise<SessionSummary[]> {
   return response.json();
 }
 
+async function readApiError(response: Response, fallback: string): Promise<Error> {
+  try {
+    const payload = await response.json();
+    if (payload?.detail) {
+      return new Error(String(payload.detail));
+    }
+  } catch {
+    // ignore parse failure
+  }
+  return new Error(fallback);
+}
+
 export async function renameSession(sessionId: string, title: string): Promise<SessionSummary> {
   const response = await fetch(`${API_BASE}/sessions/${sessionId}`, {
     method: "PATCH",
@@ -272,6 +296,42 @@ export async function renameSession(sessionId: string, title: string): Promise<S
   });
   if (!response.ok) {
     throw new Error("Failed to rename session");
+  }
+  return response.json();
+}
+
+export async function fetchSessionBranches(sessionId: string): Promise<GitBranchListSummary> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/git/branches`);
+  if (!response.ok) {
+    throw await readApiError(response, "Failed to load branches");
+  }
+  return response.json();
+}
+
+export async function switchSessionBranch(sessionId: string, branchName: string): Promise<GitBranchSwitchResult> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/git/switch-branch`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ branch_name: branchName }),
+  });
+  if (!response.ok) {
+    throw await readApiError(response, "Failed to switch branch");
+  }
+  return response.json();
+}
+
+export async function createSessionBranch(sessionId: string, branchName: string): Promise<GitBranchSwitchResult> {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/git/create-branch`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ branch_name: branchName }),
+  });
+  if (!response.ok) {
+    throw await readApiError(response, "Failed to create branch");
   }
   return response.json();
 }

@@ -25,6 +25,7 @@ class SessionRecord(Base):
     head_revision: Mapped[str | None] = mapped_column(String(80))
     working_tree_status: Mapped[str | None] = mapped_column(String(20))
     detached_head: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    branch_context_id: Mapped[str | None] = mapped_column(String(36))
     status: Mapped[str] = mapped_column(String(40), default="idle", nullable=False)
     hidden: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
@@ -34,6 +35,7 @@ class MessageRecord(Base):
     __tablename__ = "messages"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    branch_context_id: Mapped[str | None] = mapped_column(String(36), index=True)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
@@ -113,6 +115,7 @@ class TurnRecord(Base):
     __tablename__ = "turns"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    branch_context_id: Mapped[str | None] = mapped_column(String(36), index=True)
     user_message_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id", ondelete="SET NULL"), index=True)
     workspace_path: Mapped[str | None] = mapped_column(Text)
     workspace_fingerprint: Mapped[str | None] = mapped_column(String(40))
@@ -204,6 +207,7 @@ class ApprovalRecord(Base):
     __tablename__ = "approvals"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str | None] = mapped_column(ForeignKey("sessions.id", ondelete="SET NULL"), index=True)
+    branch_context_id: Mapped[str | None] = mapped_column(String(36), index=True)
     turn_id: Mapped[int | None] = mapped_column(ForeignKey("turns.id", ondelete="SET NULL"), index=True)
     checkpoint_id: Mapped[int | None] = mapped_column(ForeignKey("turn_checkpoints.id", ondelete="SET NULL"), index=True)
     approval_type: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -217,6 +221,7 @@ class SessionMemoryRecord(Base):
     __tablename__ = "session_memory"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    branch_context_id: Mapped[str | None] = mapped_column(String(36), index=True)
     kind: Mapped[str] = mapped_column(String(40), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     source_turn_id: Mapped[int | None] = mapped_column(ForeignKey("turns.id", ondelete="SET NULL"), index=True)

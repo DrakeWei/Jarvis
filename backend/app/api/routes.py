@@ -3,6 +3,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from app.core.config import settings
 from app.schemas.approvals import ApprovalDecision
 from app.schemas.events import MessageCreate, SessionCreate, SessionRename
+from app.schemas.git import GitBranchSwitchRequest
 from app.schemas.subagents import SubagentRunCreate
 from app.schemas.tasks import TaskCreate
 from app.schemas.teammates import TeammateCreate, TeammateMessageCreate
@@ -62,6 +63,36 @@ async def create_session(payload: SessionCreate):
 @router.get("/sessions")
 async def list_sessions():
     return runtime.list_sessions()
+
+
+@router.get("/sessions/{session_id}/git/branches")
+async def list_session_branches(session_id: str):
+    if not runtime.session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Unknown session")
+    try:
+        return runtime.list_session_branches(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/sessions/{session_id}/git/switch-branch")
+async def switch_session_branch(session_id: str, payload: GitBranchSwitchRequest):
+    if not runtime.session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Unknown session")
+    try:
+        return await runtime.switch_session_branch(session_id, payload.branch_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/sessions/{session_id}/git/create-branch")
+async def create_session_branch(session_id: str, payload: GitBranchSwitchRequest):
+    if not runtime.session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Unknown session")
+    try:
+        return await runtime.create_and_switch_session_branch(session_id, payload.branch_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.patch("/sessions/{session_id}")

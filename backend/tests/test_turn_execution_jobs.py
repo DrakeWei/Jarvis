@@ -167,6 +167,10 @@ class RuntimeTurnQueueTests(IsolatedAsyncioTestCase):
             return_value=Path("/tmp/workspace"),
         ), patch.object(
             runtime,
+            "_session_branch_context_id",
+            return_value="branch-a",
+        ), patch.object(
+            runtime,
             "_signal_dispatcher",
         ) as signal_dispatcher_mock, patch.object(
             runtime,
@@ -207,6 +211,10 @@ class RuntimeTurnQueueTests(IsolatedAsyncioTestCase):
             runtime,
             "_session_workspace",
             return_value=Path("/tmp/workspace"),
+        ), patch.object(
+            runtime,
+            "_session_branch_context_id",
+            return_value="branch-a",
         ), patch.object(
             runtime,
             "_signal_dispatcher",
@@ -323,7 +331,7 @@ class RuntimeTurnQueueTests(IsolatedAsyncioTestCase):
         ), patch(
             "app.runtime.manager.background_job_service.create_job",
             return_value=created_job,
-        ), patch.object(runtime, "_session_workspace", return_value=Path("/tmp/workspace")), patch.object(runtime, "_signal_dispatcher"), patch.object(runtime, "_ensure_dispatcher_started"), patch.object(
+        ), patch.object(runtime, "_session_workspace", return_value=Path("/tmp/workspace")), patch.object(runtime, "_session_branch_context_id", return_value="branch-a"), patch.object(runtime, "_signal_dispatcher"), patch.object(runtime, "_ensure_dispatcher_started"), patch.object(
             runtime,
             "publish",
         ):

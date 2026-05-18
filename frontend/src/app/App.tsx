@@ -4,6 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import {
+  createSessionBranch,
   createSession,
   createTask,
   createTeammate,
@@ -16,6 +17,7 @@ import {
   fetchSessionMemory,
   fetchSessions,
   fetchSkills,
+  fetchSessionBranches,
   fetchSubagents,
   fetchTurns,
   fetchTeammateMessages,
@@ -30,9 +32,12 @@ import {
   sendMessage,
   sendTeammateMessage,
   stopSessionTurn,
+  switchSessionBranch,
   deleteSessionAsset,
   deleteSession,
   type ApprovalSummary,
+  type GitBranchListSummary,
+  type GitBranchSwitchResult,
   type SessionAssetSummary,
   type SessionSummary,
   type SessionStateSummary,
@@ -66,6 +71,14 @@ const WORKBENCH_TABS = [
 type WorkbenchTabId = (typeof WORKBENCH_TABS)[number]["id"];
 type SidePanelMode = "workbench" | "skills";
 type SessionItem = SessionSummary & { isDraft?: boolean };
+type BranchPickerState = {
+  open: boolean;
+  branches: GitBranchListSummary | null;
+  search: string;
+  error: string;
+  createMode: boolean;
+  newBranchName: string;
+};
 type SessionContextMenuState = {
   sessionId: string;
   x: number;
@@ -491,6 +504,11 @@ function formatGitSessionMeta(session: SessionSummary | null): string | null {
   return parts.join(" · ");
 }
 
+function branchDisplayName(session: SessionSummary | null): string {
+  if (!session?.git_enabled) return "No branch";
+  return session.lead_branch || (session.detached_head ? "detached HEAD" : "Git repo");
+}
+
 export function App() {
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [activeSessionId, setActiveSessionId] = useState("");
@@ -514,6 +532,14 @@ export function App() {
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [draft, setDraft] = useState("");
   const [nextTurnExecutionMode, setNextTurnExecutionMode] = useState<"normal" | "plan">("normal");
+  const [branchPicker, setBranchPicker] = useState<BranchPickerState>({
+    open: false,
+    branches: null,
+    search: "",
+    error: "",
+    createMode: false,
+    newBranchName: "",
+  });
   const [streamingBySession, setStreamingBySession] = useState<Record<string, { content: string; created_at: string } | null>>({});
   const [connectionState, setConnectionState] = useState("offline");
   const [bootstrapState, setBootstrapState] = useState("booting");
@@ -531,6 +557,7 @@ export function App() {
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const composerFileInputRef = useRef<HTMLInputElement | null>(null);
   const sessionContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const branchPickerRef = useRef<HTMLDivElement | null>(null);
   const activeSessionRef = useRef("");
   const eventsBySessionRef = useRef<Record<string, TimelineEvent[]>>({});
   const lastRealtimeEventAtRef = useRef<Record<string, number>>({});
@@ -585,8 +612,7 @@ export function App() {
   }, [activeSessionId]);
 
   async function refreshSessionState(sessionId: string) {
-    const [nextSessions, nextSubagents, nextApprovals, nextExecutions, nextTeammates, nextSessionState, nextTurns, nextMemory, nextAssets] = await Promise.all([
-      fetchSessions(),
+    const [nextSubagents, nextApprovals, nextExecutions, nextTeammates, nextSessionState, nextTurns, nextMemory, nextAssets] = await Promise.all([
       fetchSubagents(sessionId),
       fetchApprovals(sessionId),
       fetchToolExecutions(sessionId),
@@ -597,7 +623,6 @@ export function App() {
       fetchSessionAssets(sessionId),
     ]);
 
-    setSessions(sortSessionsByActivity(nextSessions));
     setSubagents(nextSubagents);
     setApprovals(nextApprovals);
     setExecutions(nextExecutions);
@@ -628,6 +653,31 @@ export function App() {
     if (!nextSessionState.active_turn) {
       setStreamingBySession((current) => ({ ...current, [sessionId]: null }));
     }
+  }
+
+  function applyBranchSwitchResult(result: GitBranchSwitchResult) {
+    const updatedSession = result.session;
+    setSessions((current) =>
+      sortSessionsByActivity(
+        current.map((session) =>
+          session.session_id === updatedSession.session_id ? { ...session, ...updatedSession } : session,
+        ),
+      ),
+    );
+    setSessionStateBySession((current) => ({
+      ...current,
+      [updatedSession.session_id]: {
+        session: updatedSession,
+        active_turn: null,
+        latest_interrupted_turn: null,
+        latest_waiting_approval_turn: null,
+        rolling_summary: null,
+      },
+    }));
+    setTurnsBySession((current) => ({ ...current, [updatedSession.session_id]: [] }));
+    setMemoryBySession((current) => ({ ...current, [updatedSession.session_id]: [] }));
+    setApprovals([]);
+    setStreamingBySession((current) => ({ ...current, [updatedSession.session_id]: null }));
   }
 
   async function runScheduledSessionRefresh(sessionId: string) {
@@ -713,9 +763,10 @@ export function App() {
 
   useEffect(() => {
     const cleanups = sessionSocketsRef.current;
-    const liveSessionIds = sessions
-      .filter((session) => !session.isDraft)
-      .map((session) => session.session_id);
+    const liveSessionIds =
+      activeSessionId && !activeSessionId.startsWith(DRAFT_SESSION_PREFIX)
+        ? [activeSessionId]
+        : [];
 
     for (const sessionId of liveSessionIds) {
       if (cleanups[sessionId]) continue;
@@ -792,7 +843,9 @@ export function App() {
             event.type.startsWith("teammate.") ||
             event.type.startsWith("subagent.")
           ) {
-            scheduleSessionRefresh(event.session_id);
+            if (event.session_id === activeSessionRef.current) {
+              scheduleSessionRefresh(event.session_id);
+            }
           }
           if (event.type.startsWith("teammate.") && selectedTeammateId) {
             fetchTeammateMessages(selectedTeammateId).then(setTeammateMessages).catch(() => undefined);
@@ -817,7 +870,7 @@ export function App() {
     }
 
     return () => undefined;
-  }, [sessions, selectedTeammateId]);
+  }, [activeSessionId, selectedTeammateId]);
 
   useEffect(() => {
     return () => {
@@ -832,6 +885,26 @@ export function App() {
       setConnectionState("offline");
     };
   }, []);
+
+  useEffect(() => {
+    if (!branchPicker.open) return;
+    const closeOnPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && branchPickerRef.current?.contains(target)) return;
+      setBranchPicker((current) => ({ ...current, open: false, createMode: false, error: "" }));
+    };
+    const closeOnKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setBranchPicker((current) => ({ ...current, open: false, createMode: false, error: "" }));
+      }
+    };
+    window.addEventListener("pointerdown", closeOnPointerDown);
+    window.addEventListener("keydown", closeOnKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", closeOnPointerDown);
+      window.removeEventListener("keydown", closeOnKeyDown);
+    };
+  }, [branchPicker.open]);
 
   useEffect(() => {
     if (!sessionContextMenu) return;
@@ -857,6 +930,58 @@ export function App() {
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
     await submitDraft();
+  }
+
+  async function onOpenBranchPicker() {
+    if (!activeSessionId || !activeSession || !activeSession.git_enabled) return;
+    try {
+      const branches = await fetchSessionBranches(activeSessionId);
+      setBranchPicker({
+        open: true,
+        branches,
+        search: "",
+        error: "",
+        createMode: false,
+        newBranchName: "",
+      });
+    } catch (error) {
+      setBranchPicker({
+        open: true,
+        branches: null,
+        search: "",
+        error: error instanceof Error ? error.message : "Failed to load branches.",
+        createMode: false,
+        newBranchName: "",
+      });
+    }
+  }
+
+  async function onSwitchBranch(branchName: string) {
+    if (!activeSessionId) return;
+    try {
+      const result = await switchSessionBranch(activeSessionId, branchName);
+      setBranchPicker((current) => ({ ...current, open: false, error: "", createMode: false, newBranchName: "" }));
+      applyBranchSwitchResult(result);
+    } catch (error) {
+      setBranchPicker((current) => ({
+        ...current,
+        error: error instanceof Error ? error.message : "Failed to switch branch.",
+      }));
+    }
+  }
+
+  async function onCreateAndSwitchBranch() {
+    if (!activeSessionId || !branchPicker.newBranchName.trim()) return;
+    try {
+      const result = await createSessionBranch(activeSessionId, branchPicker.newBranchName.trim());
+      setBranchPicker((current) => ({ ...current, open: false, error: "", createMode: false, newBranchName: "" }));
+      applyBranchSwitchResult(result);
+    } catch (error) {
+      setBranchPicker((current) => ({
+        ...current,
+        error: error instanceof Error ? error.message : "Failed to create branch.",
+      }));
+    }
   }
 
   async function onStopTurn() {
@@ -1316,6 +1441,7 @@ export function App() {
     .filter(
       (event) =>
         event.type !== "runtime.state"
+        && event.type !== "session.branch_switched"
         && event.type !== "session.renamed"
         && event.type !== "turn.started"
         && event.type !== "turn.completed"
@@ -1352,6 +1478,9 @@ export function App() {
   ]);
   const activeSessionStamp = activeSession ? formatSessionStamp(activeSession.updated_at ?? activeSession.created_at) : null;
   const activeSessionGitMeta = formatGitSessionMeta(activeSession ?? null);
+  const filteredBranches = (branchPicker.branches?.branches ?? []).filter((branch) =>
+    branch.toLowerCase().includes(branchPicker.search.trim().toLowerCase()),
+  );
   const statusRailCards: Array<{
     tab: WorkbenchTabId;
     label: string;
@@ -2050,6 +2179,82 @@ export function App() {
               disabled={!activeSessionId}
             />
           </div>
+          {activeSession?.git_enabled ? (
+            <div className="composer-branch-shell" ref={branchPickerRef}>
+              <button type="button" className="composer-branch-trigger" onClick={onOpenBranchPicker}>
+                <span className="branch-trigger-icon">⎇</span>
+                <span>{branchDisplayName(activeSession)}</span>
+                <span className="branch-trigger-caret">⌄</span>
+              </button>
+              {branchPicker.open ? (
+                <div className="branch-picker-card">
+                  <div className="branch-picker-search">
+                    <input
+                      value={branchPicker.search}
+                      onChange={(e) => setBranchPicker((current) => ({ ...current, search: e.target.value }))}
+                      placeholder="搜索分支"
+                    />
+                  </div>
+                  <div className="branch-picker-section">
+                    <p className="micro-label">分支</p>
+                    <div className="branch-picker-list">
+                      {filteredBranches.map((branch) => (
+                        <button
+                          key={branch}
+                          type="button"
+                          className={branch === activeSession.lead_branch ? "branch-picker-item active-branch-item" : "branch-picker-item"}
+                          onClick={() => {
+                            if (branch === activeSession.lead_branch) {
+                              setBranchPicker((current) => ({ ...current, open: false, error: "", createMode: false }));
+                              return;
+                            }
+                            void onSwitchBranch(branch);
+                          }}
+                        >
+                          <span className="branch-item-copy">
+                            <span className="branch-trigger-icon">⎇</span>
+                            <span>{branch}</span>
+                          </span>
+                          {branch === activeSession.lead_branch ? <span className="branch-item-check">✓</span> : null}
+                        </button>
+                      ))}
+                      {!filteredBranches.length ? <p className="empty-inline">No matching branches.</p> : null}
+                    </div>
+                  </div>
+                  {branchPicker.error ? <p className="branch-picker-error">{branchPicker.error}</p> : null}
+                  {branchPicker.createMode ? (
+                    <div className="branch-picker-create">
+                      <input
+                        value={branchPicker.newBranchName}
+                        onChange={(e) => setBranchPicker((current) => ({ ...current, newBranchName: e.target.value }))}
+                        placeholder="新分支名称"
+                      />
+                      <div className="inline-actions">
+                        <button type="button" className="primary-button" onClick={() => void onCreateAndSwitchBranch()}>
+                          创建并检出
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => setBranchPicker((current) => ({ ...current, createMode: false, newBranchName: "", error: "" }))}
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      className="branch-picker-create-trigger"
+                      onClick={() => setBranchPicker((current) => ({ ...current, createMode: true, error: "" }))}
+                    >
+                      + 创建并检出新分支...
+                    </button>
+                  )}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           <div className="composer-footer simple-footer">
             <span>
               {assetUploadError
