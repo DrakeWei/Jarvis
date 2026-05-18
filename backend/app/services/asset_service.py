@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 import re
 
 from sqlalchemy import delete, select
@@ -16,17 +17,46 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _load_metadata(value: str | None) -> dict[str, object]:
+    raw = str(value or "").strip()
+    if not raw:
+        return {}
+    try:
+        loaded = json.loads(raw)
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _dump_metadata(value: dict[str, object] | None) -> str | None:
+    if not value:
+        return None
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _default_origin_for_kind(kind: str) -> str:
+    normalized = str(kind or "").strip().lower()
+    if normalized.startswith("generated_"):
+        return "generated"
+    if normalized.startswith("derived_"):
+        return "derived"
+    return "uploaded"
+
+
 def _to_asset_summary(row: SessionAssetRecord) -> SessionAssetSummary:
     return SessionAssetSummary(
         id=row.id,
         session_id=row.session_id,
         kind=row.kind,
+        origin=row.origin,
+        source_asset_id=row.source_asset_id,
         mime_type=row.mime_type,
         filename=row.filename,
         size_bytes=row.size_bytes,
         sha256=row.sha256,
         storage_path=row.storage_path,
         preview_path=row.preview_path,
+        metadata_json=_load_metadata(row.metadata_json),
         status=row.status,
         error_message=row.error_message,
         created_at=row.created_at.isoformat(),
@@ -43,6 +73,11 @@ def _to_chunk_summary(row: AssetChunkRecord) -> SessionAssetChunkSummary:
         sheet_name=row.sheet_name,
         slide_number=row.slide_number,
         section_path=row.section_path,
+        start_ms=row.start_ms,
+        end_ms=row.end_ms,
+        speaker=row.speaker,
+        frame_index=row.frame_index,
+        frame_timestamp_ms=row.frame_timestamp_ms,
         content=row.content,
         summary=row.summary,
         char_count=row.char_count,
@@ -56,6 +91,9 @@ def build_asset_reference(asset: SessionAssetSummary) -> dict[str, object]:
         "asset_id": asset.id,
         "filename": asset.filename,
         "kind": asset.kind,
+        "origin": asset.origin,
+        "source_asset_id": asset.source_asset_id,
+        "metadata_json": asset.metadata_json,
         "status": asset.status,
         "preview_path": asset.preview_path,
         "storage_path": asset.storage_path,
@@ -69,6 +107,9 @@ def create_asset_record(
     kind: str,
     mime_type: str,
     filename: str,
+    origin: str | None = None,
+    source_asset_id: str | None = None,
+    metadata_json: dict[str, object] | None = None,
     size_bytes: int = 0,
     sha256: str = "",
     status: str = "uploaded",
@@ -83,6 +124,9 @@ def create_asset_record(
             id=resolved_asset_id,
             session_id=session_id,
             kind=kind,
+            origin=(origin or _default_origin_for_kind(kind)).strip() or _default_origin_for_kind(kind),
+            source_asset_id=str(source_asset_id).strip() if source_asset_id else None,
+            metadata_json=_dump_metadata(metadata_json),
             mime_type=mime_type,
             filename=session_asset_utils.display_filename(filename),
             size_bytes=max(0, int(size_bytes)),
@@ -128,6 +172,9 @@ def update_asset_record(
     error_message: str | None = None,
     storage_path: str | None = None,
     sha256: str | None = None,
+    origin: str | None = None,
+    source_asset_id: str | None = None,
+    metadata_json: dict[str, object] | None = None,
 ) -> SessionAssetSummary | None:
     with create_session() as db:
         row = db.get(SessionAssetRecord, asset_id)
@@ -143,6 +190,12 @@ def update_asset_record(
             row.storage_path = storage_path
         if sha256 is not None:
             row.sha256 = sha256
+        if origin is not None:
+            row.origin = origin.strip() or row.origin
+        if source_asset_id is not None:
+            row.source_asset_id = source_asset_id.strip() or None
+        if metadata_json is not None:
+            row.metadata_json = _dump_metadata(metadata_json)
         row.updated_at = _utcnow()
         db.commit()
         db.refresh(row)
@@ -214,6 +267,11 @@ def create_asset_chunk(
     sheet_name: str | None = None,
     slide_number: int | None = None,
     section_path: str | None = None,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    speaker: str | None = None,
+    frame_index: int | None = None,
+    frame_timestamp_ms: int | None = None,
     summary: str | None = None,
 ) -> SessionAssetChunkSummary:
     with create_session() as db:
@@ -224,6 +282,11 @@ def create_asset_chunk(
             sheet_name=sheet_name,
             slide_number=slide_number,
             section_path=section_path,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            speaker=speaker,
+            frame_index=frame_index,
+            frame_timestamp_ms=frame_timestamp_ms,
             content=content,
             summary=summary,
             char_count=len(content),

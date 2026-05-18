@@ -94,6 +94,8 @@ class Settings:
         self.openai_http_headers = _env_json_map("OPENAI_HTTP_HEADERS_JSON") or _string_map(
             self.codex_provider_config.get("http_headers")
         )
+        self.jarvis_image_provider = os.getenv("JARVIS_IMAGE_PROVIDER", "openai_compatible").strip().lower() or "openai_compatible"
+        self.jarvis_image_api_key = os.getenv("JARVIS_IMAGE_API_KEY", "").strip()
         self.jarvis_image_base_url = os.getenv("JARVIS_IMAGE_BASE_URL", "").strip()
         self.jarvis_image_query_params = _env_json_map("JARVIS_IMAGE_QUERY_PARAMS_JSON")
         self.jarvis_image_http_headers = _env_json_map("JARVIS_IMAGE_HTTP_HEADERS_JSON")
@@ -102,6 +104,32 @@ class Settings:
         self.jarvis_image_default_background = os.getenv("JARVIS_IMAGE_DEFAULT_BACKGROUND", "auto").strip() or "auto"
         self.jarvis_image_default_quality = os.getenv("JARVIS_IMAGE_DEFAULT_QUALITY", "auto").strip() or "auto"
         self.jarvis_image_request_timeout_seconds = int(os.getenv("JARVIS_IMAGE_REQUEST_TIMEOUT_SECONDS", "180"))
+        self.jarvis_speech_synth_provider = os.getenv("JARVIS_SPEECH_SYNTH_PROVIDER", "").strip().lower()
+        self.jarvis_tts_api_key = os.getenv("JARVIS_TTS_API_KEY", "").strip()
+        self.jarvis_tts_resource_id = os.getenv("JARVIS_TTS_RESOURCE_ID", "").strip()
+        self.jarvis_tts_ws_url = os.getenv("JARVIS_TTS_WS_URL", "").strip() or "wss://openspeech.bytedance.com/api/v3/tts/unidirectional/stream"
+        self.jarvis_tts_default_voice = os.getenv("JARVIS_TTS_DEFAULT_VOICE", "").strip() or "zh_female_vv_uranus_bigtts"
+        self.jarvis_tts_default_sample_rate = int(os.getenv("JARVIS_TTS_DEFAULT_SAMPLE_RATE", "24000"))
+        self.jarvis_tts_default_bit_rate = int(os.getenv("JARVIS_TTS_DEFAULT_BIT_RATE", "160"))
+        self.jarvis_tts_connect_timeout_seconds = float(os.getenv("JARVIS_TTS_CONNECT_TIMEOUT_SECONDS", "10"))
+        self.jarvis_tts_session_timeout_seconds = float(os.getenv("JARVIS_TTS_SESSION_TIMEOUT_SECONDS", "20"))
+        self.jarvis_tts_user_uid = os.getenv("JARVIS_TTS_USER_UID", "jarvis")
+        self.jarvis_tts_app_id = os.getenv("JARVIS_TTS_APP_ID", "").strip()
+        self.jarvis_tts_access_token = os.getenv("JARVIS_TTS_ACCESS_TOKEN", "").strip()
+        self.jarvis_tts_secret_key = os.getenv("JARVIS_TTS_SECRET_KEY", "").strip()
+        self.jarvis_speech_recognition_provider = os.getenv("JARVIS_SPEECH_RECOGNITION_PROVIDER", "").strip().lower()
+        self.jarvis_asr_api_base_url = os.getenv("JARVIS_ASR_API_BASE_URL", "").strip() or "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash"
+        self.jarvis_asr_resource_id = os.getenv("JARVIS_ASR_RESOURCE_ID", "").strip() or "volc.bigasr.auc_turbo"
+        self.jarvis_asr_api_key = os.getenv("JARVIS_ASR_API_KEY", "").strip()
+        self.jarvis_asr_app_key = os.getenv("JARVIS_ASR_APP_KEY", "").strip()
+        self.jarvis_asr_access_key = os.getenv("JARVIS_ASR_ACCESS_KEY", "").strip()
+        self.jarvis_asr_timeout_seconds = float(os.getenv("JARVIS_ASR_TIMEOUT_SECONDS", "15"))
+        self.jarvis_asr_enable_punc = os.getenv("JARVIS_ASR_ENABLE_PUNC", "1").strip() not in {"0", "false", "FALSE", "no", "NO"}
+        self.jarvis_asr_enable_itn = os.getenv("JARVIS_ASR_ENABLE_ITN", "1").strip() not in {"0", "false", "FALSE", "no", "NO"}
+        self.jarvis_asr_enable_ddc = os.getenv("JARVIS_ASR_ENABLE_DDC", "1").strip() not in {"0", "false", "FALSE", "no", "NO"}
+        self.jarvis_asr_user_uid = os.getenv("JARVIS_ASR_USER_UID", "jarvis")
+        self.jarvis_video_understanding_provider = os.getenv("JARVIS_VIDEO_UNDERSTANDING_PROVIDER", "").strip().lower()
+        self.jarvis_video_generation_provider = os.getenv("JARVIS_VIDEO_GENERATION_PROVIDER", "").strip().lower()
         self.llm_max_tokens = int(os.getenv("JARVIS_LLM_MAX_TOKENS", "4000"))
         self.jarvis_mcp_feishu_enabled = os.getenv("JARVIS_MCP_FEISHU_ENABLED", "").strip() in {"1", "true", "TRUE", "yes", "YES"}
         self.jarvis_mcp_feishu_base_url = os.getenv("JARVIS_MCP_FEISHU_BASE_URL", "").strip()

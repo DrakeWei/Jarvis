@@ -221,6 +221,37 @@ def local_tool_definitions(*, allow_subagent_tool: bool = True) -> list[ToolDefi
             },
             source="local",
         ),
+        ToolDefinition(
+            name="generate_speech",
+            description="Generate spoken audio for the current session from a text prompt or answer. Use this when the user asks for audio output or wants the reply spoken aloud.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "voice": {"type": "string"},
+                    "format": {"type": "string"},
+                    "speed": {"type": "number"},
+                    "pitch": {"type": "number"},
+                },
+                "required": ["text"],
+            },
+            source="local",
+        ),
+        ToolDefinition(
+            name="generate_video",
+            description="Generate a video for the current session from a text prompt and optional source assets. Use this only when the user explicitly asks for video output.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string"},
+                    "asset_ids": {"type": "array", "items": {"type": "string"}},
+                    "duration_seconds": {"type": "integer"},
+                    "aspect_ratio": {"type": "string"},
+                },
+                "required": ["prompt"],
+            },
+            source="local",
+        ),
     ]
     if allow_subagent_tool:
         tools.append(

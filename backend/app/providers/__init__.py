@@ -1,5 +1,33 @@
 from app.providers.base import BaseAdapter, LLMResponse, ProviderConfigError, ProviderRequestError, TextBlock, ToolUseBlock
-from app.providers.factory import create_client
+from app.providers.capabilities import (
+    AudioChunkEvent,
+    GeneratedSpeechResult,
+    ImageGenerationProvider,
+    ImageGenerationProviderResult,
+    ImageGenerationRequest,
+    SpeechRecognitionProvider,
+    SpeechRecognitionRequest,
+    SpeechSynthesisProvider,
+    SpeechSynthesisRequest,
+    TranscriptResult,
+    TranscriptSegment,
+    VideoGenerationJob,
+    VideoGenerationProvider,
+    VideoGenerationRequest,
+    VideoSummaryResult,
+    VideoUnderstandingProvider,
+)
+from app.providers.factory import (
+    create_client,
+    create_image_generation_provider,
+    create_llm_adapter,
+    create_speech_recognition_provider,
+    create_speech_synthesis_provider,
+    create_video_generation_provider,
+    create_video_understanding_provider,
+)
+from app.providers.volcengine_asr_provider import VolcengineASRProvider
+from app.providers.volcengine_tts_provider import VolcengineTTSProvider
 
 __all__ = [
     "BaseAdapter",
@@ -8,5 +36,29 @@ __all__ = [
     "ProviderRequestError",
     "TextBlock",
     "ToolUseBlock",
+    "AudioChunkEvent",
+    "GeneratedSpeechResult",
+    "ImageGenerationProvider",
+    "ImageGenerationProviderResult",
+    "ImageGenerationRequest",
+    "SpeechRecognitionProvider",
+    "SpeechRecognitionRequest",
+    "SpeechSynthesisProvider",
+    "SpeechSynthesisRequest",
+    "TranscriptResult",
+    "TranscriptSegment",
+    "VideoGenerationJob",
+    "VideoGenerationProvider",
+    "VideoGenerationRequest",
+    "VideoSummaryResult",
+    "VideoUnderstandingProvider",
     "create_client",
+    "create_image_generation_provider",
+    "create_llm_adapter",
+    "create_speech_recognition_provider",
+    "create_speech_synthesis_provider",
+    "create_video_generation_provider",
+    "create_video_understanding_provider",
+    "VolcengineASRProvider",
+    "VolcengineTTSProvider",
 ]

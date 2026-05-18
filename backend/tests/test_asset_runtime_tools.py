@@ -5,6 +5,8 @@ from unittest import IsolatedAsyncioTestCase
 from unittest.mock import patch
 
 from app.runtime.manager import RuntimeManager, SessionTurn
+import app.services.speech_generation_service as speech_generation_service
+import app.services.video_generation_service as video_generation_service
 
 
 class AssetRuntimeToolTests(IsolatedAsyncioTestCase):
@@ -131,3 +133,66 @@ class AssetRuntimeToolTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(blocks[0].text, "Hello world.")
         self.assertEqual([event.content for event in emitted], ["Hello world."])
+
+    async def test_generate_speech_tool_surfaces_service_errors(self) -> None:
+        runtime = RuntimeManager()
+        with patch(
+            "app.runtime.manager.speech_generation_service.generate_speech",
+            side_effect=speech_generation_service.SpeechGenerationError("tts provider is not configured"),
+        ):
+            status, output = await runtime._execute_autonomous_tool(
+                session_id="session-1",
+                tool_name="generate_speech",
+                tool_input={"text": "Speak this reply"},
+                broker_for_workspace=SimpleNamespace(),
+            )
+        self.assertEqual(status, "error")
+        self.assertIn("not configured", output)
+
+    async def test_generate_video_tool_surfaces_service_errors(self) -> None:
+        runtime = RuntimeManager()
+        with patch(
+            "app.runtime.manager.video_generation_service.submit_video_generation",
+            side_effect=video_generation_service.VideoGenerationError("video provider is not configured"),
+        ):
+            status, output = await runtime._execute_autonomous_tool(
+                session_id="session-1",
+                tool_name="generate_video",
+                tool_input={"prompt": "Make a short demo clip"},
+                broker_for_workspace=SimpleNamespace(),
+            )
+        self.assertEqual(status, "error")
+        self.assertIn("not configured", output)
+
+    async def test_generate_speech_tool_returns_generated_asset_ids(self) -> None:
+        runtime = RuntimeManager()
+        generated_asset = SimpleNamespace(
+            id="asset-tts-1",
+            filename="generated-speech.wav",
+            kind="generated_audio",
+            origin="generated",
+            status="ready",
+            preview_path=None,
+            storage_path="/tmp/generated-speech.wav",
+            source_asset_id=None,
+            metadata_json={"provider": "fake-tts"},
+        )
+        generated_result = SimpleNamespace(
+            asset=generated_asset,
+            provider_name="fake-tts",
+        )
+        with patch(
+            "app.runtime.manager.speech_generation_service.generate_speech",
+            return_value=generated_result,
+        ), patch(
+            "app.runtime.manager.asset_service.build_asset_reference",
+            return_value={"type": "asset_ref", "asset_id": "asset-tts-1", "kind": "generated_audio"},
+        ):
+            result = await runtime._execute_autonomous_tool(
+                session_id="session-1",
+                tool_name="generate_speech",
+                tool_input={"text": "Speak this reply", "format": "wav"},
+                broker_for_workspace=SimpleNamespace(),
+            )
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.payload["asset_ids"], ["asset-tts-1"])

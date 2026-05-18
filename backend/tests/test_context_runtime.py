@@ -317,6 +317,85 @@ class ContextAssemblerTests(TestCase):
         ]
         self.assertTrue(any("Attached file: plan.docx" in block for block in text_blocks))
 
+    def test_assemble_context_expands_video_asset_reference_with_keyframes(self) -> None:
+        retrieval = memory_retriever.RetrievalResult(stable=[], dynamic=[], counts_by_kind={})
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Summarize the attached video."},
+                    {"type": "asset_ref", "asset_id": "asset-1", "filename": "clip.mp4", "kind": "video", "status": "ready"},
+                ],
+            }
+        ]
+        asset = SimpleNamespace(
+            id="asset-1",
+            filename="clip.mp4",
+            kind="video",
+            status="ready",
+            error_message=None,
+            storage_path="/tmp/clip.mp4",
+            mime_type="video/mp4",
+            metadata_json={
+                "transcript_status": "ready",
+                "keyframe_status": "ready",
+                "keyframe_paths": ["/tmp/keyframe-000.png", "/tmp/keyframe-001.png"],
+            },
+        )
+        chunks = [
+            SimpleNamespace(
+                id=1,
+                asset_id="asset-1",
+                chunk_index=0,
+                page_number=None,
+                sheet_name=None,
+                slide_number=None,
+                section_path=None,
+                start_ms=100,
+                end_ms=900,
+                speaker=None,
+                frame_index=None,
+                frame_timestamp_ms=None,
+                content="A short spoken instruction.",
+                summary="A short spoken instruction.",
+                char_count=28,
+                created_at="2026-05-16T00:00:00+00:00",
+            )
+        ]
+        with patch.object(
+            context_assembler.session_service,
+            "get_session",
+            return_value=SimpleNamespace(workspace_mode="bound", workspace_label="Jarvis"),
+        ), patch.object(
+            context_assembler.memory_retriever,
+            "retrieve_context_memories",
+            return_value=retrieval,
+        ), patch.object(
+            asset_service,
+            "get_asset",
+            return_value=asset,
+        ), patch.object(
+            asset_service,
+            "search_asset_chunks",
+            return_value=chunks,
+        ):
+            assembled = context_assembler.assemble_context(
+                session_id="session-1",
+                workspace=SimpleNamespace(as_posix=lambda: "/tmp/workspace"),
+                messages=messages,
+                base_system_prompt="You are Jarvis.",
+                allowed_external_reads=[],
+                max_tokens=4000,
+            )
+        first_user = assembled.messages[0]
+        image_parts = [
+            part
+            for part in first_user["content"]
+            if isinstance(part, dict) and part.get("type") == "input_image"
+        ]
+        self.assertEqual(len(image_parts), 2)
+        self.assertEqual(image_parts[0]["path"], "/tmp/keyframe-000.png")
+
 
 class OpenAIAdapterFormattingTests(TestCase):
     def test_responses_input_supports_input_image_parts(self) -> None:

@@ -1,4 +1,5 @@
 import { FormEvent, KeyboardEvent, type ChangeEvent, type Dispatch, type MutableRefObject, type SetStateAction, useEffect, useRef, useState } from "react";
+import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -13,6 +14,7 @@ import {
   fetchBootstrap,
   resolveWorkspace,
   fetchSessionAssets,
+  fetchSessionAsset,
   fetchSessionState,
   fetchSessionMemory,
   fetchSessions,
@@ -122,6 +124,16 @@ type TimelineRenderItem =
       key: string;
       events: TimelineEvent[];
     };
+
+type VoiceRecorderCapture = {
+  stream: MediaStream;
+  context: AudioContext;
+  source: MediaStreamAudioSourceNode;
+  processor: ScriptProcessorNode;
+  sink: GainNode;
+  chunks: Float32Array[];
+  sampleRate: number;
+};
 
 type UserQuestionNavigatorItem = {
   key: string;
@@ -292,13 +304,132 @@ function normalizeTimelineParts(event: TimelineEvent): TimelinePart[] {
   return [{ type: "text", text: event.content }];
 }
 
-function renderTimelineParts(parts: TimelinePart[], fallbackContent: string) {
+function isImageAssetKind(kind: string): boolean {
+  return kind === "image" || kind === "generated_image";
+}
+
+function isAudioAssetKind(kind: string): boolean {
+  return kind === "audio" || kind === "generated_audio";
+}
+
+function isVideoAssetKind(kind: string): boolean {
+  return kind === "video" || kind === "generated_video";
+}
+
+function formatAssetDuration(metadata?: Record<string, unknown>): string | null {
+  const durationMs = metadata?.duration_ms;
+  if (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0) {
+    return null;
+  }
+  const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function assetKindBadge(kind: string, origin?: string): string {
+  if (origin === "generated") {
+    if (isAudioAssetKind(kind)) return "TTS";
+    if (isVideoAssetKind(kind)) return "Generated Video";
+    if (isImageAssetKind(kind)) return "Generated Image";
+    return "Generated";
+  }
+  if (isAudioAssetKind(kind)) return "Audio";
+  if (isVideoAssetKind(kind)) return "Video";
+  if (isImageAssetKind(kind)) return "Image";
+  return kind.toUpperCase();
+}
+
+function assetCaption(
+  filename: string,
+  kind: string,
+  origin?: string,
+  metadata?: Record<string, unknown>,
+): string {
+  const bits = [assetKindBadge(kind, origin)];
+  const duration = formatAssetDuration(metadata);
+  if (duration) bits.push(duration);
+  return `${filename} · ${bits.join(" · ")}`;
+}
+
+function mediaSrc(path?: string | null): string {
+  const value = (path ?? "").trim();
+  if (!value) return "";
+  return isTauri() ? convertFileSrc(value) : `file://${value}`;
+}
+
+function resolveTimelineAssetPart(
+  part: TimelinePart,
+  assetLookup: Map<string, SessionAssetSummary>,
+): TimelinePart {
+  if (part.type === "text") return part;
+  const latest = assetLookup.get(part.asset_id);
+  if (!latest) return part;
+  return {
+    ...part,
+    kind: latest.kind,
+    origin: latest.origin,
+    source_asset_id: latest.source_asset_id,
+    metadata_json: latest.metadata_json,
+    status: latest.status,
+    preview_path: latest.preview_path,
+    storage_path: latest.storage_path,
+  };
+}
+
+function mergeFloat32Chunks(chunks: Float32Array[]): Float32Array {
+  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const merged = new Float32Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return merged;
+}
+
+function encodeWavFile(samples: Float32Array, sampleRate: number): Uint8Array {
+  const bytesPerSample = 2;
+  const dataLength = samples.length * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataLength);
+  const view = new DataView(buffer);
+  const writeString = (offset: number, value: string) => {
+    for (let index = 0; index < value.length; index += 1) {
+      view.setUint8(offset + index, value.charCodeAt(index));
+    }
+  };
+
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + dataLength, true);
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * bytesPerSample, true);
+  view.setUint16(32, bytesPerSample, true);
+  view.setUint16(34, 16, true);
+  writeString(36, "data");
+  view.setUint32(40, dataLength, true);
+
+  let offset = 44;
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, samples[index] ?? 0));
+    view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+    offset += 2;
+  }
+  return new Uint8Array(buffer);
+}
+
+function renderTimelineParts(parts: TimelinePart[], fallbackContent: string, assetLookup: Map<string, SessionAssetSummary>) {
   if (!parts.length) {
     return <p>{fallbackContent}</p>;
   }
+  const resolvedParts = parts.map((part) => resolveTimelineAssetPart(part, assetLookup));
   return (
     <div className="timeline-message-stack">
-      {parts.map((part, index) => {
+      {resolvedParts.map((part, index) => {
         if (part.type === "text") {
           return (
             <div key={`text-${index}`} className="markdown-body">
@@ -308,20 +439,50 @@ function renderTimelineParts(parts: TimelinePart[], fallbackContent: string) {
             </div>
           );
         }
-        if (part.kind === "image") {
+        if (isImageAssetKind(part.kind)) {
           const imagePath = part.preview_path ?? part.storage_path ?? "";
           return (
             <figure key={`${part.asset_id}-${index}`} className="timeline-image-block">
               {imagePath ? (
-                <img src={`file://${imagePath}`} alt={part.filename} className="timeline-image" />
+                <img src={mediaSrc(imagePath)} alt={part.filename} className="timeline-image" />
               ) : null}
-              <figcaption>{part.filename}</figcaption>
+              <figcaption>{assetCaption(part.filename, part.kind, part.origin, part.metadata_json)}</figcaption>
+            </figure>
+          );
+        }
+        if (isAudioAssetKind(part.kind)) {
+          const audioPath = part.storage_path ?? "";
+          return (
+            <figure key={`${part.asset_id}-${index}`} className="timeline-media-block">
+              <figcaption>{assetCaption(part.filename, part.kind, part.origin, part.metadata_json)}</figcaption>
+              {audioPath ? <audio controls preload="metadata" src={mediaSrc(audioPath)} className="timeline-audio" /> : null}
+            </figure>
+          );
+        }
+        if (isVideoAssetKind(part.kind)) {
+          const videoPath = part.storage_path ?? "";
+          const posterPath = part.preview_path ?? "";
+          return (
+            <figure key={`${part.asset_id}-${index}`} className="timeline-media-block">
+              <figcaption>{assetCaption(part.filename, part.kind, part.origin, part.metadata_json)}</figcaption>
+              {videoPath ? (
+                <video
+                  controls
+                  preload="metadata"
+                  src={mediaSrc(videoPath)}
+                  poster={posterPath ? mediaSrc(posterPath) : undefined}
+                  className="timeline-video"
+                />
+              ) : null}
             </figure>
           );
         }
         return (
           <div key={`${part.asset_id}-${index}`} className="timeline-asset-chip">
-            <strong>{part.filename}</strong>
+            <div className="timeline-asset-copy">
+              <strong>{part.filename}</strong>
+              <span>{assetCaption(part.filename, part.kind, part.origin, part.metadata_json)}</span>
+            </div>
             <span>{part.status}</span>
           </div>
         );
@@ -572,6 +733,7 @@ export function App() {
   const [createSessionError, setCreateSessionError] = useState("");
   const [assetUploadError, setAssetUploadError] = useState("");
   const [isUploadingAssets, setIsUploadingAssets] = useState(false);
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
   const [sessionContextMenu, setSessionContextMenu] = useState<SessionContextMenuState>(null);
   const [sessionDialog, setSessionDialog] = useState<SessionDialogState>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
@@ -587,6 +749,9 @@ export function App() {
   const sessionRefreshInFlightRef = useRef<Record<string, boolean>>({});
   const sessionRefreshNeedsTimelineRef = useRef<Record<string, boolean>>({});
   const sessionSocketsRef = useRef<Record<string, () => void>>({});
+  const voiceRecorderRef = useRef<VoiceRecorderCapture | null>(null);
+  const voicePressActiveRef = useRef(false);
+  const voiceReleaseCleanupRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -631,6 +796,20 @@ export function App() {
     activeSessionRef.current = activeSessionId;
     window.localStorage.setItem(ACTIVE_SESSION_KEY, activeSessionId);
   }, [activeSessionId]);
+
+  useEffect(() => {
+    return () => {
+      voiceReleaseCleanupRef.current?.();
+      const capture = voiceRecorderRef.current;
+      if (!capture) return;
+      capture.processor.disconnect();
+      capture.source.disconnect();
+      capture.sink.disconnect();
+      capture.stream.getTracks().forEach((track) => track.stop());
+      void capture.context.close();
+      voiceRecorderRef.current = null;
+    };
+  }, []);
 
   async function refreshSessionState(sessionId: string) {
     const [nextSubagents, nextApprovals, nextExecutions, nextTeammates, nextSessionState, nextTurns, nextMemory, nextAssets] = await Promise.all([
@@ -1209,6 +1388,219 @@ export function App() {
     }
   }
 
+  async function waitForVoiceAssetTranscript(
+    sessionId: string,
+    assetId: string,
+    timeoutMs = 30000,
+  ): Promise<SessionAssetSummary> {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const asset = await fetchSessionAsset(sessionId, assetId);
+      setAssetsBySession((current) => ({
+        ...current,
+        [sessionId]: sortAssets([
+          asset,
+          ...(current[sessionId] ?? []).filter((currentAsset) => currentAsset.id !== asset.id),
+        ]),
+      }));
+      if (asset.status === "failed") {
+        throw new Error(asset.error_message || "Voice transcription failed.");
+      }
+      const transcriptStatus =
+        typeof asset.metadata_json?.transcript_status === "string" ? asset.metadata_json.transcript_status : "";
+      if (asset.status === "ready" && transcriptStatus === "ready") {
+        return asset;
+      }
+      if (asset.status === "ready" && transcriptStatus === "empty") {
+        throw new Error("No speech detected in the recording.");
+      }
+      if (asset.status === "ready" && transcriptStatus === "unsupported_format") {
+        throw new Error("Recorded audio format is not supported for transcription.");
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+    }
+    throw new Error("Voice transcription timed out.");
+  }
+
+  function disposeVoiceCapture(capture: VoiceRecorderCapture) {
+    capture.processor.disconnect();
+    capture.source.disconnect();
+    capture.sink.disconnect();
+    capture.stream.getTracks().forEach((track) => track.stop());
+    void capture.context.close();
+  }
+
+  function installVoiceReleaseHandlers() {
+    voiceReleaseCleanupRef.current?.();
+    const release = () => {
+      voicePressActiveRef.current = false;
+      voiceReleaseCleanupRef.current?.();
+      voiceReleaseCleanupRef.current = null;
+      void finishVoiceRecordingAndSend();
+    };
+    window.addEventListener("pointerup", release, { once: true });
+    window.addEventListener("pointercancel", release, { once: true });
+    window.addEventListener("blur", release, { once: true });
+    voiceReleaseCleanupRef.current = () => {
+      window.removeEventListener("pointerup", release);
+      window.removeEventListener("pointercancel", release);
+      window.removeEventListener("blur", release);
+    };
+  }
+
+  async function beginVoiceRecording() {
+    if (!activeSessionId || isUploadingAssets || isActiveTurnRunning || voiceRecorderRef.current) return;
+    setAssetUploadError("");
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("Microphone capture is unavailable. Restart the desktop app after the microphone permission update and allow microphone access in macOS settings.");
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!voicePressActiveRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      const AudioContextCtor =
+        window.AudioContext ||
+        (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextCtor) {
+        stream.getTracks().forEach((track) => track.stop());
+        throw new Error("This desktop runtime does not support microphone recording.");
+      }
+      const context = new AudioContextCtor();
+      await context.resume();
+      const source = context.createMediaStreamSource(stream);
+      const processor = context.createScriptProcessor(4096, 1, 1);
+      const sink = context.createGain();
+      sink.gain.value = 0;
+      const chunks: Float32Array[] = [];
+      processor.onaudioprocess = (event) => {
+        const input = event.inputBuffer.getChannelData(0);
+        chunks.push(new Float32Array(input));
+      };
+      source.connect(processor);
+      processor.connect(sink);
+      sink.connect(context.destination);
+      voiceRecorderRef.current = {
+        stream,
+        context,
+        source,
+        processor,
+        sink,
+        chunks,
+        sampleRate: context.sampleRate,
+      };
+      setIsRecordingVoice(true);
+    } catch (error) {
+      voicePressActiveRef.current = false;
+      voiceReleaseCleanupRef.current?.();
+      voiceReleaseCleanupRef.current = null;
+      setAssetUploadError(error instanceof Error ? error.message : "Failed to access microphone.");
+    }
+  }
+
+  async function sendRecordedVoiceMessage(file: File) {
+    if (!activeSessionId || isActiveTurnRunning) return;
+    const sourceSessionId = activeSessionId;
+    let targetSessionId = sourceSessionId;
+    const optimisticCreatedAt = new Date().toISOString();
+    const executionMode = nextTurnExecutionMode;
+    let optimisticContent = "正在转写语音…";
+    setNextTurnExecutionMode("normal");
+    setAutoScrollTimeline(true);
+    setStreamingBySession((current) => ({
+      ...current,
+      [sourceSessionId]: {
+        content: "",
+        created_at: optimisticCreatedAt,
+      },
+    }));
+    setSessions((current) => touchSession(current, sourceSessionId, optimisticCreatedAt));
+    setEventsBySession((current) => ({
+      ...current,
+        [sourceSessionId]: [
+        ...(current[sourceSessionId] ?? []),
+        {
+          session_id: sourceSessionId,
+          type: "message.user.local",
+          content: optimisticContent,
+          created_at: optimisticCreatedAt,
+        } as TimelineEvent,
+      ],
+    }));
+
+    try {
+      setIsUploadingAssets(true);
+      if (sourceSessionId.startsWith(DRAFT_SESSION_PREFIX)) {
+        targetSessionId = await realizeDraftSession(sourceSessionId, "");
+      }
+      const uploaded = await uploadSessionAssets(targetSessionId, [file]);
+      const uploadedAssetIds = uploaded.map((asset) => asset.id);
+      const transcriptReadyAsset = uploadedAssetIds[0]
+        ? await waitForVoiceAssetTranscript(targetSessionId, uploadedAssetIds[0])
+        : null;
+      optimisticContent =
+        (typeof transcriptReadyAsset?.metadata_json?.transcript_preview === "string"
+          ? transcriptReadyAsset.metadata_json.transcript_preview
+          : ""
+        ).trim() || optimisticContent;
+      setAssetsBySession((current) => ({
+        ...current,
+        [targetSessionId]: sortAssets([...(current[targetSessionId] ?? []), ...uploaded]),
+      }));
+      setEventsBySession((current) => ({
+        ...current,
+        [targetSessionId]: (current[targetSessionId] ?? []).map((item) =>
+          item.type === "message.user.local" && item.created_at === optimisticCreatedAt
+            ? { ...item, content: optimisticContent }
+            : item,
+        ),
+      }));
+      setSelectedAssetIdsBySession((current) => ({ ...current, [targetSessionId]: [] }));
+      await sendMessage(targetSessionId, optimisticContent, uploadedAssetIds, executionMode);
+    } catch (error) {
+      setStreamingBySession((current) => ({ ...current, [targetSessionId]: null }));
+      setEventsBySession((current) => ({
+        ...current,
+        [targetSessionId]: (current[targetSessionId] ?? []).filter(
+          (item) =>
+            !(item.type === "message.user.local" && item.created_at === optimisticCreatedAt),
+        ),
+      }));
+      setAssetUploadError(error instanceof Error ? error.message : "Failed to send recorded audio.");
+    } finally {
+      setIsUploadingAssets(false);
+    }
+  }
+
+  async function finishVoiceRecordingAndSend() {
+    const capture = voiceRecorderRef.current;
+    voiceRecorderRef.current = null;
+    setIsRecordingVoice(false);
+    if (!capture) return;
+    disposeVoiceCapture(capture);
+    const samples = mergeFloat32Chunks(capture.chunks);
+    if (samples.length < capture.sampleRate * 0.15) {
+      setAssetUploadError("Recording too short.");
+      return;
+    }
+    const wavBytes = encodeWavFile(samples, capture.sampleRate);
+    const safeBuffer = new ArrayBuffer(wavBytes.byteLength);
+    new Uint8Array(safeBuffer).set(wavBytes);
+    const wavBlob = new Blob([safeBuffer], { type: "audio/wav" });
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const file = new File([wavBlob], `voice-input-${timestamp}.wav`, { type: "audio/wav" });
+    await sendRecordedVoiceMessage(file);
+  }
+
+  function onVoiceRecordPointerDown(event: React.PointerEvent<HTMLButtonElement>) {
+    if (!activeSessionId || isUploadingAssets || isActiveTurnRunning || isRecordingVoice) return;
+    event.preventDefault();
+    voicePressActiveRef.current = true;
+    installVoiceReleaseHandlers();
+    void beginVoiceRecording();
+  }
+
   function onComposerPickFiles() {
     composerFileInputRef.current?.click();
   }
@@ -1392,6 +1784,7 @@ export function App() {
   }
 
   const sessionAssets = activeSessionId ? assetsBySession[activeSessionId] ?? [] : [];
+  const sessionAssetLookup = new Map(sessionAssets.map((asset) => [asset.id, asset] as const));
   const selectedAssetIds = activeSessionId ? selectedAssetIdsBySession[activeSessionId] ?? [] : [];
   const selectedComposerAssets = sessionAssets.filter((asset) => selectedAssetIds.includes(asset.id));
   const events = eventsBySession[activeSessionId] ?? [];
@@ -2053,7 +2446,7 @@ export function App() {
                           }
                         }}
                       >
-                        {renderTimelineParts(card.parts ?? [], card.content)}
+                        {renderTimelineParts(card.parts ?? [], card.content, sessionAssetLookup)}
                       </article>
                     );
                   }
@@ -2062,7 +2455,7 @@ export function App() {
                     return (
                       <article key={item.key} className={card.working ? "timeline-assistant-message is-working" : "timeline-assistant-message"}>
                         {renderAssistantHeader(card.working)}
-                        {(card.parts?.length || card.content.trim()) ? renderTimelineParts(card.parts ?? [], card.content) : null}
+                        {(card.parts?.length || card.content.trim()) ? renderTimelineParts(card.parts ?? [], card.content, sessionAssetLookup) : null}
                       </article>
                     );
                   }
@@ -2236,6 +2629,7 @@ export function App() {
               <div className="attachment-tray">
                 {selectedComposerAssets.map((asset) => {
                   const isSelected = selectedAssetIds.includes(asset.id);
+                  const durationLabel = formatAssetDuration(asset.metadata_json);
                   return (
                     <div
                       key={asset.id}
@@ -2251,14 +2645,21 @@ export function App() {
                       }}
                     >
                       <div className="attachment-chip-main">
-                        {asset.preview_path ? (
-                          <img src={`file://${asset.preview_path}`} alt={asset.filename} className="attachment-preview" />
+                        {isImageAssetKind(asset.kind) && asset.preview_path ? (
+                          <img src={mediaSrc(asset.preview_path)} alt={asset.filename} className="attachment-preview" />
+                        ) : isAudioAssetKind(asset.kind) ? (
+                          <span className="attachment-kind media">AUDIO</span>
+                        ) : isVideoAssetKind(asset.kind) ? (
+                          <span className="attachment-kind media">VIDEO</span>
                         ) : (
-                          <span className="attachment-kind">{asset.kind.toUpperCase()}</span>
+                          <span className="attachment-kind">{assetKindBadge(asset.kind, asset.origin)}</span>
                         )}
                         <div className="attachment-copy">
                           <strong>{asset.filename}</strong>
-                          <span>{asset.status}</span>
+                          <span>
+                            {durationLabel ? `${asset.status} · ${durationLabel}` : asset.status}
+                            {asset.origin === "generated" ? " · generated" : ""}
+                          </span>
                         </div>
                       </div>
                       {!activeSessionId.startsWith(DRAFT_SESSION_PREFIX) ? (
@@ -2289,7 +2690,9 @@ export function App() {
               disabled={!activeSessionId}
             />
           </div>
-          {activeSession?.git_enabled ? (
+          {activeSessionId ? (
+            <div className="composer-utility-row">
+              {activeSession?.git_enabled ? (
             <div className="composer-branch-shell" ref={branchPickerRef}>
               <button type="button" className="composer-branch-trigger" onClick={onOpenBranchPicker}>
                 <span className="branch-trigger-icon">⎇</span>
@@ -2364,11 +2767,26 @@ export function App() {
                 </div>
               ) : null}
             </div>
+              ) : <div />}
+              <button
+                type="button"
+                className={isRecordingVoice ? "secondary-button composer-voice-button recording" : "secondary-button composer-voice-button"}
+                onPointerDown={onVoiceRecordPointerDown}
+                disabled={!activeSessionId || isUploadingAssets || isActiveTurnRunning}
+                aria-label={isRecordingVoice ? "Recording voice message" : "Hold to record voice message"}
+                title={isRecordingVoice ? "Release to send voice message" : "Hold to record voice message"}
+              >
+                <span className="composer-voice-icon" aria-hidden="true">●</span>
+                <span>{isRecordingVoice ? "松开发送" : "按住录音"}</span>
+              </button>
+            </div>
           ) : null}
           <div className="composer-footer simple-footer">
             <span>
               {assetUploadError
                 ? assetUploadError
+                : isRecordingVoice
+                  ? "Recording voice message · release to send"
                 : isUploadingAssets
                   ? "Uploading attachments..."
                   : nextTurnExecutionMode === "plan"

@@ -10,11 +10,15 @@ from app.services import (
     lease_service,
     memory_service,
     session_service,
+    speech_generation_service,
+    speech_recognition_service,
     subagent_service,
     task_service,
     teammate_service,
     tool_service,
     turn_service,
+    video_generation_service,
+    video_understanding_service,
 )
 
 __all__ = [
@@ -29,9 +33,13 @@ __all__ = [
     "lease_service",
     "memory_service",
     "session_service",
+    "speech_generation_service",
+    "speech_recognition_service",
     "subagent_service",
     "task_service",
     "teammate_service",
     "tool_service",
     "turn_service",
+    "video_generation_service",
+    "video_understanding_service",
 ]

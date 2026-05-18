@@ -1002,6 +1002,12 @@ textarea:focus-visible {
   gap: 8px;
 }
 
+.timeline-media-block {
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+
 .timeline-image {
   max-width: 100%;
   border-radius: 12px;
@@ -1009,7 +1015,24 @@ textarea:focus-visible {
   background: white;
 }
 
+.timeline-audio,
+.timeline-video {
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: white;
+}
+
+.timeline-media-transcript {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.94rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
 .timeline-image-block figcaption,
+.timeline-media-block figcaption,
 .timeline-asset-chip span {
   color: var(--text-muted);
   font-size: 0.76rem;
@@ -1024,6 +1047,12 @@ textarea:focus-visible {
   border: 1px solid var(--line);
   border-radius: 10px;
   background: rgba(248, 250, 252, 0.9);
+}
+
+.timeline-asset-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
 }
 
 .empty-state {
@@ -1190,6 +1219,14 @@ textarea:focus-visible {
   line-height: 1.5;
 }
 
+.composer-utility-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+}
+
 .composer-frame {
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -1253,6 +1290,11 @@ textarea:focus-visible {
   color: var(--text-soft);
   font-size: 0.72rem;
   letter-spacing: 0.08em;
+}
+
+.attachment-kind.media {
+  background: rgba(237, 242, 247, 0.98);
+  color: var(--text);
 }
 
 .attachment-copy {
@@ -1333,6 +1375,32 @@ textarea:focus-visible {
   padding: 0;
   font-size: 1.1rem;
   line-height: 1;
+}
+
+.composer-voice-button {
+  min-height: 36px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.composer-voice-button.recording {
+  background: #7f1d1d;
+  color: white;
+  border-color: #7f1d1d;
+}
+
+.composer-voice-icon {
+  font-size: 0.9rem;
+  line-height: 1;
+  color: #dc2626;
+}
+
+.composer-voice-button.recording .composer-voice-icon {
+  color: #fca5a5;
 }
 
 .composer-footer span {

@@ -6,10 +6,19 @@
   "build": {
     "beforeDevCommand": "bash -lc 'if nc -z 127.0.0.1 5173; then echo Vite dev server already running; else if [ -d frontend ]; then cd frontend; else cd ../frontend; fi && npm run dev; fi'",
     "beforeBuildCommand": "bash -lc 'if [ -d frontend ]; then cd frontend; else cd ../frontend; fi && npm run build'",
-    "devUrl": "http://127.0.0.1:5173",
+    "devUrl": "http://localhost:5173",
     "frontendDist": "../frontend/dist"
   },
   "app": {
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost data: blob:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:8731 ws://127.0.0.1:8731 http://localhost:5173 ws://localhost:5173",
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "/Users/bytedance/Desktop/python/Jarvis/data/**"
+        ]
+      }
+    },
     "windows": [
       {
         "title": "Jarvis Agent Cockpit",
