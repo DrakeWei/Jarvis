@@ -1,0 +1,30 @@
+{
+  "id": "git-state-summary",
+  "name": "Summarize current git state",
+  "user_prompt": "Check the current repository git state and summarize the repository root, current branch, and working tree status.",
+  "workspace_mode": "bound",
+  "execution_mode": "normal",
+  "approval_policy": {
+    "mode": "deny_all_shell"
+  },
+  "time_budget_seconds": 90,
+  "tags": [
+    "smoke",
+    "git",
+    "read_only"
+  ],
+  "expected_checks": [
+    {
+      "kind": "tool_used",
+      "tool_name": "get_session_git_state"
+    },
+    {
+      "kind": "workspace_diff_is_empty"
+    },
+    {
+      "kind": "max_pending_approval_count",
+      "max_count": 0
+    }
+  ],
+  "notes": "Checks whether the agent prefers the structured git-state tool over shelling out."
+}

@@ -1,0 +1,30 @@
+{
+  "id": "runtime-manager-summary",
+  "name": "Summarize runtime manager responsibilities",
+  "user_prompt": "Inspect the backend runtime manager and explain its main responsibilities. Mention sessions, turns, approvals, and subagents explicitly.",
+  "workspace_mode": "bound",
+  "execution_mode": "normal",
+  "approval_policy": {
+    "mode": "deny_all_shell"
+  },
+  "time_budget_seconds": 120,
+  "tags": [
+    "smoke",
+    "code_reading",
+    "runtime"
+  ],
+  "expected_checks": [
+    {
+      "kind": "final_text_contains_all",
+      "contains": ["sessions", "turns", "approvals", "subagents"]
+    },
+    {
+      "kind": "tool_used_any_of",
+      "tool_names": ["read_file", "read_file_range"]
+    },
+    {
+      "kind": "workspace_diff_is_empty"
+    }
+  ],
+  "notes": "Starter code-reading task that should remain entirely read-only."
+}

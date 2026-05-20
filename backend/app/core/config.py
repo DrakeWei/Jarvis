@@ -131,6 +131,11 @@ class Settings:
         self.jarvis_video_understanding_provider = os.getenv("JARVIS_VIDEO_UNDERSTANDING_PROVIDER", "").strip().lower()
         self.jarvis_video_generation_provider = os.getenv("JARVIS_VIDEO_GENERATION_PROVIDER", "").strip().lower()
         self.llm_max_tokens = int(os.getenv("JARVIS_LLM_MAX_TOKENS", "4000"))
+        self.jarvis_tavily_enabled = os.getenv("JARVIS_TAVILY_ENABLED", "").strip() in {"1", "true", "TRUE", "yes", "YES"}
+        self.jarvis_tavily_api_key = os.getenv("JARVIS_TAVILY_API_KEY", "").strip()
+        self.jarvis_tavily_timeout_ms = int(os.getenv("JARVIS_TAVILY_TIMEOUT_MS", "10000"))
+        self.jarvis_tavily_max_results_default = int(os.getenv("JARVIS_TAVILY_MAX_RESULTS_DEFAULT", "5"))
+        self.jarvis_tavily_ca_bundle = os.getenv("JARVIS_TAVILY_CA_BUNDLE", "").strip()
         self.jarvis_mcp_feishu_enabled = os.getenv("JARVIS_MCP_FEISHU_ENABLED", "").strip() in {"1", "true", "TRUE", "yes", "YES"}
         self.jarvis_mcp_feishu_base_url = os.getenv("JARVIS_MCP_FEISHU_BASE_URL", "").strip()
         self.jarvis_mcp_feishu_bearer_token = os.getenv("JARVIS_MCP_FEISHU_BEARER_TOKEN", "").strip()

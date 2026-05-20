@@ -1,0 +1,37 @@
+{
+  "id": "fix-user-lookup-normalization",
+  "name": "Fix user lookup email normalization",
+  "user_prompt": "Fix the email normalization bug so lookup keys match the test expectation. Make the smallest reasonable change, run the relevant tests, and summarize the result.",
+  "workspace_fixture": "backend/evals/fixtures/user_lookup_app",
+  "workspace_mode": "bound",
+  "execution_mode": "normal",
+  "approval_policy": {
+    "mode": "deny_all_shell"
+  },
+  "time_budget_seconds": 240,
+  "initialize_git": true,
+  "tags": ["core", "coding", "bugfix", "python", "normalization", "verification"],
+  "expected_checks": [
+    {
+      "kind": "file_contains_all",
+      "path": "users.py",
+      "contains": [".lower()"]
+    },
+    {
+      "kind": "tool_used",
+      "tool_name": "run_test"
+    },
+    {
+      "kind": "workspace_diff_not_empty"
+    },
+    {
+      "kind": "terminal_turn_status_in",
+      "statuses": ["completed"]
+    },
+    {
+      "kind": "max_pending_approval_count",
+      "max_count": 0
+    }
+  ],
+  "notes": "Normalization bugfix that should touch the helper implementation and verify with tests."
+}

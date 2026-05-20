@@ -1,0 +1,26 @@
+{
+  "id": "plan-mode-read-only-summary",
+  "name": "Summarize plan mode read-only behavior",
+  "user_prompt": "Inspect how plan mode stays read-only. Mention execution_mode, the plan-mode tool allowlist, and approval handoff behavior explicitly.",
+  "workspace_mode": "bound",
+  "execution_mode": "normal",
+  "approval_policy": {
+    "mode": "deny_all_shell"
+  },
+  "time_budget_seconds": 180,
+  "tags": ["core", "read_only", "plan_mode", "runtime"],
+  "expected_checks": [
+    {
+      "kind": "final_text_contains_all",
+      "contains": ["execution_mode", "allowlist", "approval"]
+    },
+    {
+      "kind": "tool_used_any_of",
+      "tool_names": ["read_file", "read_file_range"]
+    },
+    {
+      "kind": "workspace_diff_is_empty"
+    }
+  ],
+  "notes": "Read-only core task focused on how plan mode restricts behavior and hands off execution."
+}

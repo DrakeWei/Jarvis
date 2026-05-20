@@ -1,0 +1,641 @@
+{
+  "started_at": "2026-05-19T07:53:57.938456+00:00",
+  "finished_at": "2026-05-19T07:54:58.417973+00:00",
+  "duration_seconds": 60.47978758404497,
+  "total_tasks": 5,
+  "counts_by_label": {
+    "partial": 4,
+    "fail": 1
+  },
+  "counts_by_failure_tag": {
+    "edit_failure": 2,
+    "workspace_violation": 3
+  },
+  "results": [
+    {
+      "task_id": "fix-calculator-add",
+      "task_name": "Fix calculator add bug",
+      "label": "partial",
+      "primary_failure_tag": "edit_failure",
+      "timed_out": false,
+      "duration_seconds": 11.443731374980416,
+      "session_id": "c003c189-3ce1-4e46-acb8-98f5bb66d3a7",
+      "checks": [
+        {
+          "kind": "file_contains_all",
+          "passed": false,
+          "message": "missing file substrings: return a + b"
+        },
+        {
+          "kind": "file_not_contains_any",
+          "passed": false,
+          "message": "forbidden file substrings present: return a - b"
+        },
+        {
+          "kind": "tool_used",
+          "passed": false,
+          "message": "tool_used=run_test"
+        },
+        {
+          "kind": "terminal_turn_status_in",
+          "passed": true,
+          "message": "terminal_turn_status=completed"
+        },
+        {
+          "kind": "workspace_diff_not_empty",
+          "passed": false,
+          "message": "workspace diff is empty"
+        },
+        {
+          "kind": "max_pending_approval_count",
+          "passed": true,
+          "message": "pending approvals=0"
+        }
+      ],
+      "evidence": {
+        "task_id": "fix-calculator-add",
+        "session_id": "c003c189-3ce1-4e46-acb8-98f5bb66d3a7",
+        "effective_workspace_path": "/var/folders/82/kpwrdlt12yx2d2qh99vxp9br0000gn/T/jarvis-eval-fix-calculator-add-amuu_rc2/calculator_app",
+        "started_at": "2026-05-19T07:53:58.338202+00:00",
+        "finished_at": "2026-05-19T07:54:09.781866+00:00",
+        "duration_seconds": 11.443731374980416,
+        "timed_out": false,
+        "run_error": null,
+        "session_status": "idle",
+        "terminal_turn_status": "completed",
+        "latest_turn_error_summary": null,
+        "latest_turn_resume_hint": null,
+        "final_assistant_message": "OpenAI-compatible request failed: [Errno 8] nodename nor servname provided, or not known",
+        "pending_approval_count": 0,
+        "workspace_status_text": "",
+        "workspace_diff_text": "",
+        "workspace_diff_is_empty": true,
+        "approvals": [],
+        "timeline_events": [
+          {
+            "event_id": 1859,
+            "session_id": "c003c189-3ce1-4e46-acb8-98f5bb66d3a7",
+            "type": "session.created",
+            "content": "Session 'Eval fix-calculator-add' created.",
+            "parts": null,
+            "created_at": "2026-05-19T07:53:58.104322"
+          },
+          {
+            "event_id": 1860,
+            "session_id": "c003c189-3ce1-4e46-acb8-98f5bb66d3a7",
+            "type": "message.user",
+            "content": "Fix the bug in calculator.py so the add function behaves correctly. Make the smallest reasonable code change, run the relevant tests, and briefly summarize what you changed.",
+            "parts": [
+              {
+                "type": "text",
+                "text": "Fix the bug in calculator.py so the add function behaves correctly. Make the smallest reasonable code change, run the relevant tests, and briefly summarize what you changed."
+              }
+            ],
+            "created_at": "2026-05-19T07:53:58.164097"
+          },
+          {
+            "event_id": 1862,
+            "session_id": "c003c189-3ce1-4e46-acb8-98f5bb66d3a7",
+            "type": "turn.started",
+            "content": "Turn #49 started.",
+            "parts": null,
+            "created_at": "2026-05-19T07:54:01.046948"
+          },
+          {
+            "event_id": 1863,
+            "session_id": "c003c189-3ce1-4e46-acb8-98f5bb66d3a7",
+            "type": "message.assistant",
+            "content": "OpenAI-compatible request failed: [Errno 8] nodename nor servname provided, or not known",
+            "parts": [
+              {
+                "type": "text",
+                "text": "OpenAI-compatible request failed: [Errno 8] nodename nor servname provided, or not known"
+              }
+            ],
+            "created_at": "2026-05-19T07:54:04.161983"
+          },
+          {
+            "event_id": 1864,
+            "session_id": "c003c189-3ce1-4e46-acb8-98f5bb66d3a7",
+            "type": "turn.completed",
+            "content": "Turn #49 completed.",
+            "parts": null,
+            "created_at": "2026-05-19T07:54:04.164421"
+          }
+        ],
+        "tool_executions": [],
+        "turns": [
+          {
+            "id": 49,
+            "session_id": "c003c189-3ce1-4e46-acb8-98f5bb66d3a7",
+            "branch_context_id": "db6e74b3-7a17-44b8-851c-4911e47c7851",
+            "user_message_id": 329,
+            "workspace_path": "/private/var/folders/82/kpwrdlt12yx2d2qh99vxp9br0000gn/T/jarvis-eval-fix-calculator-add-amuu_rc2/calculator_app",
+            "workspace_fingerprint": "ecc1e5d6a88dfeca",
+            "execution_mode": "normal",
+            "status": "completed",
+            "started_at": "2026-05-19T07:53:58.326063",
+            "updated_at": "2026-05-19T07:54:04.163053",
+            "completed_at": "2026-05-19T07:54:04.163059",
+            "cancel_requested": false,
+            "last_checkpoint_seq": 2,
+            "resume_hint": null,
+            "error_summary": null,
+            "resumable": false
+          }
+        ]
+      }
+    },
+    {
+      "task_id": "fix-greeting-format",
+      "task_name": "Fix greeting format bug",
+      "label": "partial",
+      "primary_failure_tag": "edit_failure",
+      "timed_out": false,
+      "duration_seconds": 11.899686665972695,
+      "session_id": "800fad82-3f25-4385-b3ea-2a0f1759fc74",
+      "checks": [
+        {
+          "kind": "file_contains_all",
+          "passed": false,
+          "message": "missing file substrings: Hello, {name}!"
+        },
+        {
+          "kind": "file_not_contains_any",
+          "passed": false,
+          "message": "forbidden file substrings present: Hello {name}"
+        },
+        {
+          "kind": "tool_used",
+          "passed": false,
+          "message": "tool_used=run_test"
+        },
+        {
+          "kind": "terminal_turn_status_in",
+          "passed": true,
+          "message": "terminal_turn_status=completed"
+        },
+        {
+          "kind": "workspace_diff_not_empty",
+          "passed": false,
+          "message": "workspace diff is empty"
+        },
+        {
+          "kind": "max_pending_approval_count",
+          "passed": true,
+          "message": "pending approvals=0"
+        }
+      ],
+      "evidence": {
+        "task_id": "fix-greeting-format",
+        "session_id": "800fad82-3f25-4385-b3ea-2a0f1759fc74",
+        "effective_workspace_path": "/var/folders/82/kpwrdlt12yx2d2qh99vxp9br0000gn/T/jarvis-eval-fix-greeting-format-sduc95sh/greeting_app",
+        "started_at": "2026-05-19T07:54:10.252277+00:00",
+        "finished_at": "2026-05-19T07:54:22.151892+00:00",
+        "duration_seconds": 11.899686665972695,
+        "timed_out": false,
+        "run_error": null,
+        "session_status": "idle",
+        "terminal_turn_status": "completed",
+        "latest_turn_error_summary": null,
+        "latest_turn_resume_hint": null,
+        "final_assistant_message": "OpenAI-compatible request failed: [Errno 8] nodename nor servname provided, or not known",
+        "pending_approval_count": 0,
+        "workspace_status_text": "",
+        "workspace_diff_text": "",
+        "workspace_diff_is_empty": true,
+        "approvals": [],
+        "timeline_events": [
+          {
+            "event_id": 1865,
+            "session_id": "800fad82-3f25-4385-b3ea-2a0f1759fc74",
+            "type": "session.created",
+            "content": "Session 'Eval fix-greeting-format' created.",
+            "parts": null,
+            "created_at": "2026-05-19T07:54:09.987594"
+          },
+          {
+            "event_id": 1866,
+            "session_id": "800fad82-3f25-4385-b3ea-2a0f1759fc74",
+            "type": "message.user",
+            "content": "Update the greeting implementation so it matches the expected punctuation in the tests. Keep the change minimal, run the relevant tests, and summarize the result.",
+            "parts": [
+              {
+                "type": "text",
+                "text": "Update the greeting implementation so it matches the expected punctuation in the tests. Keep the change minimal, run the relevant tests, and summarize the result."
+              }
+            ],
+            "created_at": "2026-05-19T07:54:10.047729"
+          },
+          {
+            "event_id": 1868,
+            "session_id": "800fad82-3f25-4385-b3ea-2a0f1759fc74",
+            "type": "turn.started",
+            "content": "Turn #50 started.",
+            "parts": null,
+            "created_at": "2026-05-19T07:54:13.385586"
+          },
+          {
+            "event_id": 1869,
+            "session_id": "800fad82-3f25-4385-b3ea-2a0f1759fc74",
+            "type": "message.assistant",
+            "content": "OpenAI-compatible request failed: [Errno 8] nodename nor servname provided, or not known",
+            "parts": [
+              {
+                "type": "text",
+                "text": "OpenAI-compatible request failed: [Errno 8] nodename nor servname provided, or not known"
+              }
+            ],
+            "created_at": "2026-05-19T07:54:16.502207"
+          },
+          {
+            "event_id": 1870,
+            "session_id": "800fad82-3f25-4385-b3ea-2a0f1759fc74",
+            "type": "turn.completed",
+            "content": "Turn #50 completed.",
+            "parts": null,
+            "created_at": "2026-05-19T07:54:16.504509"
+          }
+        ],
+        "tool_executions": [],
+        "turns": [
+          {
+            "id": 50,
+            "session_id": "800fad82-3f25-4385-b3ea-2a0f1759fc74",
+            "branch_context_id": "1d2bcbee-379b-49f0-8e2f-3a1d3b12b03a",
+            "user_message_id": 331,
+            "workspace_path": "/private/var/folders/82/kpwrdlt12yx2d2qh99vxp9br0000gn/T/jarvis-eval-fix-greeting-format-sduc95sh/greeting_app",
+            "workspace_fingerprint": "47a747290caf3a0c",
+            "execution_mode": "normal",
+            "status": "completed",
+            "started_at": "2026-05-19T07:54:10.243364",
+            "updated_at": "2026-05-19T07:54:16.503379",
+            "completed_at": "2026-05-19T07:54:16.503384",
+            "cancel_requested": false,
+            "last_checkpoint_seq": 2,
+            "resume_hint": null,
+            "error_summary": null,
+            "resumable": false
+          }
+        ]
+      }
+    },
+    {
+      "task_id": "git-state-summary",
+      "task_name": "Summarize current git state",
+      "label": "partial",
+      "primary_failure_tag": "workspace_violation",
+      "timed_out": false,
+      "duration_seconds": 11.571663875016384,
+      "session_id": "602efcee-5453-44c7-bbf7-43a04f54f748",
+      "checks": [
+        {
+          "kind": "tool_used",
+          "passed": false,
+          "message": "tool_used=get_session_git_state"
+        },
+        {
+          "kind": "workspace_diff_is_empty",
+          "passed": false,
+          "message": "workspace diff is not empty"
+        },
+        {
+          "kind": "max_pending_approval_count",
+          "passed": true,
+          "message": "pending approvals=0"
+        }
+      ],
+      "evidence": {
+        "task_id": "git-state-summary",
+        "session_id": "602efcee-5453-44c7-bbf7-43a04f54f748",
+        "effective_workspace_path": null,
+        "started_at": "2026-05-19T07:54:22.471093+00:00",
+        "finished_at": "2026-05-19T07:54:34.042692+00:00",
+        "duration_seconds": 11.571663875016384,
+        "timed_out": false,
+        "run_error": null,
+        "session_status": "idle",
+        "terminal_turn_status": "completed",
+        "latest_turn_error_summary": null,
+        "latest_turn_resume_hint": null,
+        "final_assistant_message": "OpenAI-compatible request failed: [Errno 8] nodename nor servname provided, or not known",
+        "pending_approval_count": 0,
+        "workspace_status_text": "M backend/app/mcp/registry.py\n M backend/app/runtime/manager.py\n M backend/app/tools/broker.py\n M backend/pyproject.toml\n?? backend/evals/\n?? backend/tests/test_eval_runner.py\n?? backend/tests/test_tool_broker_structured_tools.py",
+        "workspace_diff_text": "diff --git a/backend/app/mcp/registry.py b/backend/app/mcp/registry.py\nindex 589a312..1b3c581 100644\n--- a/backend/app/mcp/registry.py\n+++ b/backend/app/mcp/registry.py\n@@ -64,6 +64,75 @@ def local_tool_definitions(*, allow_subagent_tool: bool = True) -> list[ToolDefi\n             },\n             source=\"local\",\n         ),\n+        ToolDefinition(\n+            name=\"read_file_range\",\n+            description=\"Read a specific line range from a file in the current session workspace or an explicitly allowed external read path.\",\n+            input_schema={\n+                \"type\": \"object\",\n+                \"properties\": {\n+                    \"path\": {\"type\": \"string\"},\n+                    \"start_line\": {\"type\": \"integer\"},\n+                    \"end_line\": {\"type\": \"integer\"},\n+                },\n+                \"required\": [\"path\"],\n+            },\n+            source=\"local\",\n+        ),\n+        ToolDefinition(\n+            name=\"search_text\",\n+            description=\"Search for text matches inside the current session workspace or an explicitly allowed external read path.\",\n+            input_schema={\n+                \"type\": \"object\",\n+                \"properties\": {\n+                    \"query\": {\"type\": \"string\"},\n+                    \"path\": {\"type\": \"string\"},\n+                    \"max_results\": {\"type\": \"integer\"},\n+                },\n+                \"required\": [\"query\"],\n+            },\n+            source=\"local\",\n+        ),\n+        ToolDefinition(\n+            name=\"show_status\",\n+            description=\"Show the current Git working tree status for the session workspace.\",\n+            input_schema={\"type\": \"object\", \"properties\": {}},\n+            source=\"local\",\n+        ),\n+        ToolDefinition(\n+            name=\"show_diff\",\n+            description=\"Show the current Git diff from HEAD for the session workspace or one file within it.\",\n+            input_schema={\n+                \"type\": \"object\",\n+                \"properties\": {\n+                    \"path\": {\"type\": \"string\"},\n+                },\n+            },\n+            source=\"local\",\n+        ),\n+        ToolDefinition(\n+            name=\"run_test\",\n+            description=\"Run a structured test command in the current session workspace without using a shell string.\",\n+            input_schema={\n+                \"type\": \"object\",\n+                \"properties\": {\n+                    \"argv\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}},\n+                },\n+                \"required\": [\"argv\"],\n+            },\n+            source=\"local\",\n+        ),\n+        ToolDefinition(\n+            name=\"apply_patch\",\n+            description=\"Apply a unified Git patch to files inside the current session workspace. Patch paths must stay within the workspace.\",\n+            input_schema={\n+                \"type\": \"object\",\n+                \"properties\": {\n+                    \"patch\": {\"type\": \"string\"},\n+                },\n+                \"required\": [\"patch\"],\n+            },\n+            source=\"local\",\n+        ),\n         ToolDefinition(\n             name=\"write_file\",\n             description=\"Create or overwrite a file in the current session workspace only. Do not use this for paths outside the current session workspace.\",\ndiff --git a/backend/app/runtime/manager.py b/backend/app/runtime/manager.py\nindex 1bd2a24..6e6dafc 100644\n--- a/backend/app/runtime/manager.py\n+++ b/backend/app/runtime/manager.py\n@@ -109,6 +109,10 @@ class RuntimeManager:\n             \"get_session_git_state\",\n             \"list_files\",\n             \"read_file\",\n+            \"read_file_range\",\n+            \"search_text\",\n+            \"show_status\",\n+            \"show_diff\",\n             \"list_skills\",\n             \"load_skill\",\n             \"memory_search\",\n@@ -1766,6 +1770,69 @@ class RuntimeManager:\n                     \"required\": [\"path\"],\n                 },\n             },\n+            {\n+                \"name\": \"read_file_range\",\n+                \"description\": \"Read a specific line range from a file in the current target workspace.\",\n+                \"input_schema\": {\n+                    \"type\": \"object\",\n+                    \"properties\": {\n+                        \"path\": {\"type\": \"string\"},\n+                        \"start_line\": {\"type\": \"integer\"},\n+                        \"end_line\": {\"type\": \"integer\"},\n+                    },\n+                    \"required\": [\"path\"],\n+                },\n+            },\n+            {\n+                \"name\": \"search_text\",\n+                \"description\": \"Search for text matches inside the current target workspace.\",\n+                \"input_schema\": {\n+                    \"type\": \"object\",\n+                    \"properties\": {\n+                        \"query\": {\"type\": \"string\"},\n+                        \"path\": {\"type\": \"string\"},\n+                        \"max_results\": {\"type\": \"integer\"},\n+                    },\n+                    \"required\": [\"query\"],\n+                },\n+            },\n+            {\n+                \"name\": \"show_status\",\n+                \"description\": \"Show the current Git working tree status for the target workspace.\",\n+                \"input_schema\": {\"type\": \"object\", \"properties\": {}},\n+            },\n+            {\n+                \"name\": \"show_diff\",\n+                \"description\": \"Show the current Git diff from HEAD for the target workspace or one file within it.\",\n+                \"input_schema\": {\n+                    \"type\": \"object\",\n+                    \"properties\": {\n+                        \"path\": {\"type\": \"string\"},\n+                    },\n+                },\n+            },\n+            {\n+                \"name\": \"run_test\",\n+                \"description\": \"Run a structured test command in the current target workspace without using a shell string.\",\n+                \"input_schema\": {\n+                    \"type\": \"object\",\n+                    \"properties\": {\n+                        \"argv\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}},\n+                    },\n+                    \"required\": [\"argv\"],\n+                },\n+            },\n+            {\n+                \"name\": \"apply_patch\",\n+                \"description\": \"Apply a unified Git patch to files inside the current target workspace.\",\n+                \"input_schema\": {\n+                    \"type\": \"object\",\n+                    \"properties\": {\n+                        \"patch\": {\"type\": \"string\"},\n+                    },\n+                    \"required\": [\"patch\"],\n+                },\n+            },\n             {\n                 \"name\": \"write_file\",\n                 \"description\": \"Create or overwrite a file in the current target workspace.\",\n@@ -2090,7 +2157,18 @@ class RuntimeManager:\n     ) -> tuple[str, str] | ToolExecutionResult | None:\n         if tool_name == \"bash\":\n             return None\n-        if tool_name in {\"list_files\", \"read_file\", \"write_file\", \"edit_file\"}:\n+        if tool_name in {\n+            \"list_files\",\n+            \"read_file\",\n+            \"read_file_range\",\n+            \"search_text\",\n+            \"show_status\",\n+            \"show_diff\",\n+            \"run_test\",\n+            \"apply_patch\",\n+            \"write_file\",\n+            \"edit_file\",\n+        }:\n             return broker_for_workspace.run(tool_name, tool_input)\n         if tool_name == \"get_session_git_state\":\n             return \"completed\", self._session_git_state_tool_output(session_id)\ndiff --git a/backend/app/tools/broker.py b/backend/app/tools/broker.py\nindex 6198f48..0883345 100644\n--- a/backend/app/tools/broker.py\n+++ b/backend/app/tools/broker.py\n@@ -1,8 +1,11 @@\n from __future__ import annotations\n \n import json\n+import re\n import subprocess\n from pathlib import Path\n+import shutil\n+import tempfile\n \n from app.core.config import settings\n from app.core import workspace as workspace_utils\n@@ -41,6 +44,26 @@ class ToolBroker:\n                 return \"completed\", self._list_files(str(payload.get(\"path\", \"\")))\n             if tool_name == \"read_file\":\n                 return self._read_file(str(payload.get(\"path\", \"\")))\n+            if tool_name == \"read_file_range\":\n+                return self._read_file_range(\n+                    str(payload.get(\"path\", \"\")),\n+                    payload.get(\"start_line\"),\n+                    payload.get(\"end_line\"),\n+                )\n+            if tool_name == \"search_text\":\n+                return self._search_text(\n+                    str(payload.get(\"query\", \"\")),\n+                    str(payload.get(\"path\", \"\")),\n+                    payload.get(\"max_results\"),\n+                )\n+            if tool_name == \"show_status\":\n+                return self._show_status()\n+            if tool_name == \"show_diff\":\n+                return self._show_diff(str(payload.get(\"path\", \"\")))\n+            if tool_name == \"run_test\":\n+                return self._run_test(payload.get(\"argv\"))\n+            if tool_name == \"apply_patch\":\n+                return self._apply_patch(str(payload.get(\"patch\", \"\")))\n             if tool_name == \"write_file\":\n                 return self._write_file(str(payload.get(\"path\", \"\")), str(payload.get(\"content\", \"\")))\n             if tool_name == \"edit_file\":\n@@ -125,6 +148,39 @@ class ToolBroker:\n             return \"error\", f\"Path is a directory, not a file: {path}\"\n         return \"completed\", \"\\n\".join(target.read_text().splitlines()[:120])\n \n+    def _read_file_range(self, path: str, start_line: object, end_line: object) -> tuple[str, str]:\n+        target = self._safe_path(path, mode=\"read\")\n+        if not target.exists():\n+            return \"error\", f\"File not found: {path}\"\n+        if target.is_dir():\n+            return \"error\", f\"Path is a directory, not a file: {path}\"\n+        start = start_line if isinstance(start_line, int) and start_line > 0 else 1\n+        end = end_line if isinstance(end_line, int) and end_line >= start else start + 119\n+        lines = target.read_text().splitlines()\n+        if start > len(lines):\n+            return \"error\", f\"start_line {start} is beyond the end of {path}\"\n+        selected = lines[start - 1 : end]\n+        rendered = [f\"{index}: {line}\" for index, line in enumerate(selected, start=start)]\n+        return \"completed\", \"\\n\".join(rendered)\n+\n+    def _search_text(self, query: str, path: str, max_results: object) -> tuple[str, str]:\n+        normalized = query.strip()\n+        if not normalized:\n+            return \"error\", \"search_text requires a non-empty query.\"\n+        target = self._resolve_path(path, mode=\"list\") if path.strip() else self.project_root\n+        if not target.exists():\n+            return \"error\", f\"Search path does not exist: {path or self.project_root.as_posix()}\"\n+        limit = max_results if isinstance(max_results, int) and max_results > 0 else 40\n+        rg_bin = shutil.which(\"rg\")\n+        if rg_bin:\n+            command = [rg_bin, \"-n\", \"--no-heading\", \"--color\", \"never\", normalized, str(target)]\n+            result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=20)\n+            output = (result.stdout or result.stderr).strip()\n+            if not output:\n+                return \"completed\", f\"No matches found for query: {normalized}\"\n+            return \"completed\", \"\\n\".join(output.splitlines()[:limit])\n+        return self._search_text_fallback(normalized, target, limit)\n+\n     def _write_file(self, path: str, content: str) -> tuple[str, str]:\n         target = self._safe_path(path, mode=\"write\")\n         target.parent.mkdir(parents=True, exist_ok=True)\n@@ -145,6 +201,115 @@ class ToolBroker:\n         target.write_text(current.replace(old_text, new_text, 1))\n         return \"completed\", f\"Edited {path}\"\n \n+    def _show_status(self) -> tuple[str, str]:\n+        result = subprocess.run(\n+            [\"git\", \"status\", \"--short\"],\n+            cwd=self.project_root,\n+            capture_output=True,\n+            text=True,\n+            check=False,\n+            timeout=20,\n+        )\n+        if result.returncode != 0:\n+            output = (result.stdout or result.stderr).strip() or \"Not a Git repository.\"\n+            return \"error\", output\n+        output = result.stdout.strip()\n+        return \"completed\", output or \"Working tree is clean.\"\n+\n+    def _show_diff(self, path: str) -> tuple[str, str]:\n+        target = self._resolve_path(path, mode=\"read\") if path.strip() else self.project_root\n+        if not workspace_utils.path_within(self.project_root, target):\n+            return \"error\", \"show_diff only supports paths inside the current session workspace.\"\n+        relative_path = None\n+        if target != self.project_root:\n+            relative_path = target.relative_to(self.project_root).as_posix()\n+        command = [\"git\", \"diff\", \"--no-ext-diff\", \"HEAD\", \"--\"]\n+        if relative_path:\n+            command.append(relative_path)\n+        result = subprocess.run(\n+            command,\n+            cwd=self.project_root,\n+            capture_output=True,\n+            text=True,\n+            check=False,\n+            timeout=20,\n+        )\n+        if result.returncode != 0:\n+            output = (result.stdout or result.stderr).strip() or \"Unable to compute diff.\"\n+            return \"error\", output\n+        output = result.stdout.strip()\n+        return \"completed\", (output[:20000] if output else \"No diff from HEAD.\")\n+\n+    def _run_test(self, argv: object) -> tuple[str, str]:\n+        if not isinstance(argv, list) or not argv:\n+            return \"error\", \"run_test requires a non-empty argv list.\"\n+        command = [str(item).strip() for item in argv if str(item).strip()]\n+        if not command:\n+            return \"error\", \"run_test requires a non-empty argv list.\"\n+        result = subprocess.run(\n+            command,\n+            cwd=self.project_root,\n+            capture_output=True,\n+            text=True,\n+            check=False,\n+            timeout=120,\n+        )\n+        combined = \"\\n\".join(\n+            part for part in [result.stdout.strip(), result.stderr.strip()] if part\n+        ).strip()\n+        output = combined[:20000] if combined else \"(no output)\"\n+        prefix = f\"exit_code={result.returncode}\"\n+        return (\"completed\" if result.returncode == 0 else \"error\"), f\"{prefix}\\n{output}\"\n+\n+    def _apply_patch(self, patch_text: str) -> tuple[str, str]:\n+        if not self.write_enabled:\n+            return \"blocked\", \"This session is in Default Conversations mode. Bind it to a workspace before applying patches.\"\n+        normalized = patch_text.strip()\n+        if not normalized:\n+            return \"error\", \"apply_patch requires a non-empty patch.\"\n+        repo_root = self._git_repo_root()\n+        if repo_root is None:\n+            return \"error\", \"apply_patch requires the current workspace to be inside a Git repository.\"\n+        extracted_paths = self._extract_patch_paths(normalized)\n+        if not extracted_paths:\n+            return \"error\", \"apply_patch could not determine any patch targets.\"\n+        for relative_path in extracted_paths:\n+            candidate = (repo_root / relative_path).resolve()\n+            if not workspace_utils.path_within(self.project_root, candidate):\n+                return \"blocked\", f\"Patch target is outside the current session workspace: {relative_path}\"\n+        with tempfile.NamedTemporaryFile(\"w\", encoding=\"utf-8\", delete=False) as handle:\n+            handle.write(normalized + \"\\n\")\n+            temp_path = Path(handle.name)\n+        try:\n+            check = subprocess.run(\n+                [\"git\", \"apply\", \"--check\", \"--whitespace=nowarn\", temp_path.as_posix()],\n+                cwd=repo_root,\n+                capture_output=True,\n+                text=True,\n+                check=False,\n+                timeout=20,\n+            )\n+            if check.returncode != 0:\n+                output = (check.stdout or check.stderr).strip() or \"Patch check failed.\"\n+                return \"error\", output\n+            apply = subprocess.run(\n+                [\"git\", \"apply\", \"--whitespace=nowarn\", temp_path.as_posix()],\n+                cwd=repo_root,\n+                capture_output=True,\n+                text=True,\n+                check=False,\n+                timeout=20,\n+            )\n+            if apply.returncode != 0:\n+                output = (apply.stdout or apply.stderr).strip() or \"Patch apply failed.\"\n+                return \"error\", output\n+            return \"completed\", f\"Applied patch touching {len(extracted_paths)} file(s).\"\n+        finally:\n+            try:\n+                temp_path.unlink(missing_ok=True)\n+            except Exception:\n+                pass\n+\n     def _run_bash(self, command: str) -> tuple[str, str]:\n         if not command.strip():\n             return \"error\", \"bash requires a command after 'bash:'.\"\n@@ -162,6 +327,66 @@ class ToolBroker:\n         output = (result.stdout + result.stderr).strip()[:10000] or \"(no output)\"\n         return (\"completed\" if result.returncode == 0 else \"error\"), output\n \n+    def _search_text_fallback(self, query: str, root: Path, limit: int) -> tuple[str, str]:\n+        matches: list[str] = []\n+        for file_path in sorted(self._iter_visible_files(root)):\n+            try:\n+                lines = file_path.read_text().splitlines()\n+            except Exception:\n+                continue\n+            for index, line in enumerate(lines, start=1):\n+                if query not in line:\n+                    continue\n+                relative = file_path.relative_to(root).as_posix() if root.is_dir() else file_path.name\n+                matches.append(f\"{relative}:{index}:{line}\")\n+                if len(matches) >= limit:\n+                    return \"completed\", \"\\n\".join(matches)\n+        if not matches:\n+            return \"completed\", f\"No matches found for query: {query}\"\n+        return \"completed\", \"\\n\".join(matches)\n+\n+    def _git_repo_root(self) -> Path | None:\n+        result = subprocess.run(\n+            [\"git\", \"rev-parse\", \"--show-toplevel\"],\n+            cwd=self.project_root,\n+            capture_output=True,\n+            text=True,\n+            check=False,\n+            timeout=20,\n+        )\n+        if result.returncode != 0:\n+            return None\n+        output = (result.stdout or result.stderr).strip()\n+        if not output:\n+            return None\n+        path = Path(output).resolve()\n+        return path if path.exists() and path.is_dir() else None\n+\n+    def _extract_patch_paths(self, patch_text: str) -> list[Path]:\n+        paths: list[Path] = []\n+        seen: set[str] = set()\n+        for line in patch_text.splitlines():\n+            if not line.startswith(\"+++ b/\"):\n+                continue\n+            raw = line[6:].strip()\n+            if not raw or raw == \"/dev/null\":\n+                continue\n+            normalized = raw.split(\"\\t\", 1)[0].strip()\n+            key = normalized\n+            if key in seen:\n+                continue\n+            seen.add(key)\n+            paths.append(Path(normalized))\n+        if paths:\n+            return paths\n+        for match in re.finditer(r\"diff --git a/(.+?) b/(.+)\", patch_text):\n+            normalized = match.group(2).strip()\n+            if not normalized or normalized == \"/dev/null\" or normalized in seen:\n+                continue\n+            seen.add(normalized)\n+            paths.append(Path(normalized))\n+        return paths\n+\n     def _iter_visible_files(self, root: Path):\n         import os\n \ndiff --git a/backend/pyproject.toml b/backend/pyproject.toml\nindex 156f25c..9d297fd 100644\n--- a/backend/pyproject.toml\n+++ b/backend/pyproject.toml\n@@ -22,6 +22,7 @@ dependencies = [\n \n [project.scripts]\n jarvis-worker = \"app.worker:main\"\n+jarvis-eval = \"evals.cli:main\"\n \n [build-system]\n requires = [\"setuptools>=68\"]",
+        "workspace_diff_is_empty": false,
+        "approvals": [],
+        "timeline_events": [
+          {
+            "event_id": 1871,
+            "session_id": "602efcee-5453-44c7-bbf7-43a04f54f748",
+            "type": "session.created",
+            "content": "Session 'Eval git-state-summary' created.",
+            "parts": null,
+            "created_at": "2026-05-19T07:54:22.231019"
+          },
+          {
+            "event_id": 1872,
+            "session_id": "602efcee-5453-44c7-bbf7-43a04f54f748",
+            "type": "message.user",
+            "content": "Check the current repository git state and summarize the repository root, current branch, and working tree status.",
+            "parts": [
+              {
+                "type": "text",
+                "text": "Check the current repository git state and summarize the repository root, current branch, and working tree status."
+              }
+            ],
+            "created_at": "2026-05-19T07:54:22.298195"
+          },
+          {
+            "event_id": 1874,
+            "session_id": "602efcee-5453-44c7-bbf7-43a04f54f748",
+            "type": "turn.started",
+            "content": "Turn #51 started.",
+            "parts": null,
+            "created_at": "2026-05-19T07:54:25.203378"
+          },
+          {
+            "event_id": 1875,
+            "session_id": "602efcee-5453-44c7-bbf7-43a04f54f748",
+            "type": "message.assistant",
+            "content": "OpenAI-compatible request failed: [Errno 8] nodename nor servname provided, or not known",
+            "parts": [
+              {
+                "type": "text",
+                "text": "OpenAI-compatible request failed: [Errno 8] nodename nor servname provided, or not known"
+              }
+            ],
+            "created_at": "2026-05-19T07:54:28.262072"
+          },
+          {
+            "event_id": 1876,
+            "session_id": "602efcee-5453-44c7-bbf7-43a04f54f748",
+            "type": "turn.completed",
+            "content": "Turn #51 completed.",
+            "parts": null,
+            "created_at": "2026-05-19T07:54:28.264892"
+          }
+        ],
+        "tool_executions": [],
+        "turns": [
+          {
+            "id": 51,
+            "session_id": "602efcee-5453-44c7-bbf7-43a04f54f748",
+            "branch_context_id": "777fb09c-d2fc-45b2-97e4-32cd7cb00ff7",
+            "user_message_id": 333,
+            "workspace_path": "/Users/bytedance/Desktop/python/Jarvis",
+            "workspace_fingerprint": "91068dbae6e2be03",
+            "execution_mode": "normal",
+            "status": "completed",
+            "started_at": "2026-05-19T07:54:22.464261",
+            "updated_at": "2026-05-19T07:54:28.263646",
+            "completed_at": "2026-05-19T07:54:28.263652",
+            "cancel_requested": false,
+            "last_checkpoint_seq": 2,
+            "resume_hint": null,
+            "error_summary": null,
+            "resumable": false
+          }
+        ]
+      }
+    },
+    {
+      "task_id": "repo-structure-summary",
+      "task_name": "Summarize repository structure",
+      "label": "partial",
+      "primary_failure_tag": "workspace_violation",
+      "timed_out": false,
+      "duration_seconds": 11.77731529099401,
+      "session_id": "49703ff3-3714-48db-be07-862481ae6d5d",
+      "checks": [
+        {
+          "kind": "final_text_contains_all",
+          "passed": false,
+          "message": "missing substrings: backend, frontend, src-tauri"
+        },
+        {
+          "kind": "workspace_diff_is_empty",
+          "passed": false,
+          "message": "workspace diff is not empty"
+        },
+        {
+          "kind": "max_pending_approval_count",
+          "passed": true,
+          "message": "pending approvals=0"
+        }
+      ],
+      "evidence": {
+        "task_id": "repo-structure-summary",
+        "session_id": "49703ff3-3714-48db-be07-862481ae6d5d",
+        "effective_workspace_path": null,
+        "started_at": "2026-05-19T07:54:34.330976+00:00",
+        "finished_at": "2026-05-19T07:54:46.108230+00:00",
+        "duration_seconds": 11.77731529099401,
+        "timed_out": false,
+        "run_error": null,
+        "session_status": "idle",
+        "terminal_turn_status": "completed",
+        "latest_turn_error_summary": null,
+        "latest_turn_resume_hint": null,
+        "final_assistant_message": "OpenAI-compatible request failed: [Errno 8] nodename nor servname provided, or not known",
+        "pending_approval_count": 0,
+        "workspace_status_text": "M backend/app/mcp/registry.py\n M backend/app/runtime/manager.py\n M backend/app/tools/broker.py\n M backend/pyproject.toml\n?? backend/evals/\n?? backend/tests/test_eval_runner.py\n?? backend/tests/test_tool_broker_structured_tools.py",
+        "workspace_diff_text": "diff --git a/backend/app/mcp/registry.py b/backend/app/mcp/registry.py\nindex 589a312..1b3c581 100644\n--- a/backend/app/mcp/registry.py\n+++ b/backend/app/mcp/registry.py\n@@ -64,6 +64,75 @@ def local_tool_definitions(*, allow_subagent_tool: bool = True) -> list[ToolDefi\n             },\n             source=\"local\",\n         ),\n+        ToolDefinition(\n+            name=\"read_file_range\",\n+            description=\"Read a specific line range from a file in the current session workspace or an explicitly allowed external read path.\",\n+            input_schema={\n+                \"type\": \"object\",\n+                \"properties\": {\n+                    \"path\": {\"type\": \"string\"},\n+                    \"start_line\": {\"type\": \"integer\"},\n+                    \"end_line\": {\"type\": \"integer\"},\n+                },\n+                \"required\": [\"path\"],\n+            },\n+            source=\"local\",\n+        ),\n+        ToolDefinition(\n+            name=\"search_text\",\n+            description=\"Search for text matches inside the current session workspace or an explicitly allowed external read path.\",\n+            input_schema={\n+                \"type\": \"object\",\n+                \"properties\": {\n+                    \"query\": {\"type\": \"string\"},\n+                    \"path\": {\"type\": \"string\"},\n+                    \"max_results\": {\"type\": \"integer\"},\n+                },\n+                \"required\": [\"query\"],\n+            },\n+            source=\"local\",\n+        ),\n+        ToolDefinition(\n+            name=\"show_status\",\n+            description=\"Show the current Git working tree status for the session workspace.\",\n+            input_schema={\"type\": \"object\", \"properties\": {}},\n+            source=\"local\",\n+        ),\n+        ToolDefinition(\n+            name=\"show_diff\",\n+            description=\"Show the current Git diff from HEAD for the session workspace or one file within it.\",\n+            input_schema={\n+                \"type\": \"object\",\n+                \"properties\": {\n+                    \"path\": {\"type\": \"string\"},\n+                },\n+            },\n+            source=\"local\",\n+        ),\n+        ToolDefinition(\n+            name=\"run_test\",\n+            description=\"Run a structured test command in the current session workspace without using a shell string.\",\n+            input_schema={\n+                \"type\": \"object\",\n+                \"properties\": {\n+                    \"argv\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}},\n+                },\n+                \"required\": [\"argv\"],\n+            },\n+            source=\"local\",\n+        ),\n+        ToolDefinition(\n+            name=\"apply_patch\",\n+            description=\"Apply a unified Git patch to files inside the current session workspace. Patch paths must stay within the workspace.\",\n+            input_schema={\n+                \"type\": \"object\",\n+                \"properties\": {\n+                    \"patch\": {\"type\": \"string\"},\n+                },\n+                \"required\": [\"patch\"],\n+            },\n+            source=\"local\",\n+        ),\n         ToolDefinition(\n             name=\"write_file\",\n             description=\"Create or overwrite a file in the current session workspace only. Do not use this for paths outside the current session workspace.\",\ndiff --git a/backend/app/runtime/manager.py b/backend/app/runtime/manager.py\nindex 1bd2a24..6e6dafc 100644\n--- a/backend/app/runtime/manager.py\n+++ b/backend/app/runtime/manager.py\n@@ -109,6 +109,10 @@ class RuntimeManager:\n             \"get_session_git_state\",\n             \"list_files\",\n             \"read_file\",\n+            \"read_file_range\",\n+            \"search_text\",\n+            \"show_status\",\n+            \"show_diff\",\n             \"list_skills\",\n             \"load_skill\",\n             \"memory_search\",\n@@ -1766,6 +1770,69 @@ class RuntimeManager:\n                     \"required\": [\"path\"],\n                 },\n             },\n+            {\n+                \"name\": \"read_file_range\",\n+                \"description\": \"Read a specific line range from a file in the current target workspace.\",\n+                \"input_schema\": {\n+                    \"type\": \"object\",\n+                    \"properties\": {\n+                        \"path\": {\"type\": \"string\"},\n+                        \"start_line\": {\"type\": \"integer\"},\n+                        \"end_line\": {\"type\": \"integer\"},\n+                    },\n+                    \"required\": [\"path\"],\n+                },\n+            },\n+            {\n+                \"name\": \"search_text\",\n+                \"description\": \"Search for text matches inside the current target workspace.\",\n+                \"input_schema\": {\n+                    \"type\": \"object\",\n+                    \"properties\": {\n+                        \"query\": {\"type\": \"string\"},\n+                        \"path\": {\"type\": \"string\"},\n+                        \"max_results\": {\"type\": \"integer\"},\n+                    },\n+                    \"required\": [\"query\"],\n+                },\n+            },\n+            {\n+                \"name\": \"show_status\",\n+                \"description\": \"Show the current Git working tree status for the target workspace.\",\n+                \"input_schema\": {\"type\": \"object\", \"properties\": {}},\n+            },\n+            {\n+                \"name\": \"show_diff\",\n+                \"description\": \"Show the current Git diff from HEAD for the target workspace or one file within it.\",\n+                \"input_schema\": {\n+                    \"type\": \"object\",\n+                    \"properties\": {\n+                        \"path\": {\"type\": \"string\"},\n+                    },\n+                },\n+            },\n+            {\n+                \"name\": \"run_test\",\n+                \"description\": \"Run a structured test command in the current target workspace without using a shell string.\",\n+                \"input_schema\": {\n+                    \"type\": \"object\",\n+                    \"properties\": {\n+                        \"argv\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}},\n+                    },\n+                    \"required\": [\"argv\"],\n+                },\n+            },\n+            {\n+                \"name\": \"apply_patch\",\n+                \"description\": \"Apply a unified Git patch to files inside the current target workspace.\",\n+                \"input_schema\": {\n+                    \"type\": \"object\",\n+                    \"properties\": {\n+                        \"patch\": {\"type\": \"string\"},\n+                    },\n+                    \"required\": [\"patch\"],\n+                },\n+            },\n             {\n                 \"name\": \"write_file\",\n                 \"description\": \"Create or overwrite a file in the current target workspace.\",\n@@ -2090,7 +2157,18 @@ class RuntimeManager:\n     ) -> tuple[str, str] | ToolExecutionResult | None:\n         if tool_name == \"bash\":\n             return None\n-        if tool_name in {\"list_files\", \"read_file\", \"write_file\", \"edit_file\"}:\n+        if tool_name in {\n+            \"list_files\",\n+            \"read_file\",\n+            \"read_file_range\",\n+            \"search_text\",\n+            \"show_status\",\n+            \"show_diff\",\n+            \"run_test\",\n+            \"apply_patch\",\n+            \"write_file\",\n+            \"edit_file\",\n+        }:\n             return broker_for_workspace.run(tool_name, tool_input)\n         if tool_name == \"get_session_git_state\":\n             return \"completed\", self._session_git_state_tool_output(session_id)\ndiff --git a/backend/app/tools/broker.py b/backend/app/tools/broker.py\nindex 6198f48..0883345 100644\n--- a/backend/app/tools/broker.py\n+++ b/backend/app/tools/broker.py\n@@ -1,8 +1,11 @@\n from __future__ import annotations\n \n import json\n+import re\n import subprocess\n from pathlib import Path\n+import shutil\n+import tempfile\n \n from app.core.config import settings\n from app.core import workspace as workspace_utils\n@@ -41,6 +44,26 @@ class ToolBroker:\n                 return \"completed\", self._list_files(str(payload.get(\"path\", \"\")))\n             if tool_name == \"read_file\":\n                 return self._read_file(str(payload.get(\"path\", \"\")))\n+            if tool_name == \"read_file_range\":\n+                return self._read_file_range(\n+                    str(payload.get(\"path\", \"\")),\n+                    payload.get(\"start_line\"),\n+                    payload.get(\"end_line\"),\n+                )\n+            if tool_name == \"search_text\":\n+                return self._search_text(\n+                    str(payload.get(\"query\", \"\")),\n+                    str(payload.get(\"path\", \"\")),\n+                    payload.get(\"max_results\"),\n+                )\n+            if tool_name == \"show_status\":\n+                return self._show_status()\n+            if tool_name == \"show_diff\":\n+                return self._show_diff(str(payload.get(\"path\", \"\")))\n+            if tool_name == \"run_test\":\n+                return self._run_test(payload.get(\"argv\"))\n+            if tool_name == \"apply_patch\":\n+                return self._apply_patch(str(payload.get(\"patch\", \"\")))\n             if tool_name == \"write_file\":\n                 return self._write_file(str(payload.get(\"path\", \"\")), str(payload.get(\"content\", \"\")))\n             if tool_name == \"edit_file\":\n@@ -125,6 +148,39 @@ class ToolBroker:\n             return \"error\", f\"Path is a directory, not a file: {path}\"\n         return \"completed\", \"\\n\".join(target.read_text().splitlines()[:120])\n \n+    def _read_file_range(self, path: str, start_line: object, end_line: object) -> tuple[str, str]:\n+        target = self._safe_path(path, mode=\"read\")\n+        if not target.exists():\n+            return \"error\", f\"File not found: {path}\"\n+        if target.is_dir():\n+            return \"error\", f\"Path is a directory, not a file: {path}\"\n+        start = start_line if isinstance(start_line, int) and start_line > 0 else 1\n+        end = end_line if isinstance(end_line, int) and end_line >= start else start + 119\n+        lines = target.read_text().splitlines()\n+        if start > len(lines):\n+            return \"error\", f\"start_line {start} is beyond the end of {path}\"\n+        selected = lines[start - 1 : end]\n+        rendered = [f\"{index}: {line}\" for index, line in enumerate(selected, start=start)]\n+        return \"completed\", \"\\n\".join(rendered)\n+\n+    def _search_text(self, query: str, path: str, max_results: object) -> tuple[str, str]:\n+        normalized = query.strip()\n+        if not normalized:\n+            return \"error\", \"search_text requires a non-empty query.\"\n+        target = self._resolve_path(path, mode=\"list\") if path.strip() else self.project_root\n+        if not target.exists():\n+            return \"error\", f\"Search path does not exist: {path or self.project_root.as_posix()}\"\n+        limit = max_results if isinstance(max_results, int) and max_results > 0 else 40\n+        rg_bin = shutil.which(\"rg\")\n+        if rg_bin:\n+            command = [rg_bin, \"-n\", \"--no-heading\", \"--color\", \"never\", normalized, str(target)]\n+            result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=20)\n+            output = (result.stdout or result.stderr).strip()\n+            if not output:\n+                return \"completed\", f\"No matches found for query: {normalized}\"\n+            return \"completed\", \"\\n\".join(output.splitlines()[:limit])\n+        return self._search_text_fallback(normalized, target, limit)\n+\n     def _write_file(self, path: str, content: str) -> tuple[str, str]:\n         target = self._safe_path(path, mode=\"write\")\n         target.parent.mkdir(parents=True, exist_ok=True)\n@@ -145,6 +201,115 @@ class ToolBroker:\n         target.write_text(current.replace(old_text, new_text, 1))\n         return \"completed\", f\"Edited {path}\"\n \n+    def _show_status(self) -> tuple[str, str]:\n+        result = subprocess.run(\n+            [\"git\", \"status\", \"--short\"],\n+            cwd=self.project_root,\n+            capture_output=True,\n+            text=True,\n+            check=False,\n+            timeout=20,\n+        )\n+        if result.returncode != 0:\n+            output = (result.stdout or result.stderr).strip() or \"Not a Git repository.\"\n+            return \"error\", output\n+        output = result.stdout.strip()\n+        return \"completed\", output or \"Working tree is clean.\"\n+\n+    def _show_diff(self, path: str) -> tuple[str, str]:\n+        target = self._resolve_path(path, mode=\"read\") if path.strip() else self.project_root\n+        if not workspace_utils.path_within(self.project_root, target):\n+            return \"error\", \"show_diff only supports paths inside the current session workspace.\"\n+        relative_path = None\n+        if target != self.project_root:\n+            relative_path = target.relative_to(self.project_root).as_posix()\n+        command = [\"git\", \"diff\", \"--no-ext-diff\", \"HEAD\", \"--\"]\n+        if relative_path:\n+            command.append(relative_path)\n+        result = subprocess.run(\n+            command,\n+            cwd=self.project_root,\n+            capture_output=True,\n+            text=True,\n+            check=False,\n+            timeout=20,\n+        )\n+        if result.returncode != 0:\n+            output = (result.stdout or result.stderr).strip() or \"Unable to compute diff.\"\n+            return \"error\", output\n+        output = result.stdout.strip()\n+        return \"completed\", (output[:20000] if output else \"No diff from HEAD.\")\n+\n+    def _run_test(self, argv: object) -> tuple[str, str]:\n+        if not isinstance(argv, list) or not argv:\n+            return \"error\", \"run_test requires a non-empty argv list.\"\n+        command = [str(item).strip() for item in argv if str(item).strip()]\n+        if not command:\n+            return \"error\", \"run_test requires a non-empty argv list.\"\n+        result = subprocess.run(\n+            command,\n+            cwd=self.project_root,\n+            capture_output=True,\n+            text=True,\n+            check=False,\n+            timeout=120,\n+        )\n+        combined = \"\\n\".join(\n+            part for part in [result.stdout.strip(), result.stderr.strip()] if part\n+        ).strip()\n+        output = combined[:20000] if combined else \"(no output)\"\n+        prefix = f\"exit_code={result.returncode}\"\n+        return (\"completed\" if result.returncode == 0 else \"error\"), f\"{prefix}\\n{output}\"\n+\n+    def _apply_patch(self, patch_text: str) -> tuple[str, str]:\n+        if not self.write_enabled:\n+            return \"blocked\", \"This session is in Default Conversations mode. Bind it to a workspace before applying patches.\"\n+        normalized = patch_text.strip()\n+        if not normalized:\n+            return \"error\", \"apply_patch requires a non-empty patch.\"\n+        repo_root = self._git_repo_root()\n+        if repo_root is None:\n+            return \"error\", \"apply_patch requires the current workspace to be inside a Git repository.\"\n+        extracted_paths = self._extract_patch_paths(normalized)\n+        if not extracted_paths:\n+            return \"error\", \"apply_patch could not determine any patch targets.\"\n+        for relative_path in extracted_paths:\n+            candidate = (repo_root / relative_path).resolve()\n+            if not workspace_utils.path_within(self.project_root, candidate):\n+                return \"blocked\", f\"Patch target is outside the current session workspace: {relative_path}\"\n+        with tempfile.NamedTemporaryFile(\"w\", encoding=\"utf-8\", delete=False) as handle:\n+            handle.write(normalized + \"\\n\")\n+            temp_path = Path(handle.name)\n+        try:\n+            check = subprocess.run(\n+                [\"git\", \"apply\", \"--check\", \"--whitespace=nowarn\", temp_path.as_posix()],\n+                cwd=repo_root,\n+                capture_output=True,\n+                text=True,\n+                check=False,\n+                timeout=20,\n+            )\n+            if check.returncode != 0:\n+                output = (check.stdout or check.stderr).strip() or \"Patch check failed.\"\n+                return \"error\", output\n+            apply = subprocess.run(\n+                [\"git\", \"apply\", \"--whitespace=nowarn\", temp_path.as_posix()],\n+                cwd=repo_root,\n+                capture_output=True,\n+                text=True,\n+                check=False,\n+                timeout=20,\n+            )\n+            if apply.returncode != 0:\n+                output = (apply.stdout or apply.stderr).strip() or \"Patch apply failed.\"\n+                return \"error\", output\n+            return \"completed\", f\"Applied patch touching {len(extracted_paths)} file(s).\"\n+        finally:\n+            try:\n+                temp_path.unlink(missing_ok=True)\n+            except Exception:\n+                pass\n+\n     def _run_bash(self, command: str) -> tuple[str, str]:\n         if not command.strip():\n             return \"error\", \"bash requires a command after 'bash:'.\"\n@@ -162,6 +327,66 @@ class ToolBroker:\n         output = (result.stdout + result.stderr).strip()[:10000] or \"(no output)\"\n         return (\"completed\" if result.returncode == 0 else \"error\"), output\n \n+    def _search_text_fallback(self, query: str, root: Path, limit: int) -> tuple[str, str]:\n+        matches: list[str] = []\n+        for file_path in sorted(self._iter_visible_files(root)):\n+            try:\n+                lines = file_path.read_text().splitlines()\n+            except Exception:\n+                continue\n+            for index, line in enumerate(lines, start=1):\n+                if query not in line:\n+                    continue\n+                relative = file_path.relative_to(root).as_posix() if root.is_dir() else file_path.name\n+                matches.append(f\"{relative}:{index}:{line}\")\n+                if len(matches) >= limit:\n+                    return \"completed\", \"\\n\".join(matches)\n+        if not matches:\n+            return \"completed\", f\"No matches found for query: {query}\"\n+        return \"completed\", \"\\n\".join(matches)\n+\n+    def _git_repo_root(self) -> Path | None:\n+        result = subprocess.run(\n+            [\"git\", \"rev-parse\", \"--show-toplevel\"],\n+            cwd=self.project_root,\n+            capture_output=True,\n+            text=True,\n+            check=False,\n+            timeout=20,\n+        )\n+        if result.returncode != 0:\n+            return None\n+        output = (result.stdout or result.stderr).strip()\n+        if not output:\n+            return None\n+        path = Path(output).resolve()\n+        return path if path.exists() and path.is_dir() else None\n+\n+    def _extract_patch_paths(self, patch_text: str) -> list[Path]:\n+        paths: list[Path] = []\n+        seen: set[str] = set()\n+        for line in patch_text.splitlines():\n+            if not line.startswith(\"+++ b/\"):\n+                continue\n+            raw = line[6:].strip()\n+            if not raw or raw == \"/dev/null\":\n+                continue\n+            normalized = raw.split(\"\\t\", 1)[0].strip()\n+            key = normalized\n+            if key in seen:\n+                continue\n+            seen.add(key)\n+            paths.append(Path(normalized))\n+        if paths:\n+            return paths\n+        for match in re.finditer(r\"diff --git a/(.+?) b/(.+)\", patch_text):\n+            normalized = match.group(2).strip()\n+            if not normalized or normalized == \"/dev/null\" or normalized in seen:\n+                continue\n+            seen.add(normalized)\n+            paths.append(Path(normalized))\n+        return paths\n+\n     def _iter_visible_files(self, root: Path):\n         import os\n \ndiff --git a/backend/pyproject.toml b/backend/pyproject.toml\nindex 156f25c..9d297fd 100644\n--- a/backend/pyproject.toml\n+++ b/backend/pyproject.toml\n@@ -22,6 +22,7 @@ dependencies = [\n \n [project.scripts]\n jarvis-worker = \"app.worker:main\"\n+jarvis-eval = \"evals.cli:main\"\n \n [build-system]\n requires = [\"setuptools>=68\"]",
+        "workspace_diff_is_empty": false,
+        "approvals": [],
+        "timeline_events": [
+          {
+            "event_id": 1877,
+            "session_id": "49703ff3-3714-48db-be07-862481ae6d5d",
+            "type": "session.created",
+            "content": "Session 'Eval repo-structure-summary' created.",
+            "parts": null,
+            "created_at": "2026-05-19T07:54:34.101665"
+          },
+          {
+            "event_id": 1878,
+            "session_id": "49703ff3-3714-48db-be07-862481ae6d5d",
+            "type": "message.user",
+            "content": "Inspect this repository and give a concise summary of the main product areas. Mention backend, frontend, and src-tauri explicitly.",
+            "parts": [
+              {
+                "type": "text",
+                "text": "Inspect this repository and give a concise summary of the main product areas. Mention backend, frontend, and src-tauri explicitly."
+              }
+            ],
+            "created_at": "2026-05-19T07:54:34.158967"
+          },
+          {
+            "event_id": 1880,
+            "session_id": "49703ff3-3714-48db-be07-862481ae6d5d",
+            "type": "turn.started",
+            "content": "Turn #52 started.",
+            "parts": null,
+            "created_at": "2026-05-19T07:54:37.102288"
+          },
+          {
+            "event_id": 1881,
+            "session_id": "49703ff3-3714-48db-be07-862481ae6d5d",
+            "type": "message.assistant",
+            "content": "OpenAI-compatible request failed: [Errno 8] nodename nor servname provided, or not known",
+            "parts": [
+              {
+                "type": "text",
+                "text": "OpenAI-compatible request failed: [Errno 8] nodename nor servname provided, or not known"
+              }
+            ],
+            "created_at": "2026-05-19T07:54:40.114684"
+          },
+          {
+            "event_id": 1882,
+            "session_id": "49703ff3-3714-48db-be07-862481ae6d5d",
+            "type": "turn.completed",
+            "content": "Turn #52 completed.",
+            "parts": null,
+            "created_at": "2026-05-19T07:54:40.117221"
+          }
+        ],
+        "tool_executions": [],
+        "turns": [
+          {
+            "id": 52,
+            "session_id": "49703ff3-3714-48db-be07-862481ae6d5d",
+            "branch_context_id": "d132ff0f-8311-4103-909b-8b9f13e8b2f6",
+            "user_message_id": 335,
+            "workspace_path": "/Users/bytedance/Desktop/python/Jarvis",
+            "workspace_fingerprint": "91068dbae6e2be03",
+            "execution_mode": "normal",
+            "status": "completed",
+            "started_at": "2026-05-19T07:54:34.324944",
+            "updated_at": "2026-05-19T07:54:40.115870",
+            "completed_at": "2026-05-19T07:54:40.115876",
+            "cancel_requested": false,
+            "last_checkpoint_seq": 2,
+            "resume_hint": null,
+            "error_summary": null,
+            "resumable": false
+          }
+        ]
+      }
+    },
+    {
+      "task_id": "runtime-manager-summary",
+      "task_name": "Summarize runtime manager responsibilities",
+      "label": "fail",
+      "primary_failure_tag": "workspace_violation",
+      "timed_out": false,
+      "duration_seconds": 12.01014995900914,
+      "session_id": "aea16a81-ba15-4959-a4c4-7e8e0325ddfd",
+      "checks": [
+        {
+          "kind": "final_text_contains_all",
+          "passed": false,
+          "message": "missing substrings: sessions, turns, approvals, subagents"
+        },
+        {
+          "kind": "tool_used",
+          "passed": false,
+          "message": "tool_used=read_file"
+        },
+        {
+          "kind": "workspace_diff_is_empty",
+          "passed": false,
+          "message": "workspace diff is not empty"
+        }
+      ],
+      "evidence": {
+        "task_id": "runtime-manager-summary",
+        "session_id": "aea16a81-ba15-4959-a4c4-7e8e0325ddfd",
+        "effective_workspace_path": null,
+        "started_at": "2026-05-19T07:54:46.405958+00:00",
+        "finished_at": "2026-05-19T07:54:58.416024+00:00",
+        "duration_seconds": 12.01014995900914,
+        "timed_out": false,
+        "run_error": null,
+        "session_status": "idle",
+        "terminal_turn_status": "completed",
+        "latest_turn_error_summary": null,
+        "latest_turn_resume_hint": null,
+        "final_assistant_message": "OpenAI-compatible request failed: [Errno 8] nodename nor servname provided, or not known",
+        "pending_approval_count": 0,
+        "workspace_status_text": "M backend/app/mcp/registry.py\n M backend/app/runtime/manager.py\n M backend/app/tools/broker.py\n M backend/pyproject.toml\n?? backend/evals/\n?? backend/tests/test_eval_runner.py\n?? backend/tests/test_tool_broker_structured_tools.py",
+        "workspace_diff_text": "diff --git a/backend/app/mcp/registry.py b/backend/app/mcp/registry.py\nindex 589a312..1b3c581 100644\n--- a/backend/app/mcp/registry.py\n+++ b/backend/app/mcp/registry.py\n@@ -64,6 +64,75 @@ def local_tool_definitions(*, allow_subagent_tool: bool = True) -> list[ToolDefi\n             },\n             source=\"local\",\n         ),\n+        ToolDefinition(\n+            name=\"read_file_range\",\n+            description=\"Read a specific line range from a file in the current session workspace or an explicitly allowed external read path.\",\n+            input_schema={\n+                \"type\": \"object\",\n+                \"properties\": {\n+                    \"path\": {\"type\": \"string\"},\n+                    \"start_line\": {\"type\": \"integer\"},\n+                    \"end_line\": {\"type\": \"integer\"},\n+                },\n+                \"required\": [\"path\"],\n+            },\n+            source=\"local\",\n+        ),\n+        ToolDefinition(\n+            name=\"search_text\",\n+            description=\"Search for text matches inside the current session workspace or an explicitly allowed external read path.\",\n+            input_schema={\n+                \"type\": \"object\",\n+                \"properties\": {\n+                    \"query\": {\"type\": \"string\"},\n+                    \"path\": {\"type\": \"string\"},\n+                    \"max_results\": {\"type\": \"integer\"},\n+                },\n+                \"required\": [\"query\"],\n+            },\n+            source=\"local\",\n+        ),\n+        ToolDefinition(\n+            name=\"show_status\",\n+            description=\"Show the current Git working tree status for the session workspace.\",\n+            input_schema={\"type\": \"object\", \"properties\": {}},\n+            source=\"local\",\n+        ),\n+        ToolDefinition(\n+            name=\"show_diff\",\n+            description=\"Show the current Git diff from HEAD for the session workspace or one file within it.\",\n+            input_schema={\n+                \"type\": \"object\",\n+                \"properties\": {\n+                    \"path\": {\"type\": \"string\"},\n+                },\n+            },\n+            source=\"local\",\n+        ),\n+        ToolDefinition(\n+            name=\"run_test\",\n+            description=\"Run a structured test command in the current session workspace without using a shell string.\",\n+            input_schema={\n+                \"type\": \"object\",\n+                \"properties\": {\n+                    \"argv\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}},\n+                },\n+                \"required\": [\"argv\"],\n+            },\n+            source=\"local\",\n+        ),\n+        ToolDefinition(\n+            name=\"apply_patch\",\n+            description=\"Apply a unified Git patch to files inside the current session workspace. Patch paths must stay within the workspace.\",\n+            input_schema={\n+                \"type\": \"object\",\n+                \"properties\": {\n+                    \"patch\": {\"type\": \"string\"},\n+                },\n+                \"required\": [\"patch\"],\n+            },\n+            source=\"local\",\n+        ),\n         ToolDefinition(\n             name=\"write_file\",\n             description=\"Create or overwrite a file in the current session workspace only. Do not use this for paths outside the current session workspace.\",\ndiff --git a/backend/app/runtime/manager.py b/backend/app/runtime/manager.py\nindex 1bd2a24..6e6dafc 100644\n--- a/backend/app/runtime/manager.py\n+++ b/backend/app/runtime/manager.py\n@@ -109,6 +109,10 @@ class RuntimeManager:\n             \"get_session_git_state\",\n             \"list_files\",\n             \"read_file\",\n+            \"read_file_range\",\n+            \"search_text\",\n+            \"show_status\",\n+            \"show_diff\",\n             \"list_skills\",\n             \"load_skill\",\n             \"memory_search\",\n@@ -1766,6 +1770,69 @@ class RuntimeManager:\n                     \"required\": [\"path\"],\n                 },\n             },\n+            {\n+                \"name\": \"read_file_range\",\n+                \"description\": \"Read a specific line range from a file in the current target workspace.\",\n+                \"input_schema\": {\n+                    \"type\": \"object\",\n+                    \"properties\": {\n+                        \"path\": {\"type\": \"string\"},\n+                        \"start_line\": {\"type\": \"integer\"},\n+                        \"end_line\": {\"type\": \"integer\"},\n+                    },\n+                    \"required\": [\"path\"],\n+                },\n+            },\n+            {\n+                \"name\": \"search_text\",\n+                \"description\": \"Search for text matches inside the current target workspace.\",\n+                \"input_schema\": {\n+                    \"type\": \"object\",\n+                    \"properties\": {\n+                        \"query\": {\"type\": \"string\"},\n+                        \"path\": {\"type\": \"string\"},\n+                        \"max_results\": {\"type\": \"integer\"},\n+                    },\n+                    \"required\": [\"query\"],\n+                },\n+            },\n+            {\n+                \"name\": \"show_status\",\n+                \"description\": \"Show the current Git working tree status for the target workspace.\",\n+                \"input_schema\": {\"type\": \"object\", \"properties\": {}},\n+            },\n+            {\n+                \"name\": \"show_diff\",\n+                \"description\": \"Show the current Git diff from HEAD for the target workspace or one file within it.\",\n+                \"input_schema\": {\n+                    \"type\": \"object\",\n+                    \"properties\": {\n+                        \"path\": {\"type\": \"string\"},\n+                    },\n+                },\n+            },\n+            {\n+                \"name\": \"run_test\",\n+                \"description\": \"Run a structured test command in the current target workspace without using a shell string.\",\n+                \"input_schema\": {\n+                    \"type\": \"object\",\n+                    \"properties\": {\n+                        \"argv\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}},\n+                    },\n+                    \"required\": [\"argv\"],\n+                },\n+            },\n+            {\n+                \"name\": \"apply_patch\",\n+                \"description\": \"Apply a unified Git patch to files inside the current target workspace.\",\n+                \"input_schema\": {\n+                    \"type\": \"object\",\n+                    \"properties\": {\n+                        \"patch\": {\"type\": \"string\"},\n+                    },\n+                    \"required\": [\"patch\"],\n+                },\n+            },\n             {\n                 \"name\": \"write_file\",\n                 \"description\": \"Create or overwrite a file in the current target workspace.\",\n@@ -2090,7 +2157,18 @@ class RuntimeManager:\n     ) -> tuple[str, str] | ToolExecutionResult | None:\n         if tool_name == \"bash\":\n             return None\n-        if tool_name in {\"list_files\", \"read_file\", \"write_file\", \"edit_file\"}:\n+        if tool_name in {\n+            \"list_files\",\n+            \"read_file\",\n+            \"read_file_range\",\n+            \"search_text\",\n+            \"show_status\",\n+            \"show_diff\",\n+            \"run_test\",\n+            \"apply_patch\",\n+            \"write_file\",\n+            \"edit_file\",\n+        }:\n             return broker_for_workspace.run(tool_name, tool_input)\n         if tool_name == \"get_session_git_state\":\n             return \"completed\", self._session_git_state_tool_output(session_id)\ndiff --git a/backend/app/tools/broker.py b/backend/app/tools/broker.py\nindex 6198f48..0883345 100644\n--- a/backend/app/tools/broker.py\n+++ b/backend/app/tools/broker.py\n@@ -1,8 +1,11 @@\n from __future__ import annotations\n \n import json\n+import re\n import subprocess\n from pathlib import Path\n+import shutil\n+import tempfile\n \n from app.core.config import settings\n from app.core import workspace as workspace_utils\n@@ -41,6 +44,26 @@ class ToolBroker:\n                 return \"completed\", self._list_files(str(payload.get(\"path\", \"\")))\n             if tool_name == \"read_file\":\n                 return self._read_file(str(payload.get(\"path\", \"\")))\n+            if tool_name == \"read_file_range\":\n+                return self._read_file_range(\n+                    str(payload.get(\"path\", \"\")),\n+                    payload.get(\"start_line\"),\n+                    payload.get(\"end_line\"),\n+                )\n+            if tool_name == \"search_text\":\n+                return self._search_text(\n+                    str(payload.get(\"query\", \"\")),\n+                    str(payload.get(\"path\", \"\")),\n+                    payload.get(\"max_results\"),\n+                )\n+            if tool_name == \"show_status\":\n+                return self._show_status()\n+            if tool_name == \"show_diff\":\n+                return self._show_diff(str(payload.get(\"path\", \"\")))\n+            if tool_name == \"run_test\":\n+                return self._run_test(payload.get(\"argv\"))\n+            if tool_name == \"apply_patch\":\n+                return self._apply_patch(str(payload.get(\"patch\", \"\")))\n             if tool_name == \"write_file\":\n                 return self._write_file(str(payload.get(\"path\", \"\")), str(payload.get(\"content\", \"\")))\n             if tool_name == \"edit_file\":\n@@ -125,6 +148,39 @@ class ToolBroker:\n             return \"error\", f\"Path is a directory, not a file: {path}\"\n         return \"completed\", \"\\n\".join(target.read_text().splitlines()[:120])\n \n+    def _read_file_range(self, path: str, start_line: object, end_line: object) -> tuple[str, str]:\n+        target = self._safe_path(path, mode=\"read\")\n+        if not target.exists():\n+            return \"error\", f\"File not found: {path}\"\n+        if target.is_dir():\n+            return \"error\", f\"Path is a directory, not a file: {path}\"\n+        start = start_line if isinstance(start_line, int) and start_line > 0 else 1\n+        end = end_line if isinstance(end_line, int) and end_line >= start else start + 119\n+        lines = target.read_text().splitlines()\n+        if start > len(lines):\n+            return \"error\", f\"start_line {start} is beyond the end of {path}\"\n+        selected = lines[start - 1 : end]\n+        rendered = [f\"{index}: {line}\" for index, line in enumerate(selected, start=start)]\n+        return \"completed\", \"\\n\".join(rendered)\n+\n+    def _search_text(self, query: str, path: str, max_results: object) -> tuple[str, str]:\n+        normalized = query.strip()\n+        if not normalized:\n+            return \"error\", \"search_text requires a non-empty query.\"\n+        target = self._resolve_path(path, mode=\"list\") if path.strip() else self.project_root\n+        if not target.exists():\n+            return \"error\", f\"Search path does not exist: {path or self.project_root.as_posix()}\"\n+        limit = max_results if isinstance(max_results, int) and max_results > 0 else 40\n+        rg_bin = shutil.which(\"rg\")\n+        if rg_bin:\n+            command = [rg_bin, \"-n\", \"--no-heading\", \"--color\", \"never\", normalized, str(target)]\n+            result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=20)\n+            output = (result.stdout or result.stderr).strip()\n+            if not output:\n+                return \"completed\", f\"No matches found for query: {normalized}\"\n+            return \"completed\", \"\\n\".join(output.splitlines()[:limit])\n+        return self._search_text_fallback(normalized, target, limit)\n+\n     def _write_file(self, path: str, content: str) -> tuple[str, str]:\n         target = self._safe_path(path, mode=\"write\")\n         target.parent.mkdir(parents=True, exist_ok=True)\n@@ -145,6 +201,115 @@ class ToolBroker:\n         target.write_text(current.replace(old_text, new_text, 1))\n         return \"completed\", f\"Edited {path}\"\n \n+    def _show_status(self) -> tuple[str, str]:\n+        result = subprocess.run(\n+            [\"git\", \"status\", \"--short\"],\n+            cwd=self.project_root,\n+            capture_output=True,\n+            text=True,\n+            check=False,\n+            timeout=20,\n+        )\n+        if result.returncode != 0:\n+            output = (result.stdout or result.stderr).strip() or \"Not a Git repository.\"\n+            return \"error\", output\n+        output = result.stdout.strip()\n+        return \"completed\", output or \"Working tree is clean.\"\n+\n+    def _show_diff(self, path: str) -> tuple[str, str]:\n+        target = self._resolve_path(path, mode=\"read\") if path.strip() else self.project_root\n+        if not workspace_utils.path_within(self.project_root, target):\n+            return \"error\", \"show_diff only supports paths inside the current session workspace.\"\n+        relative_path = None\n+        if target != self.project_root:\n+            relative_path = target.relative_to(self.project_root).as_posix()\n+        command = [\"git\", \"diff\", \"--no-ext-diff\", \"HEAD\", \"--\"]\n+        if relative_path:\n+            command.append(relative_path)\n+        result = subprocess.run(\n+            command,\n+            cwd=self.project_root,\n+            capture_output=True,\n+            text=True,\n+            check=False,\n+            timeout=20,\n+        )\n+        if result.returncode != 0:\n+            output = (result.stdout or result.stderr).strip() or \"Unable to compute diff.\"\n+            return \"error\", output\n+        output = result.stdout.strip()\n+        return \"completed\", (output[:20000] if output else \"No diff from HEAD.\")\n+\n+    def _run_test(self, argv: object) -> tuple[str, str]:\n+        if not isinstance(argv, list) or not argv:\n+            return \"error\", \"run_test requires a non-empty argv list.\"\n+        command = [str(item).strip() for item in argv if str(item).strip()]\n+        if not command:\n+            return \"error\", \"run_test requires a non-empty argv list.\"\n+        result = subprocess.run(\n+            command,\n+            cwd=self.project_root,\n+            capture_output=True,\n+            text=True,\n+            check=False,\n+            timeout=120,\n+        )\n+        combined = \"\\n\".join(\n+            part for part in [result.stdout.strip(), result.stderr.strip()] if part\n+        ).strip()\n+        output = combined[:20000] if combined else \"(no output)\"\n+        prefix = f\"exit_code={result.returncode}\"\n+        return (\"completed\" if result.returncode == 0 else \"error\"), f\"{prefix}\\n{output}\"\n+\n+    def _apply_patch(self, patch_text: str) -> tuple[str, str]:\n+        if not self.write_enabled:\n+            return \"blocked\", \"This session is in Default Conversations mode. Bind it to a workspace before applying patches.\"\n+        normalized = patch_text.strip()\n+        if not normalized:\n+            return \"error\", \"apply_patch requires a non-empty patch.\"\n+        repo_root = self._git_repo_root()\n+        if repo_root is None:\n+            return \"error\", \"apply_patch requires the current workspace to be inside a Git repository.\"\n+        extracted_paths = self._extract_patch_paths(normalized)\n+        if not extracted_paths:\n+            return \"error\", \"apply_patch could not determine any patch targets.\"\n+        for relative_path in extracted_paths:\n+            candidate = (repo_root / relative_path).resolve()\n+            if not workspace_utils.path_within(self.project_root, candidate):\n+                return \"blocked\", f\"Patch target is outside the current session workspace: {relative_path}\"\n+        with tempfile.NamedTemporaryFile(\"w\", encoding=\"utf-8\", delete=False) as handle:\n+            handle.write(normalized + \"\\n\")\n+            temp_path = Path(handle.name)\n+        try:\n+            check = subprocess.run(\n+                [\"git\", \"apply\", \"--check\", \"--whitespace=nowarn\", temp_path.as_posix()],\n+                cwd=repo_root,\n+                capture_output=True,\n+                text=True,\n+                check=False,\n+                timeout=20,\n+            )\n+            if check.returncode != 0:\n+                output = (check.stdout or check.stderr).strip() or \"Patch check failed.\"\n+                return \"error\", output\n+            apply = subprocess.run(\n+                [\"git\", \"apply\", \"--whitespace=nowarn\", temp_path.as_posix()],\n+                cwd=repo_root,\n+                capture_output=True,\n+                text=True,\n+                check=False,\n+                timeout=20,\n+            )\n+            if apply.returncode != 0:\n+                output = (apply.stdout or apply.stderr).strip() or \"Patch apply failed.\"\n+                return \"error\", output\n+            return \"completed\", f\"Applied patch touching {len(extracted_paths)} file(s).\"\n+        finally:\n+            try:\n+                temp_path.unlink(missing_ok=True)\n+            except Exception:\n+                pass\n+\n     def _run_bash(self, command: str) -> tuple[str, str]:\n         if not command.strip():\n             return \"error\", \"bash requires a command after 'bash:'.\"\n@@ -162,6 +327,66 @@ class ToolBroker:\n         output = (result.stdout + result.stderr).strip()[:10000] or \"(no output)\"\n         return (\"completed\" if result.returncode == 0 else \"error\"), output\n \n+    def _search_text_fallback(self, query: str, root: Path, limit: int) -> tuple[str, str]:\n+        matches: list[str] = []\n+        for file_path in sorted(self._iter_visible_files(root)):\n+            try:\n+                lines = file_path.read_text().splitlines()\n+            except Exception:\n+                continue\n+            for index, line in enumerate(lines, start=1):\n+                if query not in line:\n+                    continue\n+                relative = file_path.relative_to(root).as_posix() if root.is_dir() else file_path.name\n+                matches.append(f\"{relative}:{index}:{line}\")\n+                if len(matches) >= limit:\n+                    return \"completed\", \"\\n\".join(matches)\n+        if not matches:\n+            return \"completed\", f\"No matches found for query: {query}\"\n+        return \"completed\", \"\\n\".join(matches)\n+\n+    def _git_repo_root(self) -> Path | None:\n+        result = subprocess.run(\n+            [\"git\", \"rev-parse\", \"--show-toplevel\"],\n+            cwd=self.project_root,\n+            capture_output=True,\n+            text=True,\n+            check=False,\n+            timeout=20,\n+        )\n+        if result.returncode != 0:\n+            return None\n+        output = (result.stdout or result.stderr).strip()\n+        if not output:\n+            return None\n+        path = Path(output).resolve()\n+        return path if path.exists() and path.is_dir() else None\n+\n+    def _extract_patch_paths(self, patch_text: str) -> list[Path]:\n+        paths: list[Path] = []\n+        seen: set[str] = set()\n+        for line in patch_text.splitlines():\n+            if not line.startswith(\"+++ b/\"):\n+                continue\n+            raw = line[6:].strip()\n+            if not raw or raw == \"/dev/null\":\n+                continue\n+            normalized = raw.split(\"\\t\", 1)[0].strip()\n+            key = normalized\n+            if key in seen:\n+                continue\n+            seen.add(key)\n+            paths.append(Path(normalized))\n+        if paths:\n+            return paths\n+        for match in re.finditer(r\"diff --git a/(.+?) b/(.+)\", patch_text):\n+            normalized = match.group(2).strip()\n+            if not normalized or normalized == \"/dev/null\" or normalized in seen:\n+                continue\n+            seen.add(normalized)\n+            paths.append(Path(normalized))\n+        return paths\n+\n     def _iter_visible_files(self, root: Path):\n         import os\n \ndiff --git a/backend/pyproject.toml b/backend/pyproject.toml\nindex 156f25c..9d297fd 100644\n--- a/backend/pyproject.toml\n+++ b/backend/pyproject.toml\n@@ -22,6 +22,7 @@ dependencies = [\n \n [project.scripts]\n jarvis-worker = \"app.worker:main\"\n+jarvis-eval = \"evals.cli:main\"\n \n [build-system]\n requires = [\"setuptools>=68\"]",
+        "workspace_diff_is_empty": false,
+        "approvals": [],
+        "timeline_events": [
+          {
+            "event_id": 1883,
+            "session_id": "aea16a81-ba15-4959-a4c4-7e8e0325ddfd",
+            "type": "session.created",
+            "content": "Session 'Eval runtime-manager-summary' created.",
+            "parts": null,
+            "created_at": "2026-05-19T07:54:46.167692"
+          },
+          {
+            "event_id": 1884,
+            "session_id": "aea16a81-ba15-4959-a4c4-7e8e0325ddfd",
+            "type": "message.user",
+            "content": "Inspect the backend runtime manager and explain its main responsibilities. Mention sessions, turns, approvals, and subagents explicitly.",
+            "parts": [
+              {
+                "type": "text",
+                "text": "Inspect the backend runtime manager and explain its main responsibilities. Mention sessions, turns, approvals, and subagents explicitly."
+              }
+            ],
+            "created_at": "2026-05-19T07:54:46.226595"
+          },
+          {
+            "event_id": 1886,
+            "session_id": "aea16a81-ba15-4959-a4c4-7e8e0325ddfd",
+            "type": "turn.started",
+            "content": "Turn #53 started.",
+            "parts": null,
+            "created_at": "2026-05-19T07:54:49.319011"
+          },
+          {
+            "event_id": 1887,
+            "session_id": "aea16a81-ba15-4959-a4c4-7e8e0325ddfd",
+            "type": "message.assistant",
+            "content": "OpenAI-compatible request failed: [Errno 8] nodename nor servname provided, or not known",
+            "parts": [
+              {
+                "type": "text",
+                "text": "OpenAI-compatible request failed: [Errno 8] nodename nor servname provided, or not known"
+              }
+            ],
+            "created_at": "2026-05-19T07:54:52.402582"
+          },
+          {
+            "event_id": 1888,
+            "session_id": "aea16a81-ba15-4959-a4c4-7e8e0325ddfd",
+            "type": "turn.completed",
+            "content": "Turn #53 completed.",
+            "parts": null,
+            "created_at": "2026-05-19T07:54:52.405306"
+          }
+        ],
+        "tool_executions": [],
+        "turns": [
+          {
+            "id": 53,
+            "session_id": "aea16a81-ba15-4959-a4c4-7e8e0325ddfd",
+            "branch_context_id": "09bed3c8-2e76-4334-b681-9284ec229d09",
+            "user_message_id": 337,
+            "workspace_path": "/Users/bytedance/Desktop/python/Jarvis",
+            "workspace_fingerprint": "91068dbae6e2be03",
+            "execution_mode": "normal",
+            "status": "completed",
+            "started_at": "2026-05-19T07:54:46.399550",
+            "updated_at": "2026-05-19T07:54:52.404038",
+            "completed_at": "2026-05-19T07:54:52.404043",
+            "cancel_requested": false,
+            "last_checkpoint_seq": 2,
+            "resume_hint": null,
+            "error_summary": null,
+            "resumable": false
+          }
+        ]
+      }
+    }
+  ]
+}

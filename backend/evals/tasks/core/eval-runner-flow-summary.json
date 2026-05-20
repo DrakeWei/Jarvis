@@ -1,0 +1,26 @@
+{
+  "id": "eval-runner-flow-summary",
+  "name": "Summarize eval runner flow",
+  "user_prompt": "Inspect the eval runner and summarize how a benchmark task runs end to end. Mention workspace preparation, approval policy handling, evidence collection, and result labeling explicitly.",
+  "workspace_mode": "bound",
+  "execution_mode": "normal",
+  "approval_policy": {
+    "mode": "deny_all_shell"
+  },
+  "time_budget_seconds": 180,
+  "tags": ["core", "read_only", "eval", "runner", "runtime"],
+  "expected_checks": [
+    {
+      "kind": "final_text_contains_all",
+      "contains": ["workspace", "approval", "evidence", "label"]
+    },
+    {
+      "kind": "tool_used_any_of",
+      "tool_names": ["read_file", "read_file_range"]
+    },
+    {
+      "kind": "workspace_diff_is_empty"
+    }
+  ],
+  "notes": "Read-only core task focused on the evaluation harness itself."
+}

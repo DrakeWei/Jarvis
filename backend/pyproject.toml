@@ -22,6 +22,7 @@ dependencies = [
 
 [project.scripts]
 jarvis-worker = "app.worker:main"
+jarvis-eval = "evals.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]

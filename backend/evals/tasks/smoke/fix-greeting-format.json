@@ -1,0 +1,47 @@
+{
+  "id": "fix-greeting-format",
+  "name": "Fix greeting format bug",
+  "user_prompt": "Update the greeting implementation so it matches the expected punctuation in the tests. Keep the change minimal, run the relevant tests, and summarize the result.",
+  "workspace_fixture": "backend/evals/fixtures/greeting_app",
+  "workspace_mode": "bound",
+  "execution_mode": "normal",
+  "approval_policy": {
+    "mode": "deny_all_shell"
+  },
+  "time_budget_seconds": 180,
+  "initialize_git": true,
+  "tags": [
+    "smoke",
+    "coding",
+    "bugfix",
+    "python"
+  ],
+  "expected_checks": [
+    {
+      "kind": "file_contains_all",
+      "path": "greeting.py",
+      "contains": ["Hello, {name}!"]
+    },
+    {
+      "kind": "file_not_contains_any",
+      "path": "greeting.py",
+      "excludes": ["Hello {name}"]
+    },
+    {
+      "kind": "tool_used",
+      "tool_name": "run_test"
+    },
+    {
+      "kind": "terminal_turn_status_in",
+      "statuses": ["completed"]
+    },
+    {
+      "kind": "workspace_diff_not_empty"
+    },
+    {
+      "kind": "max_pending_approval_count",
+      "max_count": 0
+    }
+  ],
+  "notes": "Second mutating smoke task focused on a single file string-format fix."
+}

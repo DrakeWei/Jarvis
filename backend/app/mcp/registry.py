@@ -65,6 +65,93 @@ def local_tool_definitions(*, allow_subagent_tool: bool = True) -> list[ToolDefi
             source="local",
         ),
         ToolDefinition(
+            name="read_file_range",
+            description="Read a specific line range from a file in the current session workspace or an explicitly allowed external read path.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                },
+                "required": ["path"],
+            },
+            source="local",
+        ),
+        ToolDefinition(
+            name="search_text",
+            description="Search for text matches inside the current session workspace or an explicitly allowed external read path.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "path": {"type": "string"},
+                    "max_results": {"type": "integer"},
+                },
+                "required": ["query"],
+            },
+            source="local",
+        ),
+        ToolDefinition(
+            name="show_status",
+            description="Show the current Git working tree status for the session workspace.",
+            input_schema={"type": "object", "properties": {}},
+            source="local",
+        ),
+        ToolDefinition(
+            name="show_diff",
+            description="Show the current Git diff from HEAD for the session workspace or one file within it.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                },
+            },
+            source="local",
+        ),
+        ToolDefinition(
+            name="run_test",
+            description="Run a structured test command in the current session workspace without using a shell string. Prefer argv like ['python3', '-m', 'pytest', 'tests/test_file.py'] when relevant.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "argv": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["argv"],
+            },
+            source="local",
+        ),
+        ToolDefinition(
+            name="apply_patch",
+            description="Apply a patch to files inside the current session workspace. Supports both unified Git diff patches and structured patches using *** Begin Patch / *** Update File / *** End Patch. Patch paths must stay within the workspace.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "patch": {"type": "string"},
+                },
+                "required": ["patch"],
+            },
+            source="local",
+        ),
+        ToolDefinition(
+            name="web_search",
+            description="Search the public web for current external information using the configured search provider. Use this for time-sensitive facts such as scores, prices, weather, news, or current leadership.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "max_results": {"type": "integer"},
+                    "include_domains": {"type": "array", "items": {"type": "string"}},
+                    "exclude_domains": {"type": "array", "items": {"type": "string"}},
+                    "search_depth": {"type": "string"},
+                    "time_range": {"type": "string", "enum": ["day", "week", "month", "year", "d", "w", "m", "y"]},
+                    "include_raw_content": {"type": "boolean"},
+                },
+                "required": ["query"],
+            },
+            source="local",
+        ),
+        ToolDefinition(
             name="write_file",
             description="Create or overwrite a file in the current session workspace only. Do not use this for paths outside the current session workspace.",
             input_schema={

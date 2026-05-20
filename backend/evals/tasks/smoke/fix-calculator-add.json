@@ -1,0 +1,47 @@
+{
+  "id": "fix-calculator-add",
+  "name": "Fix calculator add bug",
+  "user_prompt": "Fix the bug in calculator.py so the add function behaves correctly. Make the smallest reasonable code change, run the relevant tests, and briefly summarize what you changed.",
+  "workspace_fixture": "backend/evals/fixtures/calculator_app",
+  "workspace_mode": "bound",
+  "execution_mode": "normal",
+  "approval_policy": {
+    "mode": "deny_all_shell"
+  },
+  "time_budget_seconds": 180,
+  "initialize_git": true,
+  "tags": [
+    "smoke",
+    "coding",
+    "bugfix",
+    "python"
+  ],
+  "expected_checks": [
+    {
+      "kind": "file_contains_all",
+      "path": "calculator.py",
+      "contains": ["return a + b"]
+    },
+    {
+      "kind": "file_not_contains_any",
+      "path": "calculator.py",
+      "excludes": ["return a - b"]
+    },
+    {
+      "kind": "tool_used",
+      "tool_name": "run_test"
+    },
+    {
+      "kind": "terminal_turn_status_in",
+      "statuses": ["completed"]
+    },
+    {
+      "kind": "workspace_diff_not_empty"
+    },
+    {
+      "kind": "max_pending_approval_count",
+      "max_count": 0
+    }
+  ],
+  "notes": "First mutating smoke task. Should exercise code reading, edit, and verification."
+}
