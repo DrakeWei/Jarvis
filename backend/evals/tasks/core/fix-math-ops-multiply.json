@@ -1,0 +1,37 @@
+{
+  "id": "fix-math-ops-multiply",
+  "name": "Fix math ops multiply helper",
+  "user_prompt": "Fix the multiply helper so the calculator area function behaves correctly. Make the smallest reasonable change, run the relevant tests, and summarize the result.",
+  "workspace_fixture": "backend/evals/fixtures/math_ops_app",
+  "workspace_mode": "bound",
+  "execution_mode": "normal",
+  "approval_policy": {
+    "mode": "deny_all_shell"
+  },
+  "time_budget_seconds": 240,
+  "initialize_git": true,
+  "tags": ["core", "coding", "bugfix", "python", "multi_file", "verification", "math"],
+  "expected_checks": [
+    {
+      "kind": "file_contains_all",
+      "path": "ops.py",
+      "contains": ["return a * b"]
+    },
+    {
+      "kind": "tool_used",
+      "tool_name": "run_test"
+    },
+    {
+      "kind": "workspace_diff_not_empty"
+    },
+    {
+      "kind": "terminal_turn_status_in",
+      "statuses": ["completed"]
+    },
+    {
+      "kind": "max_pending_approval_count",
+      "max_count": 0
+    }
+  ],
+  "notes": "Simple helper bug that still requires understanding a cross-file dependency from calculator.py to ops.py."
+}

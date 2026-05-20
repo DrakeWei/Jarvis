@@ -1,0 +1,30 @@
+{
+  "id": "repo-structure-summary",
+  "name": "Summarize repository structure",
+  "user_prompt": "Inspect this repository and give a concise summary of the main product areas. Mention backend, frontend, and src-tauri explicitly.",
+  "workspace_mode": "bound",
+  "execution_mode": "normal",
+  "approval_policy": {
+    "mode": "deny_all_shell"
+  },
+  "time_budget_seconds": 120,
+  "tags": [
+    "smoke",
+    "read_only",
+    "repo_overview"
+  ],
+  "expected_checks": [
+    {
+      "kind": "final_text_contains_all",
+      "contains": ["backend", "frontend", "src-tauri"]
+    },
+    {
+      "kind": "workspace_diff_is_empty"
+    },
+    {
+      "kind": "max_pending_approval_count",
+      "max_count": 0
+    }
+  ],
+  "notes": "Starter smoke task for validating read-only repository inspection."
+}

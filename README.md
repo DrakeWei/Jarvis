@@ -57,6 +57,14 @@ Recommended local setup:
 3. Put the same shared bearer token on both sides
 4. Put your Feishu `app_id` and `app_secret` only in `services/feishu_mcp_server/.env`
 
+For Tavily-backed web search, also set these in `backend/.env`:
+
+- `JARVIS_TAVILY_ENABLED=1`
+- `JARVIS_TAVILY_API_KEY=tvly-...`
+- Optional tuning:
+  - `JARVIS_TAVILY_TIMEOUT_MS=10000`
+  - `JARVIS_TAVILY_MAX_RESULTS_DEFAULT=5`
+
 The backend and Feishu MCP server now auto-load local `.env` files, so you do not need to export secrets manually or send them in chat.
 
 ### Run The Feishu MCP Server
@@ -80,6 +88,40 @@ By default it serves:
 ```
 
 More detail is in [services/feishu_mcp_server/README.md](/Users/bytedance/Desktop/python/Jarvis/services/feishu_mcp_server/README.md:1).
+
+## Tavily Web Search Local Prep
+
+Jarvis now supports a local `web_search` tool backed by the Tavily Search API for time-sensitive external questions.
+
+### Install
+
+No extra package install is required beyond the normal backend setup.
+
+### Configure
+
+- Backend sample env: [backend/.env.example](/Users/bytedance/Desktop/python/Jarvis/backend/.env.example:1)
+
+Recommended local setup:
+
+1. Copy `backend/.env.example` to `backend/.env` if you have not already
+2. Set `JARVIS_TAVILY_ENABLED=1`
+3. Set `JARVIS_TAVILY_API_KEY` to your Tavily API key
+4. Optionally tune `JARVIS_TAVILY_TIMEOUT_MS` and `JARVIS_TAVILY_MAX_RESULTS_DEFAULT`
+5. If your environment needs an explicit CA bundle for outbound HTTPS, set `JARVIS_TAVILY_CA_BUNDLE`
+
+Minimal example:
+
+```bash
+JARVIS_TAVILY_ENABLED=1
+JARVIS_TAVILY_API_KEY=tvly-replace-with-api-key
+JARVIS_TAVILY_TIMEOUT_MS=10000
+JARVIS_TAVILY_MAX_RESULTS_DEFAULT=5
+JARVIS_TAVILY_CA_BUNDLE=
+```
+
+When Tavily search is enabled, Jarvis can use `web_search` for prompts such as current sports scores, current leadership, recent news, prices, and weather. If Tavily is not configured, `web_search` will return a structured tool error instead of silently guessing.
+
+For TLS troubleshooting, Jarvis will first try `JARVIS_TAVILY_CA_BUNDLE`, then `SSL_CERT_FILE`, then `OPENAI_CA_BUNDLE`, and finally the Python `certifi` bundle if available.
 
 ## Postgres Concurrency Tests
 

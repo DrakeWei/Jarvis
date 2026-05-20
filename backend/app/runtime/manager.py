@@ -1,4 +1,6 @@
 import asyncio
+import json
+import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -29,6 +31,7 @@ import app.services.git_service as git_service
 import app.services.memory_service as memory_service
 import app.services.memory_search_service as memory_search_service
 import app.services.speech_generation_service as speech_generation_service
+import app.services.tavily_search_service as tavily_search_service
 import app.services.turn_service as turn_service
 import app.services.video_generation_service as video_generation_service
 import app.services.worktree_service as worktree_service
@@ -109,6 +112,11 @@ class RuntimeManager:
             "get_session_git_state",
             "list_files",
             "read_file",
+            "read_file_range",
+            "search_text",
+            "show_status",
+            "show_diff",
+            "web_search",
             "list_skills",
             "load_skill",
             "memory_search",
@@ -1767,6 +1775,86 @@ class RuntimeManager:
                 },
             },
             {
+                "name": "read_file_range",
+                "description": "Read a specific line range from a file in the current target workspace.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "start_line": {"type": "integer"},
+                        "end_line": {"type": "integer"},
+                    },
+                    "required": ["path"],
+                },
+            },
+            {
+                "name": "search_text",
+                "description": "Search for text matches inside the current target workspace.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "path": {"type": "string"},
+                        "max_results": {"type": "integer"},
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "show_status",
+                "description": "Show the current Git working tree status for the target workspace.",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "show_diff",
+                "description": "Show the current Git diff from HEAD for the target workspace or one file within it.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                    },
+                },
+            },
+            {
+                "name": "run_test",
+                "description": "Run a structured test command in the current target workspace without using a shell string. Prefer argv like ['python3', '-m', 'pytest', 'tests/test_file.py'] when relevant.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "argv": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["argv"],
+                },
+            },
+            {
+                "name": "apply_patch",
+                "description": "Apply a patch to files inside the current target workspace. Supports both unified Git diff patches and structured patches using *** Begin Patch / *** Update File / *** End Patch.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "patch": {"type": "string"},
+                    },
+                    "required": ["patch"],
+                },
+            },
+            {
+                "name": "web_search",
+                "description": "Search the public web for current external information such as scores, prices, weather, news, or current leadership.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "max_results": {"type": "integer"},
+                        "include_domains": {"type": "array", "items": {"type": "string"}},
+                        "exclude_domains": {"type": "array", "items": {"type": "string"}},
+                        "search_depth": {"type": "string"},
+                        "time_range": {"type": "string", "enum": ["day", "week", "month", "year", "d", "w", "m", "y"]},
+                        "include_raw_content": {"type": "boolean"},
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
                 "name": "write_file",
                 "description": "Create or overwrite a file in the current target workspace.",
                 "input_schema": {
@@ -2090,8 +2178,36 @@ class RuntimeManager:
     ) -> tuple[str, str] | ToolExecutionResult | None:
         if tool_name == "bash":
             return None
-        if tool_name in {"list_files", "read_file", "write_file", "edit_file"}:
+        if tool_name in {
+            "list_files",
+            "read_file",
+            "read_file_range",
+            "search_text",
+            "show_status",
+            "show_diff",
+            "run_test",
+            "apply_patch",
+            "write_file",
+            "edit_file",
+        }:
             return broker_for_workspace.run(tool_name, tool_input)
+        if tool_name == "web_search":
+            query = str(tool_input.get("query", "")).strip()
+            raw_include_domains = tool_input.get("include_domains")
+            raw_exclude_domains = tool_input.get("exclude_domains")
+            try:
+                response = tavily_search_service.search_web(
+                    query,
+                    max_results=tool_input.get("max_results") if isinstance(tool_input.get("max_results"), int) else None,
+                    include_domains=[str(item).strip() for item in raw_include_domains] if isinstance(raw_include_domains, list) else None,
+                    exclude_domains=[str(item).strip() for item in raw_exclude_domains] if isinstance(raw_exclude_domains, list) else None,
+                    search_depth=str(tool_input.get("search_depth", "")).strip() or None,
+                    time_range=str(tool_input.get("time_range", "")).strip() or None,
+                    include_raw_content=tool_input.get("include_raw_content") if isinstance(tool_input.get("include_raw_content"), bool) else None,
+                )
+            except tavily_search_service.TavilySearchError as exc:
+                return "error", str(exc)
+            return "completed", tavily_search_service.serialize_response(response)
         if tool_name == "get_session_git_state":
             return "completed", self._session_git_state_tool_output(session_id)
         if tool_name == "list_skills":
@@ -2491,13 +2607,351 @@ class RuntimeManager:
                     collected.append(value)
         return collected
 
-    def _build_agent_system_prompt(self, workspace: Path, session_memory_header: str = "", *, execution_mode: str = "normal") -> str:
+    def _latest_request_text(self, messages: list[dict[str, object]]) -> str:
+        internal_prefixes = (
+            "Your previous response did not include a final answer or any tool call.",
+            "The user asked for a code change, but you have not changed any files yet.",
+            "You already changed files for this task, but you have not verified the change yet.",
+        )
+        for message in reversed(messages):
+            if message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                text = content.strip()
+                if text.startswith(internal_prefixes):
+                    continue
+                return text
+            if not isinstance(content, list):
+                continue
+            texts = [
+                str(part.get("text", "")).strip()
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text" and str(part.get("text", "")).strip()
+            ]
+            if texts:
+                joined = "\n".join(texts)
+                if joined.startswith(internal_prefixes):
+                    continue
+                return joined
+        return ""
+
+    def _task_requires_code_change(self, messages: list[dict[str, object]]) -> bool:
+        latest_request = self._latest_request_text(messages).lower()
+        if not latest_request:
+            return False
+        patterns = [
+            r"\bfix\b",
+            r"\bchange\b",
+            r"\bmodify\b",
+            r"\bupdate\b",
+            r"\bedit\b",
+            r"\brefactor\b",
+            r"\bimplement\b",
+            r"\badd\b",
+            r"\bremove\b",
+            r"\brename\b",
+            r"\bpatch\b",
+            r"\bbug\b",
+            r"\btest\b",
+            r"\.py\b",
+            r"\.ts\b",
+            r"\.tsx\b",
+            r"\.js\b",
+            r"\.jsx\b",
+            r"\.rs\b",
+            r"\.go\b",
+            r"\.java\b",
+            r"代码",
+            r"修复",
+            r"修改",
+            r"更新",
+            r"实现",
+            r"测试",
+            r"文件",
+        ]
+        return any(re.search(pattern, latest_request, flags=re.IGNORECASE) for pattern in patterns)
+
+    def _task_requires_web_search(self, messages: list[dict[str, object]]) -> bool:
+        latest_request = self._latest_request_text(messages).lower()
+        if not latest_request:
+            return False
+        patterns = [
+            r"\btoday\b",
+            r"\blatest\b",
+            r"\bcurrent\b",
+            r"\bnow\b",
+            r"\brecent\b",
+            r"\bjust\b",
+            r"final score",
+            r"stock price",
+            r"weather",
+            r"exchange rate",
+            r"current ceo",
+            r"current president",
+            r"\bnews\b",
+            r"official site",
+            r"今天",
+            r"最新",
+            r"当前",
+            r"现在",
+            r"最近",
+            r"刚刚",
+            r"最终比分",
+            r"股价",
+            r"天气",
+            r"汇率",
+            r"现任",
+            r"新闻",
+            r"官网",
+        ]
+        return any(re.search(pattern, latest_request, flags=re.IGNORECASE) for pattern in patterns)
+
+    def _tool_result_history(self, messages: list[dict[str, object]]) -> list[dict[str, str]]:
+        history: list[dict[str, str]] = []
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") != "tool_result":
+                    continue
+                history.append(
+                    {
+                        "tool_name": str(part.get("tool_name", "")).strip(),
+                        "status": str(part.get("status", "")).strip(),
+                        "content": str(part.get("content", "")).strip(),
+                    }
+                )
+        return history
+
+    def _has_successful_write_tool(self, messages: list[dict[str, object]]) -> bool:
+        write_tools = {"write_file", "edit_file", "apply_patch"}
+        return any(item["tool_name"] in write_tools and item["status"] == "completed" for item in self._tool_result_history(messages))
+
+    def _has_verification_attempt(self, messages: list[dict[str, object]]) -> bool:
+        verification_tools = {"run_test"}
+        return any(item["tool_name"] in verification_tools for item in self._tool_result_history(messages))
+
+    def _has_successful_tool(self, messages: list[dict[str, object]], tool_name: str) -> bool:
+        return any(
+            item["tool_name"] == tool_name and item["status"] == "completed"
+            for item in self._tool_result_history(messages)
+        )
+
+    def _has_tool_attempt(self, messages: list[dict[str, object]], tool_name: str) -> bool:
+        return any(item["tool_name"] == tool_name for item in self._tool_result_history(messages))
+
+    def _latest_completed_tool_payload(self, messages: list[dict[str, object]], tool_name: str) -> dict[str, object] | None:
+        for item in reversed(self._tool_result_history(messages)):
+            if item["tool_name"] != tool_name or item["status"] != "completed":
+                continue
+            try:
+                payload = json.loads(item["content"])
+            except Exception:
+                return None
+            return payload if isinstance(payload, dict) else None
+        return None
+
+    def _latest_web_search_evidence_quality(self, messages: list[dict[str, object]]) -> str | None:
+        payload = self._latest_completed_tool_payload(messages, "web_search")
+        if not payload:
+            return None
+        quality = payload.get("evidence_quality")
+        return str(quality).strip().lower() if quality is not None else None
+
+    def _response_explains_blocker(self, text: str) -> bool:
+        normalized = text.lower()
+        markers = [
+            "blocked",
+            "unable",
+            "cannot",
+            "can't",
+            "failed",
+            "error",
+            "need approval",
+            "no tests",
+            "无法",
+            "不能",
+            "失败",
+            "报错",
+            "阻塞",
+            "需要审批",
+            "没有测试",
+        ]
+        return any(marker in normalized for marker in markers)
+
+    def _response_communicates_uncertainty(self, text: str) -> bool:
+        normalized = text.lower()
+        markers = [
+            "not sure",
+            "uncertain",
+            "best guess",
+            "limited evidence",
+            "cannot confirm",
+            "can't confirm",
+            "could not confirm",
+            "might be",
+            "may be",
+            "likely",
+            "证据有限",
+            "不确定",
+            "不能完全确认",
+            "无法完全确认",
+            "最佳猜测",
+            "可能",
+        ]
+        return any(marker in normalized for marker in markers)
+
+    def _completion_gate_followup(
+        self,
+        *,
+        messages: list[dict[str, object]],
+        final_text: str,
+        require_change_followup_used: bool,
+        require_verification_followup_used: bool,
+        require_web_search_followup_used: bool,
+        require_weak_evidence_followup_used: bool,
+        agent_kind: str,
+        execution_mode: str,
+    ) -> tuple[str | None, bool, bool, bool, bool]:
+        if agent_kind != "lead" or execution_mode != "normal":
+            return (
+                None,
+                require_change_followup_used,
+                require_verification_followup_used,
+                require_web_search_followup_used,
+                require_weak_evidence_followup_used,
+            )
+        requires_web_search = self._task_requires_web_search(messages)
+        if requires_web_search and not self._has_successful_tool(messages, "web_search"):
+            if self._has_tool_attempt(messages, "web_search") and (
+                self._response_explains_blocker(final_text) or self._response_communicates_uncertainty(final_text)
+            ):
+                return (
+                    None,
+                    require_change_followup_used,
+                    require_verification_followup_used,
+                    require_web_search_followup_used,
+                    require_weak_evidence_followup_used,
+                )
+            return (
+                "The user asked for a time-sensitive external fact. "
+                "Call web_search before finalizing your answer. "
+                "If web_search fails or returns limited evidence, you may give a best guess only if you state that the answer is uncertain.",
+                require_change_followup_used,
+                require_verification_followup_used,
+                True,
+                require_weak_evidence_followup_used,
+            )
+        if requires_web_search and self._latest_web_search_evidence_quality(messages) == "weak":
+            if not self._response_communicates_uncertainty(final_text) and not require_weak_evidence_followup_used:
+                return (
+                    "Your available web_search evidence is weak. "
+                    "You may provide a best guess, but you must explicitly say that the evidence is limited and the answer is uncertain.",
+                    require_change_followup_used,
+                    require_verification_followup_used,
+                    require_web_search_followup_used,
+                    True,
+                )
+        if not self._task_requires_code_change(messages):
+            return (
+                None,
+                require_change_followup_used,
+                require_verification_followup_used,
+                require_web_search_followup_used,
+                require_weak_evidence_followup_used,
+            )
+        if self._has_successful_write_tool(messages):
+            if self._has_verification_attempt(messages) or self._response_explains_blocker(final_text):
+                return (
+                    None,
+                    require_change_followup_used,
+                    require_verification_followup_used,
+                    require_web_search_followup_used,
+                    require_weak_evidence_followup_used,
+                )
+            if require_verification_followup_used:
+                return (
+                    None,
+                    require_change_followup_used,
+                    require_verification_followup_used,
+                    require_web_search_followup_used,
+                    require_weak_evidence_followup_used,
+                )
+            return (
+                "You already changed files for this task, but you have not verified the change yet. "
+                "Use run_test now unless you are concretely blocked. "
+                "Do not end with only a summary of edits. If verification cannot be run, explain the exact blocker in the final answer.",
+                require_change_followup_used,
+                True,
+                require_web_search_followup_used,
+                require_weak_evidence_followup_used,
+            )
+        if self._response_explains_blocker(final_text) or require_change_followup_used:
+            return (
+                None,
+                require_change_followup_used,
+                require_verification_followup_used,
+                require_web_search_followup_used,
+                require_weak_evidence_followup_used,
+            )
+        inspected = {item["tool_name"] for item in self._tool_result_history(messages)}
+        if inspected & {"search_text", "read_file", "read_file_range", "list_files", "show_diff", "show_status"}:
+            return (
+                "You have already inspected enough context for a code-change task. "
+                "Take the next concrete action now: make the minimal edit with apply_patch or edit_file, then continue toward verification. "
+                "If you use apply_patch, prefer the structured patch format with *** Begin Patch / *** Update File / *** End Patch.",
+                True,
+                require_verification_followup_used,
+                require_web_search_followup_used,
+                require_weak_evidence_followup_used,
+            )
+        return (
+            "The user asked for a code change, but you have not changed any files yet. "
+            "Start by locating the target with search_text or read_file_range if needed, then make the minimal required edit now. "
+            "Prefer apply_patch for focused edits, using the structured patch format with *** Begin Patch / *** Update File / *** End Patch. "
+            "After editing, verify with run_test using argv such as ['python3', '-m', 'pytest', 'tests/test_file.py'] when appropriate, "
+            "or explain the exact blocker if you cannot proceed.",
+            True,
+            require_verification_followup_used,
+            require_web_search_followup_used,
+            require_weak_evidence_followup_used,
+        )
+
+    def _code_change_execution_contract(self) -> str:
+        return "\n".join(
+            [
+                "Code-change execution contract:",
+                "1. Locate the target with search_text or read_file_range.",
+                "2. Make the smallest safe edit with apply_patch, edit_file, or write_file.",
+                "3. Verify with run_test before finishing whenever verification is available.",
+                "4. End with a concrete final answer that states what changed and whether verification passed.",
+                "5. Do not end after inspection alone. Do not end after editing without either verification or an explicit blocker.",
+                "Example mutation flow:",
+                "- search_text query='function_name'",
+                "- read_file_range path='module.py' start_line=10 end_line=40",
+                "- apply_patch patch='*** Begin Patch ... *** End Patch'",
+                "- run_test argv=['python3', '-m', 'pytest', 'tests/test_module.py']",
+            ]
+        )
+
+    def _build_agent_system_prompt(
+        self,
+        workspace: Path,
+        session_memory_header: str = "",
+        *,
+        execution_mode: str = "normal",
+        requires_code_change: bool = False,
+    ) -> str:
         sections = [
                 "You are Jarvis, a local desktop coding agent.",
                 f"Target workspace: {workspace}",
                 "You may answer directly when no tool is needed, but you should decide for yourself whether tools are necessary.",
                 "When the user asks about files, directories, paths, project structure, README contents, code contents, or workspace state, inspect the workspace with tools first instead of guessing.",
                 "When the user asks about the current repository, Git branch, HEAD state, or working tree cleanliness, use get_session_git_state instead of guessing or shelling out.",
+                "When the user asks for time-sensitive external facts such as today's score, the latest news, the current CEO, prices, or weather, use web_search before answering.",
+                "If web_search returns weak evidence, you may provide a best guess only if you explicitly say the answer is uncertain.",
                 "When the session has uploaded attachments and the current prompt depends on them, use the session attachment tools to inspect extracted content instead of guessing from filenames alone.",
                 "When the user asks you to create a brand-new image, render a visual, or edit an uploaded image, use the generate_image tool instead of claiming the image exists.",
                 "When the user asks you to speak a reply aloud, output narration audio, or convert text into spoken audio, use the generate_speech tool.",
@@ -2507,6 +2961,9 @@ class RuntimeManager:
                     if execution_mode != "plan"
                     else "Use this turn to inspect and plan only. Do not create or modify files in Plan Mode."
                 ),
+                "For coding tasks, prefer structured tools over generic shell usage: use search_text to locate code, read_file_range for targeted context, show_status and show_diff to inspect repository changes, apply_patch for focused edits, and run_test for verification.",
+                "If the user asks you to fix a bug or make a code change, do not stop after inspection alone. Continue until you either modify the relevant files and verify the result, or you are concretely blocked.",
+                "If you have already inspected enough context to act, take the next concrete step instead of ending the turn with only intermediate observations.",
                 "The current session is bound to exactly one canonical workspace. Do not treat another project name in the prompt as permission to silently switch workspaces.",
                 "If the user explicitly mentions an absolute path outside the current session workspace, you may read it as a read-only external reference when useful.",
                 "Do not write or edit paths outside the current session workspace. If the user wants that, explain that they need a session bound to the target workspace or an explicit rebind.",
@@ -2526,6 +2983,17 @@ class RuntimeManager:
                     "You may inspect and analyze, but you must not modify files, execute shell commands, or perform side effects.",
                     "Return a concrete plan instead of claiming the work is already done.",
                     "Structure the plan with: goal, findings or assumptions, execution steps, and risks or open questions.",
+                ]
+            )
+        elif requires_code_change:
+            sections.extend(
+                [
+                    "This request requires a code change.",
+                    "Default workflow for code-change tasks: 1) locate the target with search_text or read_file_range, 2) make the smallest safe edit with apply_patch, edit_file, or write_file, 3) inspect the resulting diff or status when useful, 4) run verification with run_test, 5) give the final answer.",
+                    "A code-change turn is not complete if you only inspected files and did not change anything, unless you explicitly explain the blocker.",
+                    "A code-change turn is not complete if you changed files but did not attempt verification, unless you explicitly explain why verification could not be run.",
+                    "Prefer apply_patch for focused edits and run_test for verification before you finish.",
+                    self._code_change_execution_contract(),
                 ]
             )
         if session_memory_header:
@@ -2679,6 +3147,7 @@ class RuntimeManager:
             allowed_external_reads=allowed_external_reads,
             write_enabled=write_enabled,
         )
+        requires_code_change = self._task_requires_code_change(messages)
         base_system_prompt = (
             self._build_subagent_system_prompt(workspace)
             if agent_kind == "subagent"
@@ -2686,6 +3155,7 @@ class RuntimeManager:
                 workspace,
                 self._session_git_prompt_section(session_id),
                 execution_mode=execution_mode,
+                requires_code_change=requires_code_change,
             )
         )
 
@@ -2695,6 +3165,11 @@ class RuntimeManager:
             else settings.jarvis_agent_iteration_limit
         )
         generated_asset_ids = self._collect_generated_asset_ids(messages)
+        empty_response_followup_count = 0
+        require_change_followup_used = False
+        require_verification_followup_used = False
+        require_web_search_followup_used = False
+        require_weak_evidence_followup_used = False
 
         for _ in range(iteration_limit):
             if self._should_cancel_turn(turn_id, cancel_event):
@@ -2761,8 +3236,45 @@ class RuntimeManager:
                     for block in streamed_blocks
                     if isinstance(block, TextBlock) and block.text.strip()
                 ]
+                final_text = "\n\n".join(text_blocks)
+                if not text_blocks and empty_response_followup_count < 2:
+                    empty_response_followup_count += 1
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Your previous response did not include a final answer or any tool call. "
+                                "Continue the task now. If a code change was requested and you have not verified it yet, "
+                                "use the appropriate verification tool such as run_test before finishing. "
+                                "Otherwise, answer the user directly with the concrete result."
+                                if empty_response_followup_count == 1
+                                else "Your next response must not be empty. Return either at least one tool call or final answer text now. "
+                                "Do not stop with an empty response."
+                            ),
+                        }
+                    )
+                    continue
+                (
+                    followup,
+                    require_change_followup_used,
+                    require_verification_followup_used,
+                    require_web_search_followup_used,
+                    require_weak_evidence_followup_used,
+                ) = self._completion_gate_followup(
+                    messages=messages,
+                    final_text=final_text,
+                    require_change_followup_used=require_change_followup_used,
+                    require_verification_followup_used=require_verification_followup_used,
+                    require_web_search_followup_used=require_web_search_followup_used,
+                    require_weak_evidence_followup_used=require_weak_evidence_followup_used,
+                    agent_kind=agent_kind,
+                    execution_mode=execution_mode,
+                )
+                if followup:
+                    messages.append({"role": "user", "content": followup})
+                    continue
                 return AgentReply(
-                    text="\n\n".join(text_blocks) if text_blocks else "任务已执行，但模型没有返回最终文本说明。",
+                    text=final_text if text_blocks else "任务已执行，但模型没有返回最终文本说明。",
                     asset_ids=generated_asset_ids,
                 )
 
@@ -2785,6 +3297,8 @@ class RuntimeManager:
                             "type": "tool_result",
                             "tool_use_id": block.id,
                             "content": output,
+                            "tool_name": block.name,
+                            "status": "error",
                         }
                     )
                     continue
@@ -2881,6 +3395,8 @@ class RuntimeManager:
                         "tool_use_id": block.id,
                         "content": executed.output,
                         "asset_ids": tool_asset_ids,
+                        "tool_name": tool_definition.name,
+                        "status": executed.status,
                     }
                 )
             messages.append({"role": "user", "content": results})

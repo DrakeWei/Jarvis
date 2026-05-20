@@ -1,0 +1,37 @@
+{
+  "id": "fix-env-parser-false-values",
+  "name": "Fix env parser false-value handling",
+  "user_prompt": "Fix the boolean parsing bug so false-like strings are handled correctly. Keep the change minimal, run the relevant tests, and summarize the result.",
+  "workspace_fixture": "backend/evals/fixtures/env_parser_app",
+  "workspace_mode": "bound",
+  "execution_mode": "normal",
+  "approval_policy": {
+    "mode": "deny_all_shell"
+  },
+  "time_budget_seconds": 240,
+  "initialize_git": true,
+  "tags": ["core", "coding", "bugfix", "python", "config", "verification"],
+  "expected_checks": [
+    {
+      "kind": "file_contains_all",
+      "path": "config.py",
+      "contains": ["normalized in {\"1\", \"true\", \"yes\", \"on\"}", "return False"]
+    },
+    {
+      "kind": "tool_used",
+      "tool_name": "run_test"
+    },
+    {
+      "kind": "workspace_diff_not_empty"
+    },
+    {
+      "kind": "terminal_turn_status_in",
+      "statuses": ["completed"]
+    },
+    {
+      "kind": "max_pending_approval_count",
+      "max_count": 0
+    }
+  ],
+  "notes": "Config parsing bugfix with simple verification expectations."
+}

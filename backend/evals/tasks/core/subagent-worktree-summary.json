@@ -1,0 +1,26 @@
+{
+  "id": "subagent-worktree-summary",
+  "name": "Summarize subagent worktree isolation flow",
+  "user_prompt": "Inspect how subagent worktree isolation works. Mention shared versus worktree mode, preserved versus cleaned outcomes, and the branch/worktree metadata that gets recorded.",
+  "workspace_mode": "bound",
+  "execution_mode": "normal",
+  "approval_policy": {
+    "mode": "deny_all_shell"
+  },
+  "time_budget_seconds": 180,
+  "tags": ["core", "read_only", "subagent", "worktree", "runtime"],
+  "expected_checks": [
+    {
+      "kind": "final_text_contains_all",
+      "contains": ["shared", "worktree", "preserved", "cleaned"]
+    },
+    {
+      "kind": "tool_used_any_of",
+      "tool_names": ["read_file", "read_file_range"]
+    },
+    {
+      "kind": "workspace_diff_is_empty"
+    }
+  ],
+  "notes": "Read-only core task covering subagent runtime and worktree isolation details."
+}

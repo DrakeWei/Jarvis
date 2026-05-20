@@ -1,0 +1,37 @@
+{
+  "id": "fix-report-headline-level",
+  "name": "Fix report headline markdown level",
+  "user_prompt": "Update the report formatting so the generated report uses the markdown headline level expected by the tests. Keep the change minimal, run the relevant tests, and summarize the result.",
+  "workspace_fixture": "backend/evals/fixtures/report_app",
+  "workspace_mode": "bound",
+  "execution_mode": "normal",
+  "approval_policy": {
+    "mode": "deny_all_shell"
+  },
+  "time_budget_seconds": 240,
+  "initialize_git": true,
+  "tags": ["core", "coding", "bugfix", "python", "formatting", "verification"],
+  "expected_checks": [
+    {
+      "kind": "file_contains_all",
+      "path": "formatter.py",
+      "contains": ["## {title}"]
+    },
+    {
+      "kind": "tool_used",
+      "tool_name": "run_test"
+    },
+    {
+      "kind": "workspace_diff_not_empty"
+    },
+    {
+      "kind": "terminal_turn_status_in",
+      "statuses": ["completed"]
+    },
+    {
+      "kind": "max_pending_approval_count",
+      "max_count": 0
+    }
+  ],
+  "notes": "Small formatting bugfix that still requires mutation plus verification."
+}
