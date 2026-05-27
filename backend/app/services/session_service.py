@@ -183,7 +183,7 @@ def soft_delete_session(session_id: str) -> bool:
         return True
 
 
-def create_message_record(session_id: str, payload: MessageCreate) -> MessageRecord:
+def create_message_record(session_id: str, payload: MessageCreate, *, task_id: int | None = None) -> MessageRecord:
     with create_session() as db:
         try:
             session_row = db.get(SessionRecord, session_id)
@@ -192,6 +192,7 @@ def create_message_record(session_id: str, payload: MessageCreate) -> MessageRec
             branch_context_id = session_row.branch_context_id if session_row else None
             row = MessageRecord(
                 session_id=session_id,
+                task_id=task_id,
                 branch_context_id=branch_context_id,
                 role=payload.role,
                 content=payload.content,
@@ -208,7 +209,13 @@ def create_message_record(session_id: str, payload: MessageCreate) -> MessageRec
             raise
 
 
-def list_message_records(session_id: str, limit: int | None = None, *, branch_context_id: str | None = None) -> list[dict[str, object]]:
+def list_message_records(
+    session_id: str,
+    limit: int | None = None,
+    *,
+    branch_context_id: str | None = None,
+    task_id: int | None = None,
+) -> list[dict[str, object]]:
     with create_session() as db:
         if branch_context_id is None:
             session_row = db.get(SessionRecord, session_id)
@@ -218,6 +225,8 @@ def list_message_records(session_id: str, limit: int | None = None, *, branch_co
             .where(MessageRecord.session_id == session_id)
             .order_by(MessageRecord.created_at.asc(), MessageRecord.id.asc())
         )
+        if task_id is not None:
+            stmt = stmt.where(MessageRecord.task_id == task_id)
         if branch_context_id is not None:
             stmt = stmt.where(MessageRecord.branch_context_id == branch_context_id)
         rows = db.scalars(stmt).all()

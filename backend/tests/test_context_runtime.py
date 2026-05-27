@@ -102,6 +102,105 @@ class ContextAssemblerTests(TestCase):
         self.assertEqual(selected[-1]["content"], "message 15")
         self.assertTrue(any("README.md" in item["content"] for item in selected))
 
+    def test_build_initial_loop_messages_preserves_matching_tool_use_for_selected_tool_result(self) -> None:
+        transcript = [
+            {"role": "user", "content": "message 0"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "call-1",
+                        "name": "read_file",
+                        "input": {"path": "foo.py"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call-1",
+                        "content": "file contents",
+                    }
+                ],
+            },
+            {"role": "assistant", "content": "later assistant"},
+            {"role": "user", "content": "later user"},
+        ]
+        with patch.object(context_assembler.session_service, "list_message_records", return_value=transcript):
+            selected = context_assembler.build_initial_loop_messages("session-1", lookback=10, keep=3)
+
+        self.assertTrue(
+            any(
+                message.get("role") == "assistant"
+                and isinstance(message.get("content"), list)
+                and any(
+                    isinstance(part, dict)
+                    and part.get("type") == "tool_use"
+                    and part.get("id") == "call-1"
+                    for part in message["content"]
+                )
+                for message in selected
+            )
+        )
+
+    def test_build_initial_loop_messages_drops_older_unrelated_task_cluster(self) -> None:
+        transcript = [
+            {"role": "user", "content": "在当前目录下实现一个简易的PDF批量处理脚本"},
+            {"role": "assistant", "content": "旧任务回复：PDF 处理说明"},
+            {"role": "user", "content": "安装一下对应依赖"},
+            {"role": "assistant", "content": "已把 pypdf 加到 requirements.txt。"},
+            {"role": "user", "content": "在这个目录下实现一个简易的Python脚本：URL 批量检测脚本"},
+            {"role": "assistant", "content": "开始检查目录内容。"},
+        ]
+        with patch.object(context_assembler.session_service, "list_message_records", return_value=transcript):
+            selected = context_assembler.build_initial_loop_messages("session-1", lookback=10, keep=6)
+
+        joined = "\n".join(context_assembler._content_text(message.get("content", "")) for message in selected)
+        self.assertIn("URL 批量检测脚本", joined)
+        self.assertNotIn("旧任务回复：PDF 处理说明", joined)
+
+    def test_build_initial_loop_messages_keeps_followup_messages_with_current_task_root(self) -> None:
+        transcript = [
+            {"role": "user", "content": "在当前目录下实现一个简易的PDF批量处理脚本"},
+            {"role": "assistant", "content": "已创建 pdf_batch_tool.py。"},
+            {"role": "user", "content": "安装一下对应依赖"},
+            {"role": "assistant", "content": "已把 pypdf 加到 requirements.txt。"},
+            {"role": "user", "content": "那你直接用pip install帮我安装吧"},
+        ]
+        with patch.object(context_assembler.session_service, "list_message_records", return_value=transcript):
+            selected = context_assembler.build_initial_loop_messages("session-1", lookback=10, keep=6)
+
+        joined = "\n".join(context_assembler._content_text(message.get("content", "")) for message in selected)
+        self.assertIn("PDF批量处理脚本", joined)
+        self.assertIn("那你直接用pip install帮我安装吧", joined)
+
+    def test_build_initial_loop_messages_filters_generic_irrelevant_assistant_reply_in_current_cluster(self) -> None:
+        transcript = [
+            {"role": "user", "content": "在当前目录下用Python实现一个简易的PDF批量处理脚本"},
+            {"role": "assistant", "content": "收到。对于“今天的比分、最新新闻、当前 CEO、价格、天气”这类时效性事实，我会先查询外部信息再回答；如果结果证据不足，我会明确说明不确定。"},
+        ]
+        with patch.object(context_assembler.session_service, "list_message_records", return_value=transcript):
+            selected = context_assembler.build_initial_loop_messages("session-1", lookback=10, keep=6)
+
+        joined = "\n".join(context_assembler._content_text(message.get("content", "")) for message in selected)
+        self.assertIn("PDF批量处理脚本", joined)
+        self.assertNotIn("今天的比分", joined)
+
+    def test_build_initial_loop_messages_filters_provider_error_assistant_reply_in_current_cluster(self) -> None:
+        transcript = [
+            {"role": "user", "content": "在这个目录下实现一个简易的Python脚本：URL 批量检测脚本"},
+            {"role": "assistant", "content": "OpenAI-compatible request failed: 400 {\"error\":{\"message\":\"No tool call found for function call output with call_id call_1\",\"type\":\"invalid_request_error\"}}"},
+        ]
+        with patch.object(context_assembler.session_service, "list_message_records", return_value=transcript):
+            selected = context_assembler.build_initial_loop_messages("session-1", lookback=10, keep=6)
+
+        joined = "\n".join(context_assembler._content_text(message.get("content", "")) for message in selected)
+        self.assertIn("URL 批量检测脚本", joined)
+        self.assertNotIn("No tool call found for function call output", joined)
+
     def test_assemble_context_injects_runtime_context_into_tool_result_message(self) -> None:
         retrieval = memory_retriever.RetrievalResult(
             stable=[],
@@ -213,6 +312,68 @@ class ContextAssemblerTests(TestCase):
         )
         self.assertIn("Compacted bash result", tool_result_part["content"])
         self.assertEqual(assembled.debug_meta["summarized_tool_results"], 1)
+
+    def test_assemble_context_preserves_matching_tool_use_before_tool_result_suffix(self) -> None:
+        retrieval = memory_retriever.RetrievalResult(stable=[], dynamic=[], counts_by_kind={})
+        messages = [
+            {"role": "user", "content": "old user"},
+            {"role": "assistant", "content": "old assistant"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "call-1",
+                        "name": "read_file",
+                        "input": {"path": "foo.py"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call-1",
+                        "content": "file contents",
+                    }
+                ],
+            },
+            {"role": "assistant", "content": "intermediate assistant"},
+            {"role": "user", "content": "continue"},
+            {"role": "assistant", "content": "need more info"},
+        ]
+        with patch.object(
+            context_assembler.session_service,
+            "get_session",
+            return_value=SimpleNamespace(workspace_mode="bound", workspace_label="Jarvis"),
+        ), patch.object(
+            context_assembler.memory_retriever,
+            "retrieve_context_memories",
+            return_value=retrieval,
+        ):
+            assembled = context_assembler.assemble_context(
+                session_id="session-1",
+                workspace=SimpleNamespace(as_posix=lambda: "/tmp/workspace"),
+                messages=messages,
+                base_system_prompt="You are Jarvis.",
+                allowed_external_reads=[],
+                max_tokens=4000,
+            )
+
+        self.assertTrue(
+            any(
+                message.get("role") == "assistant"
+                and isinstance(message.get("content"), list)
+                and any(
+                    isinstance(part, dict)
+                    and part.get("type") == "tool_use"
+                    and part.get("id") == "call-1"
+                    for part in message["content"]
+                )
+                for message in assembled.messages
+            )
+        )
 
     def test_runtime_git_prompt_section_includes_branch_metadata(self) -> None:
         runtime = RuntimeManager()

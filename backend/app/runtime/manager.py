@@ -30,12 +30,17 @@ import app.services.image_generation_service as image_generation_service
 import app.services.git_service as git_service
 import app.services.memory_service as memory_service
 import app.services.memory_search_service as memory_search_service
+import app.services.reflection_service as reflection_service
+import app.services.verification_reviewer_service as verification_reviewer_service
 import app.services.speech_generation_service as speech_generation_service
+import app.services.task_profile_service as task_profile_service
+import app.services.task_classification_service as task_classification_service
 import app.services.tavily_search_service as tavily_search_service
 import app.services.turn_service as turn_service
+import app.services.verification_packet_service as verification_packet_service
 import app.services.video_generation_service as video_generation_service
 import app.services.worktree_service as worktree_service
-from app.services import approval_service, asset_service, background_job_service, ingestion_job_service, lease_service, session_service, subagent_service, teammate_service, tool_service
+from app.services import approval_service, asset_service, background_job_service, ingestion_job_service, lease_service, session_service, subagent_service, task_service, teammate_service, tool_service
 from app.tools.broker import ToolBroker, broker
 
 
@@ -51,6 +56,15 @@ class SessionTurn:
 class AgentReply:
     text: str
     asset_ids: list[str]
+
+
+@dataclass(frozen=True)
+class ReflectionDecision:
+    verdict: str
+    reason_codes: list[str]
+    next_action_prompt: str
+    summary: str
+    next_phase: str = ""
 
 
 class TurnCancelled(RuntimeError):
@@ -141,7 +155,7 @@ class RuntimeManager:
 
     def restore_state(self) -> None:
         for recovered in turn_service.recover_orphaned_running_turns():
-            memory_service.refresh_rolling_summary(recovered.session_id, recovered.id)
+            memory_service.refresh_rolling_summary(recovered.session_id, recovered.id, task_id=recovered.task_id)
             session_service.create_event_record(
                 TimelineEvent(
                     session_id=recovered.session_id,
@@ -483,6 +497,7 @@ class RuntimeManager:
             return None
         try:
             pending_context = approval_service.get_pending_runtime_context(approval_id)
+            approval_session_id, approval_turn_id, _approval_checkpoint_id, approval_type = approval_service.get_approval_turn_metadata(approval_id)
             decision, changed = approval_service.apply_approval_decision(approval_id, approve=approve, feedback=feedback)
             if not decision:
                 return None
@@ -490,8 +505,11 @@ class RuntimeManager:
                 return decision
             pending_session_id = pending_context[0] if pending_context else None
             pending_payload = pending_context[1] if pending_context else None
-            turn_id = pending_payload.get("turn_id") if isinstance(pending_payload, dict) else None
-            summary_session_id = decision.session_id or pending_session_id
+            turn_id = pending_payload.get("turn_id") if isinstance(pending_payload, dict) else approval_turn_id
+            summary_session_id = decision.session_id or pending_session_id or approval_session_id
+            actionable_approval = True
+            if approve and approval_type == "bash":
+                actionable_approval = approval_service.approval_matches_latest_checkpoint(approval_id)
             if decision.approval_type == "plan_execution":
                 if decision.session_id:
                     await self.publish(
@@ -506,17 +524,20 @@ class RuntimeManager:
                 return decision
             if isinstance(turn_id, int):
                 if approve:
-                    turn_service.update_turn_status(turn_id, "queued", resume_hint="Bash approval granted; queued to resume.")
+                    if actionable_approval:
+                        turn_service.update_turn_status(turn_id, "queued", resume_hint="Bash approval granted; queued to resume.")
                 else:
                     turn_service.update_turn_status(turn_id, "interrupted", resume_hint="Bash approval was rejected.")
+                    rejected_task_id = self._turn_task_id(turn_id)
                     if summary_session_id:
                         memory_service.remember_constraint(
                             summary_session_id,
                             "Shell commands require explicit approval. The last bash request was rejected.",
+                            task_id=rejected_task_id,
                             source_turn_id=turn_id,
                         )
                     if summary_session_id:
-                        memory_service.refresh_rolling_summary(summary_session_id, turn_id)
+                        memory_service.refresh_rolling_summary(summary_session_id, turn_id, task_id=rejected_task_id)
             if decision.session_id:
                 await self.publish(
                     TimelineEvent(
@@ -525,7 +546,7 @@ class RuntimeManager:
                         content=f"Approval #{approval_id} {decision.status}.",
                     )
                 )
-            if approve and pending_session_id and pending_payload:
+            if approve and actionable_approval and pending_session_id and pending_payload:
                 self._enqueue_turn_resume_job(
                     pending_session_id,
                     turn_id if isinstance(turn_id, int) else None,
@@ -556,8 +577,10 @@ class RuntimeManager:
         self._ensure_dispatcher_started()
         workspace = self._session_workspace(session_id)
         branch_context_id = self._session_branch_context_id(session_id)
+        source_turn = turn_service.get_turn(int(source_turn_id)) if isinstance(source_turn_id, int) else None
         turn = turn_service.create_turn(
             session_id=session_id,
+            task_id=source_turn.task_id if source_turn else self._active_task_id(session_id),
             user_message_id=None,
             workspace_path=workspace.as_posix(),
             workspace_fingerprint=workspace_utils.workspace_fingerprint(workspace),
@@ -570,6 +593,7 @@ class RuntimeManager:
             payload={
                 "session_id": session_id,
                 "turn_id": turn.id,
+                "task_id": turn.task_id,
                 "branch_context_id": branch_context_id,
                 "content": original_request,
                 "execution_mode": "normal",
@@ -1093,7 +1117,7 @@ class RuntimeManager:
             if latest_job and latest_job.status == "cancelled":
                 return
             current_turn = turn_service.get_turn(turn_id)
-            if current_turn and current_turn.status in {"completed", "cancelled"}:
+            if current_turn and current_turn.status in {"completed", "cancelled", "waiting_approval"}:
                 background_job_service.update_job_completed(job_id, current_turn.status)
             elif current_turn and current_turn.status == "failed":
                 background_job_service.update_job_failed(job_id, current_turn.error_summary or "Turn failed.")
@@ -1147,7 +1171,7 @@ class RuntimeManager:
                         content="Stopped the current turn.",
                     )
                 )
-                memory_service.refresh_rolling_summary(session_id, latest_turn.id)
+                memory_service.refresh_rolling_summary(session_id, latest_turn.id, task_id=latest_turn.task_id)
             return True
         turn.cancel_event.set()
         return True
@@ -1213,7 +1237,33 @@ class RuntimeManager:
     async def append_message(self, session_id: str, payload: MessageCreate) -> None:
         self._ensure_dispatcher_started()
         should_autoname = payload.role == "user" and bool(payload.content.strip()) and self._should_autoname_session(session_id)
-        created_message = session_service.create_message_record(session_id, payload)
+        routed_task_id: int | None = self._active_task_id(session_id)
+        active_before = self._active_task_summary(session_id) if payload.role == "user" else None
+        routing_decision = None
+        if payload.role == "user":
+            try:
+                routing_decision = task_classification_service.classify_message(session_id, payload.content)
+                routed_task = task_service.apply_routing_decision(
+                    session_id,
+                    decision=routing_decision.decision,
+                    content=payload.content,
+                    target_task_id=routing_decision.target_task_id,
+                    reason="runtime_message_routing",
+                )
+                routed_task_id = routed_task.id
+            except Exception:
+                routing_decision = None
+        created_message = session_service.create_message_record(session_id, payload, task_id=routed_task_id)
+        if payload.role == "user" and routing_decision is not None:
+            task_service.record_classification(
+                session_id=session_id,
+                message_id=created_message.id if created_message else None,
+                active_task_id=active_before.id if active_before else None,
+                decision=routing_decision.decision,
+                target_task_id=routed_task_id,
+                confidence=routing_decision.confidence,
+                rationale_json=routing_decision.rationale_json(),
+            )
         parts = self._build_user_message_parts(session_id, payload)
         await self.publish(
             TimelineEvent(
@@ -1237,6 +1287,7 @@ class RuntimeManager:
             branch_context_id = self._session_branch_context_id(session_id)
             turn = turn_service.create_turn(
                 session_id=session_id,
+                task_id=routed_task_id,
                 user_message_id=created_message.id if created_message else None,
                 workspace_path=workspace.as_posix(),
                 workspace_fingerprint=workspace_utils.workspace_fingerprint(workspace),
@@ -1244,9 +1295,9 @@ class RuntimeManager:
                 execution_mode=payload.execution_mode,
             )
             if payload.content.strip():
-                memory_service.remember_goal(session_id, payload.content, source_turn_id=turn.id)
-                self._capture_user_memory_signals(session_id, turn.id, payload.content)
-            memory_service.refresh_rolling_summary(session_id, turn.id)
+                memory_service.remember_goal(session_id, payload.content, task_id=routed_task_id, source_turn_id=turn.id)
+                self._capture_user_memory_signals(session_id, turn.id, payload.content, task_id=routed_task_id)
+            memory_service.refresh_rolling_summary(session_id, turn.id, task_id=routed_task_id)
             if should_autoname:
                 self._start_autoname_session(session_id, payload.content)
             job = background_job_service.create_job(
@@ -1255,6 +1306,7 @@ class RuntimeManager:
                 payload={
                     "session_id": session_id,
                     "turn_id": turn.id,
+                    "task_id": routed_task_id,
                     "branch_context_id": branch_context_id,
                     "content": payload.content,
                     "execution_mode": payload.execution_mode,
@@ -1329,7 +1381,11 @@ class RuntimeManager:
         turn = self.session_turns.get(session_id)
         partial_text = turn.partial_text.strip() if turn else ""
         if partial_text:
-            session_service.create_message_record(session_id, MessageCreate(role="assistant", content=partial_text))
+            session_service.create_message_record(
+                session_id,
+                MessageCreate(role="assistant", content=partial_text),
+                task_id=current_turn.task_id if current_turn else self._active_task_id(session_id),
+            )
             await self.publish(
                 TimelineEvent(
                     session_id=session_id,
@@ -1345,7 +1401,7 @@ class RuntimeManager:
                 content="Stopped the current turn.",
             )
         )
-        memory_service.refresh_rolling_summary(session_id, turn_id)
+        memory_service.refresh_rolling_summary(session_id, turn_id, task_id=self._turn_task_id(turn_id))
 
     async def _run_lead_turn(
         self,
@@ -1534,6 +1590,7 @@ class RuntimeManager:
         execution_mode = self._normalize_execution_mode(execution_mode)
         explicit_external_reads = self._explicit_external_reads(workspace, latest_user_content)
         named_workspace = workspace_utils.detect_named_workspace_reference(latest_user_content, workspace)
+        turn_task_id = self._turn_task_id(turn_id)
         if workspace_mode == "default" and named_workspace is not None:
             workspace = named_workspace
             explicit_external_reads = []
@@ -1546,11 +1603,13 @@ class RuntimeManager:
             memory_service.remember_constraint(
                 session_id,
                 f"This session is bound to {workspace.as_posix()}. Cross-workspace writes require a new session or explicit rebind.",
+                task_id=turn_task_id,
                 source_turn_id=turn_id,
             )
             memory_service.remember_open_question(
                 session_id,
                 f"Should this work continue in a new session bound to {named_workspace.as_posix()}?",
+                task_id=turn_task_id,
                 source_turn_id=turn_id,
             )
             await self.publish(
@@ -1601,6 +1660,25 @@ class RuntimeManager:
         if session is None:
             return settings.project_root
         return workspace_utils.normalize_workspace_path(session.canonical_workspace_path)
+
+    def _active_task_summary(self, session_id: str):
+        try:
+            return task_service.get_active_task(session_id)
+        except Exception:
+            return None
+
+    def _active_task_id(self, session_id: str) -> int | None:
+        active = self._active_task_summary(session_id)
+        return active.id if active else None
+
+    def _turn_task_id(self, turn_id: int | None) -> int | None:
+        if not isinstance(turn_id, int):
+            return None
+        try:
+            summary = turn_service.get_turn(turn_id)
+        except Exception:
+            return None
+        return summary.task_id if summary else None
 
     def _session_branch_context_id(self, session_id: str) -> str | None:
         return session_service.get_branch_context_id(session_id)
@@ -1655,7 +1733,7 @@ class RuntimeManager:
             if not workspace_utils.path_within(workspace, path)
         ]
 
-    def _capture_user_memory_signals(self, session_id: str, turn_id: int, content: str) -> None:
+    def _capture_user_memory_signals(self, session_id: str, turn_id: int, content: str, *, task_id: int | None = None) -> None:
         normalized = content.strip()
         lowered = normalized.lower()
         decision_markers = ("认可", "同意", "采用", "就按", "按这个", "按此", "用这个方案", "开始执行")
@@ -1663,19 +1741,20 @@ class RuntimeManager:
             memory_service.remember_decision(
                 session_id,
                 f"User confirmed the current direction: {normalized}",
+                task_id=task_id,
                 source_turn_id=turn_id,
             )
         if "？" in normalized or normalized.endswith("?"):
-            memory_service.remember_open_question(session_id, normalized, source_turn_id=turn_id)
+            memory_service.remember_open_question(session_id, normalized, task_id=task_id, source_turn_id=turn_id)
         elif lowered.startswith(("what ", "why ", "how ", "which ", "should ")):
-            memory_service.remember_open_question(session_id, normalized, source_turn_id=turn_id)
+            memory_service.remember_open_question(session_id, normalized, task_id=task_id, source_turn_id=turn_id)
 
-    def _capture_assistant_memory_signals(self, session_id: str, turn_id: int | None, content: str) -> None:
+    def _capture_assistant_memory_signals(self, session_id: str, turn_id: int | None, content: str, *, task_id: int | None = None) -> None:
         normalized = content.strip()
         if not normalized or turn_id is None:
             return
         if "？" in normalized or normalized.endswith("?"):
-            memory_service.remember_open_question(session_id, normalized, source_turn_id=turn_id)
+            memory_service.remember_open_question(session_id, normalized, task_id=task_id, source_turn_id=turn_id)
 
     def _build_runtime_context(
         self,
@@ -1692,8 +1771,9 @@ class RuntimeManager:
         tool_use_id: str | None = None,
         tool_name: str | None = None,
         tool_input: dict[str, object] | None = None,
+        extra_context: dict[str, object] | None = None,
     ) -> dict[str, object]:
-        return {
+        context: dict[str, object] = {
             "mode": "agent_loop",
             "workspace": workspace.as_posix(),
             "turn_id": turn_id,
@@ -1708,6 +1788,9 @@ class RuntimeManager:
             "emit_stream_events": emit_stream_events,
             "execution_mode": execution_mode,
         }
+        if extra_context:
+            context.update(extra_context)
+        return context
 
     def _write_checkpoint(
         self,
@@ -1726,6 +1809,7 @@ class RuntimeManager:
         tool_use_id: str | None = None,
         tool_name: str | None = None,
         tool_input: dict[str, object] | None = None,
+        extra_context: dict[str, object] | None = None,
     ) -> int | None:
         if turn_id is None:
             return None
@@ -1742,6 +1826,7 @@ class RuntimeManager:
             tool_use_id=tool_use_id,
             tool_name=tool_name,
             tool_input=tool_input,
+            extra_context=extra_context,
         )
         checkpoint = checkpoint_service.create_checkpoint(
             turn_id,
@@ -2531,6 +2616,7 @@ class RuntimeManager:
         asset_ids: list[str] | None = None,
     ) -> None:
         resolved_asset_ids = self._normalize_asset_ids(asset_ids or [])
+        task_id = self._turn_task_id(source_turn_id) or self._active_task_id(session_id)
         text = reply.strip() or ("Generated attachment." if resolved_asset_ids else "LLM provider returned no text output.")
         if emit_deltas:
             for chunk in self._chunk_text(text):
@@ -2546,10 +2632,11 @@ class RuntimeManager:
         session_service.create_message_record(
             session_id,
             MessageCreate(role="assistant", content=text, asset_ids=resolved_asset_ids),
+            task_id=task_id,
         )
-        memory_service.remember_progress(session_id, text, source_turn_id=source_turn_id)
-        self._capture_assistant_memory_signals(session_id, source_turn_id, text)
-        memory_service.refresh_rolling_summary(session_id, source_turn_id)
+        memory_service.remember_progress(session_id, text, task_id=task_id, source_turn_id=source_turn_id)
+        self._capture_assistant_memory_signals(session_id, source_turn_id, text, task_id=task_id)
+        memory_service.refresh_rolling_summary(session_id, source_turn_id, task_id=task_id)
         await self.publish(
             TimelineEvent(
                 session_id=session_id,
@@ -2608,18 +2695,15 @@ class RuntimeManager:
         return collected
 
     def _latest_request_text(self, messages: list[dict[str, object]]) -> str:
-        internal_prefixes = (
-            "Your previous response did not include a final answer or any tool call.",
-            "The user asked for a code change, but you have not changed any files yet.",
-            "You already changed files for this task, but you have not verified the change yet.",
-        )
         for message in reversed(messages):
             if message.get("role") != "user":
                 continue
             content = message.get("content")
             if isinstance(content, str) and content.strip():
                 text = content.strip()
-                if text.startswith(internal_prefixes):
+                if self._is_internal_runtime_followup(text):
+                    continue
+                if self._is_continuation_only_request(text):
                     continue
                 return text
             if not isinstance(content, list):
@@ -2631,10 +2715,81 @@ class RuntimeManager:
             ]
             if texts:
                 joined = "\n".join(texts)
-                if joined.startswith(internal_prefixes):
+                if self._is_internal_runtime_followup(joined):
+                    continue
+                if self._is_continuation_only_request(joined):
                     continue
                 return joined
         return ""
+
+    def _original_goal_text(self, messages: list[dict[str, object]]) -> str:
+        for message in messages:
+            if message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                text = content.strip()
+                if self._is_internal_runtime_followup(text) or self._is_continuation_only_request(text):
+                    continue
+                return text
+            if not isinstance(content, list):
+                continue
+            texts = [
+                str(part.get("text", "")).strip()
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text" and str(part.get("text", "")).strip()
+            ]
+            if texts:
+                joined = "\n".join(texts)
+                if self._is_internal_runtime_followup(joined) or self._is_continuation_only_request(joined):
+                    continue
+                return joined
+        return self._latest_request_text(messages)
+
+    def _is_internal_runtime_followup(self, text: str) -> bool:
+        internal_prefixes = (
+            "Your previous response did not include a final answer or any tool call.",
+            "The user asked for a code change, but you have not changed any files yet.",
+            "You already changed files for this task, but you have not verified the change yet.",
+            "You have already inspected enough context for a code-change task.",
+            "Stop exploring and make concrete progress now.",
+            "The user asked you to install or set up a dependency, but you have not yet proven it works in the target environment.",
+            "Your current evidence does not prove the dependency is installed in the target environment.",
+            "The user asked for a time-sensitive external fact.",
+            "Your available web_search evidence is weak.",
+            "Call web_search before finalizing your answer.",
+            "Run web_search for the specific external fact now,",
+            "Run one stronger web_search query targeting an authoritative fresh source,",
+            "Run one concrete target-environment verification with run_test",
+            "Run one stronger verification step that exercises the changed code path,",
+            "Apply the requested code change now, then run one concrete verification step",
+        )
+        return text.startswith(internal_prefixes)
+
+    def _is_continuation_only_request(self, text: str) -> bool:
+        normalized = text.strip().lower().strip(" \t\r\n.,!?;:，。！？；：")
+        if not normalized:
+            return False
+        continuation_markers = {
+            "继续",
+            "继续吧",
+            "接着",
+            "接着做",
+            "接着来",
+            "继续做",
+            "继续执行",
+            "继续处理",
+            "继续下去",
+            "继续一下",
+            "go on",
+            "continue",
+            "keep going",
+            "carry on",
+            "go ahead",
+            "proceed",
+            "resume",
+        }
+        return normalized in continuation_markers
 
     def _task_requires_code_change(self, messages: list[dict[str, object]]) -> bool:
         latest_request = self._latest_request_text(messages).lower()
@@ -2672,10 +2827,51 @@ class RuntimeManager:
         ]
         return any(re.search(pattern, latest_request, flags=re.IGNORECASE) for pattern in patterns)
 
-    def _task_requires_web_search(self, messages: list[dict[str, object]]) -> bool:
+    def _task_requires_dependency_install(self, messages: list[dict[str, object]]) -> bool:
         latest_request = self._latest_request_text(messages).lower()
         if not latest_request:
             return False
+        explicit_patterns = [
+            r"pip install",
+            r"npm install",
+            r"poetry install",
+            r"poetry add",
+            r"uv pip install",
+            r"\binstall dependency\b",
+            r"\binstall dependencies\b",
+            r"\binstall package\b",
+            r"\binstall packages\b",
+            r"安装依赖",
+            r"安装一下依赖",
+            r"安装包",
+            r"装一下依赖",
+        ]
+        if any(re.search(pattern, latest_request, flags=re.IGNORECASE) for pattern in explicit_patterns):
+            return True
+        install_like = bool(re.search(r"install|安装|装一下|帮我装", latest_request, flags=re.IGNORECASE))
+        dependency_like = bool(
+            re.search(r"dependency|dependencies|package|packages|pip|npm|依赖|包|模块|requirements", latest_request, flags=re.IGNORECASE)
+        )
+        return install_like and dependency_like
+
+    def _task_requires_external_fact_lookup(self, messages: list[dict[str, object]]) -> bool:
+        latest_request = self._latest_request_text(messages).lower()
+        if not latest_request:
+            return False
+        sanitized_request = latest_request
+        filesystem_context_patterns = [
+            r"当前目录",
+            r"当前工作区",
+            r"当前仓库",
+            r"当前项目",
+            r"current directory",
+            r"current workspace",
+            r"current repository",
+            r"current repo",
+            r"current project",
+        ]
+        for pattern in filesystem_context_patterns:
+            sanitized_request = re.sub(pattern, " ", sanitized_request, flags=re.IGNORECASE)
         patterns = [
             r"\btoday\b",
             r"\blatest\b",
@@ -2705,10 +2901,24 @@ class RuntimeManager:
             r"新闻",
             r"官网",
         ]
-        return any(re.search(pattern, latest_request, flags=re.IGNORECASE) for pattern in patterns)
+        return any(re.search(pattern, sanitized_request, flags=re.IGNORECASE) for pattern in patterns)
 
-    def _tool_result_history(self, messages: list[dict[str, object]]) -> list[dict[str, str]]:
-        history: list[dict[str, str]] = []
+    def _task_requires_web_search(self, messages: list[dict[str, object]]) -> bool:
+        return self._task_requires_external_fact_lookup(messages)
+
+    def _task_requires_read_only_analysis(self, messages: list[dict[str, object]]) -> bool:
+        if any(
+            (
+                self._task_requires_code_change(messages),
+                self._task_requires_dependency_install(messages),
+                self._task_requires_external_fact_lookup(messages),
+            )
+        ):
+            return False
+        return any(self._is_read_only_tool_name(item["tool_name"]) for item in self._tool_result_history(messages))
+
+    def _tool_result_history(self, messages: list[dict[str, object]]) -> list[dict[str, object]]:
+        history: list[dict[str, object]] = []
         for message in messages:
             content = message.get("content")
             if not isinstance(content, list):
@@ -2721,6 +2931,7 @@ class RuntimeManager:
                         "tool_name": str(part.get("tool_name", "")).strip(),
                         "status": str(part.get("status", "")).strip(),
                         "content": str(part.get("content", "")).strip(),
+                        "payload": part.get("payload") if isinstance(part.get("payload"), dict) else None,
                     }
                 )
         return history
@@ -2729,9 +2940,31 @@ class RuntimeManager:
         write_tools = {"write_file", "edit_file", "apply_patch"}
         return any(item["tool_name"] in write_tools and item["status"] == "completed" for item in self._tool_result_history(messages))
 
+    def _verification_state(self, messages: list[dict[str, object]]) -> str:
+        state = "none"
+        for item in self._tool_result_history(messages):
+            if item["tool_name"] != "run_test":
+                continue
+            payload = item.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("classification") != "verification":
+                continue
+            if payload.get("wrong_environment"):
+                state = "conflicting"
+                continue
+            if item["status"] != "completed":
+                state = "conflicting"
+                continue
+            if payload.get("evidence_strength") == "sufficient":
+                state = "sufficient"
+                continue
+            if payload.get("evidence_strength") == "weak" and state == "none":
+                state = "weak"
+        return state
+
     def _has_verification_attempt(self, messages: list[dict[str, object]]) -> bool:
-        verification_tools = {"run_test"}
-        return any(item["tool_name"] in verification_tools for item in self._tool_result_history(messages))
+        return self._verification_state(messages) != "none"
 
     def _has_successful_tool(self, messages: list[dict[str, object]], tool_name: str) -> bool:
         return any(
@@ -2803,6 +3036,330 @@ class RuntimeManager:
         ]
         return any(marker in normalized for marker in markers)
 
+    def _request_alignment_anchors(self, text: str) -> set[str]:
+        lowered = text.lower()
+        tokens = set(re.findall(r"[a-z0-9][a-z0-9_.-]{2,}", lowered))
+        stopwords = {
+            "python",
+            "script",
+            "simple",
+            "current",
+            "directory",
+            "workspace",
+            "repo",
+            "project",
+            "implement",
+            "build",
+            "create",
+            "write",
+            "tool",
+        }
+        return {token for token in tokens if token not in stopwords}
+
+    def _artifact_alignment_anchors(self, messages: list[dict[str, object]]) -> set[str]:
+        anchors: set[str] = set()
+        for item in self._tool_result_history(messages):
+            if item["tool_name"] not in {"write_file", "edit_file", "apply_patch"}:
+                continue
+            content = str(item["content"]).lower()
+            for token in re.findall(r"[a-z0-9][a-z0-9_.-]{2,}", content):
+                if "." in token:
+                    anchors.add(token)
+        return anchors
+
+    def _response_addresses_task(self, messages: list[dict[str, object]], latest_request: str, final_text: str) -> bool:
+        normalized_final = final_text.lower()
+        request_anchors = self._request_alignment_anchors(latest_request)
+        artifact_anchors = self._artifact_alignment_anchors(messages)
+        anchors = request_anchors | artifact_anchors
+        if not anchors:
+            return True
+        return any(anchor in normalized_final for anchor in anchors)
+
+    def _is_read_only_tool_name(self, tool_name: str) -> bool:
+        return tool_name in {
+            "conversation_search",
+            "get_session_git_state",
+            "list_files",
+            "list_session_assets",
+            "list_skills",
+            "load_skill",
+            "memory_search",
+            "read_asset_chunk",
+            "read_asset_summary",
+            "read_file",
+            "read_file_range",
+            "search_asset_chunks",
+            "search_text",
+            "show_diff",
+            "show_status",
+            "web_search",
+        }
+
+    def _should_inject_code_change_progress_followup(
+        self,
+        *,
+        messages: list[dict[str, object]],
+        current_batch_tool_names: list[str],
+        consecutive_read_only_batches: int,
+        followup_count: int,
+        agent_kind: str,
+        execution_mode: str,
+    ) -> bool:
+        if agent_kind != "lead" or execution_mode != "normal":
+            return False
+        if followup_count >= 2:
+            return False
+        if not self._task_requires_code_change(messages):
+            return False
+        if self._has_successful_write_tool(messages):
+            return False
+        if not current_batch_tool_names:
+            return False
+        if not all(self._is_read_only_tool_name(tool_name) for tool_name in current_batch_tool_names):
+            return False
+        return consecutive_read_only_batches >= 4
+
+    def _build_code_change_progress_followup(self, messages: list[dict[str, object]]) -> str:
+        latest_request = self._latest_request_text(messages)
+        mentions_script = bool(
+            latest_request
+            and re.search(r"\bscript\b|\.py\b|脚本|爬虫", latest_request, flags=re.IGNORECASE)
+        )
+        if mentions_script:
+            return (
+                "Stop exploring and make concrete progress now. "
+                "The user asked for a standalone script. "
+                "If there is no obvious integration point, create a new Python file in a sensible location such as the workspace root "
+                "or a scripts/ directory. "
+                "Your next response must either call write_file, edit_file, or apply_patch to create or modify the script, "
+                "or return a final blocker that explains exactly why you cannot do that safely."
+            )
+        return (
+            "Stop exploring and make concrete progress now. "
+            "You have inspected enough context for this code-change task. "
+            "Your next response must either call write_file, edit_file, or apply_patch to make the minimal change, "
+            "or return a final blocker that explains exactly why you cannot proceed safely."
+        )
+
+    def _make_reflection_decision(
+        self,
+        *,
+        verdict: str,
+        reason_codes: list[str] | None = None,
+        next_action_prompt: str = "",
+        summary: str = "",
+        next_phase: str | None = None,
+    ) -> ReflectionDecision:
+        return ReflectionDecision(
+            verdict=verdict,
+            reason_codes=list(reason_codes or []),
+            next_action_prompt=next_action_prompt.strip(),
+            summary=summary.strip(),
+            next_phase=(next_phase or self._next_phase_for_reflection_verdict(verdict)).strip() or "finalize",
+        )
+
+    def _next_phase_for_reflection_verdict(self, verdict: str) -> str:
+        normalized = (verdict or "").strip().lower()
+        if normalized == "continue_with_repair":
+            return "repair"
+        if normalized == "continue_with_verification":
+            return "verify"
+        if normalized == "continue_with_read_only_evidence":
+            return "gather_evidence"
+        if normalized in {"blocked", "blocked_uncertain"}:
+            return "blocked"
+        return "finalize"
+
+    def _reflection_next_phase(self, reflection: ReflectionDecision) -> str:
+        stored = (reflection.next_phase or "").strip().lower()
+        if stored:
+            return stored
+        return self._next_phase_for_reflection_verdict(reflection.verdict)
+
+    def _build_verification_review_packet(
+        self,
+        *,
+        messages: list[dict[str, object]],
+        final_text: str,
+        remaining_repair_attempts: int = 1,
+        remaining_auto_verify_attempts: int,
+    ) -> verification_packet_service.VerificationPacket:
+        original_goal = self._original_goal_text(messages)
+        latest_request = self._latest_request_text(messages)
+        task_profile = task_profile_service.build_task_profile(
+            latest_request=latest_request,
+            requires_code_change=self._task_requires_code_change(messages),
+            requires_dependency_install=self._task_requires_dependency_install(messages),
+            requires_external_fact_lookup=self._task_requires_external_fact_lookup(messages),
+            requires_read_only_analysis=self._task_requires_read_only_analysis(messages),
+        )
+        tool_results = [
+            verification_packet_service.ToolResultEvidence(
+                tool_name=str(item["tool_name"]),
+                status=str(item["status"]),
+                content=str(item["content"]),
+                payload=item.get("payload") if isinstance(item.get("payload"), dict) else None,
+            )
+            for item in self._tool_result_history(messages)
+        ]
+        return verification_packet_service.build_verification_packet(
+            task_profile=task_profile,
+            latest_request=latest_request,
+            tool_results=tool_results,
+            web_search_evidence_quality=self._latest_web_search_evidence_quality(messages),
+            original_goal=original_goal,
+            current_result_summary=final_text.strip(),
+            uncertainty_already_stated=self._response_communicates_uncertainty(final_text),
+            remaining_repair_attempts=remaining_repair_attempts,
+            remaining_auto_verify_attempts=remaining_auto_verify_attempts,
+        )
+
+    def _reviewer_packet_meta(
+        self,
+        packet: verification_packet_service.VerificationPacket,
+    ) -> dict[str, object]:
+        return {
+            "original_goal": packet.original_goal,
+            "completion_mode": packet.task_profile.completion_mode,
+            "candidate_result_summary": packet.candidate_result_summary,
+            "current_result_summary": packet.current_result_summary,
+            "artifact_summary": list(packet.artifact_summary),
+            "evidence_summary": list(packet.evidence_summary),
+            "open_verification_gaps": list(packet.open_verification_gaps),
+            "blockers": list(packet.blockers),
+            "repairable_blockers": [
+                {
+                    "kind": blocker.kind,
+                    "subject": blocker.subject,
+                    "detail": blocker.detail,
+                }
+                for blocker in packet.repairable_blockers
+            ],
+            "uncertainty_already_stated": packet.uncertainty_already_stated,
+            "remaining_repair_attempts": packet.remaining_repair_attempts,
+            "remaining_verify_attempts": packet.remaining_verify_attempts,
+            "remaining_auto_verify_attempts": packet.remaining_auto_verify_attempts,
+            "verification_state": packet.verification_state,
+            "last_failed_action": packet.last_failed_action,
+            "last_failed_verification_command": list(packet.last_failed_verification_command),
+            "weak_verification_stalled": packet.weak_verification_stalled,
+            "web_search_evidence_quality": packet.web_search_evidence_quality,
+        }
+
+    def _run_reflection(
+        self,
+        *,
+        messages: list[dict[str, object]],
+        final_text: str,
+        agent_kind: str,
+        execution_mode: str,
+        remaining_repair_attempts: int = 1,
+        remaining_auto_verify_attempts: int = 1,
+        packet: verification_packet_service.VerificationPacket | None = None,
+    ) -> ReflectionDecision:
+        if agent_kind != "lead" or execution_mode != "normal":
+            return self._make_reflection_decision(verdict="done", summary="Reflection is bypassed outside the lead runtime.")
+
+        final_text = final_text.strip()
+        response_has_blocker = self._response_explains_blocker(final_text)
+        packet = packet or self._build_verification_review_packet(
+            messages=messages,
+            final_text=final_text,
+            remaining_repair_attempts=remaining_repair_attempts,
+            remaining_auto_verify_attempts=remaining_auto_verify_attempts,
+        )
+        if packet.task_profile.completion_mode == "direct":
+            return self._make_reflection_decision(
+                verdict="done",
+                summary="Direct completion does not require structured review.",
+            )
+        reviewer_result = verification_reviewer_service.review_packet(
+            packet,
+            response_has_blocker=response_has_blocker,
+        )
+        if (
+            reviewer_result.verdict in {"done", "done_with_uncertainty"}
+            and packet.task_profile.completion_mode != "direct"
+            and not response_has_blocker
+            and not self._response_addresses_task(messages, packet.original_goal, final_text)
+        ):
+            return self._make_reflection_decision(
+                verdict="continue_with_verification",
+                reason_codes=["task_misalignment"],
+                next_action_prompt=(
+                    "Your latest user-facing answer drifted away from the user's actual task. "
+                    "Answer the original task directly. If you already created or verified an artifact, keep that concrete result summary, "
+                    "but do not replace it with a generic policy or meta explanation."
+                ),
+                summary="The latest final answer does not clearly address the original task.",
+                next_phase="gather_evidence",
+            )
+        return self._make_reflection_decision(
+            verdict=reviewer_result.verdict,
+            reason_codes=reviewer_result.reason_codes,
+            next_action_prompt=reviewer_result.next_verification_action or "",
+            summary=reviewer_result.user_visible_uncertainty or reviewer_result.goal_assessment,
+            next_phase=reviewer_result.next_phase,
+        )
+
+
+    def _finalize_blocked_text(self, final_text: str, summary: str) -> str:
+        normalized_final = final_text.strip()
+        normalized_summary = summary.strip()
+        if normalized_final and (
+            self._response_explains_blocker(normalized_final)
+            or self._response_communicates_uncertainty(normalized_final)
+        ):
+            return normalized_final
+        if not normalized_final:
+            return normalized_summary or "The task is blocked or uncertain, but the runtime did not capture a clearer explanation."
+        if not normalized_summary or normalized_summary in normalized_final:
+            return normalized_final
+        return f"{normalized_final}\n\nBlocked: {normalized_summary}"
+
+    def _should_preserve_completion_draft(self, reflection: ReflectionDecision, final_text: str) -> bool:
+        if not final_text.strip():
+            return False
+        if self._reflection_next_phase(reflection) not in {"gather_evidence", "repair", "verify"}:
+            return False
+        if self._response_explains_blocker(final_text):
+            return False
+        return "task_misalignment" not in reflection.reason_codes
+
+    def _merge_completion_text(self, preserved_text: str, current_text: str) -> str:
+        preserved = preserved_text.strip()
+        current = current_text.strip()
+        if not preserved:
+            return current
+        if not current:
+            return preserved
+        if current in preserved:
+            return preserved
+        if preserved in current:
+            return current
+        return f"{preserved}\n\n{current}"
+
+    def _reflection_followup_prompt(self, reflection: ReflectionDecision, final_text: str) -> str:
+        prompt = reflection.next_action_prompt.strip()
+        if not prompt:
+            return ""
+        action_guard = (
+            "Take that action yourself now. "
+            "Do not reply with review comments, recommendations, or a generic plan. "
+            "Your next response must either call the necessary tool or tools to execute this step, "
+            "or return a concrete blocker that explains exactly why you cannot run it."
+        )
+        if not self._should_preserve_completion_draft(reflection, final_text):
+            return f"{prompt}\n\n{action_guard}"
+        return (
+            f"{prompt}\n\n"
+            f"{action_guard}\n\n"
+            "Keep this existing user-facing result summary in the eventual final answer:\n"
+            f"{final_text.strip()}\n\n"
+            "After the required follow-up step, append the outcome to that summary instead of replacing it."
+        )
+
     def _completion_gate_followup(
         self,
         *,
@@ -2823,7 +3380,7 @@ class RuntimeManager:
                 require_web_search_followup_used,
                 require_weak_evidence_followup_used,
             )
-        requires_web_search = self._task_requires_web_search(messages)
+        requires_web_search = self._task_requires_external_fact_lookup(messages)
         if requires_web_search and not self._has_successful_tool(messages, "web_search"):
             if self._has_tool_attempt(messages, "web_search") and (
                 self._response_explains_blocker(final_text) or self._response_communicates_uncertainty(final_text)
@@ -2957,11 +3514,13 @@ class RuntimeManager:
                 "When the user asks you to speak a reply aloud, output narration audio, or convert text into spoken audio, use the generate_speech tool.",
                 "When the user explicitly asks you to create a video, use the generate_video tool instead of describing a video concept as if it already exists.",
                 (
-                    "When the user asks you to create or modify files, do the work directly inside the target workspace when it is safe."
+                "When the user asks you to create or modify files, do the work directly inside the target workspace when it is safe."
                     if execution_mode != "plan"
                     else "Use this turn to inspect and plan only. Do not create or modify files in Plan Mode."
                 ),
                 "For coding tasks, prefer structured tools over generic shell usage: use search_text to locate code, read_file_range for targeted context, show_status and show_diff to inspect repository changes, apply_patch for focused edits, and run_test for verification.",
+                "Do not use bash for ordinary Python execution, tests, py_compile, import checks, or package probes. Use run_test for those.",
+                "Use bash only for commands that truly need shell side effects, especially dependency installation or environment mutation.",
                 "If the user asks you to fix a bug or make a code change, do not stop after inspection alone. Continue until you either modify the relevant files and verify the result, or you are concretely blocked.",
                 "If you have already inspected enough context to act, take the next concrete step instead of ending the turn with only intermediate observations.",
                 "The current session is bound to exactly one canonical workspace. Do not treat another project name in the prompt as permission to silently switch workspaces.",
@@ -2990,6 +3549,8 @@ class RuntimeManager:
                 [
                     "This request requires a code change.",
                     "Default workflow for code-change tasks: 1) locate the target with search_text or read_file_range, 2) make the smallest safe edit with apply_patch, edit_file, or write_file, 3) inspect the resulting diff or status when useful, 4) run verification with run_test, 5) give the final answer.",
+                    "If verification reveals a missing dependency, use bash for the install step, then return to run_test for verification. Do not use bash just to run tests or py_compile.",
+                    "If the user asks for a standalone script or utility and there is no obvious existing integration point, create a new file in a sensible location such as the workspace root or a scripts/ directory instead of endlessly searching for a pre-existing hook.",
                     "A code-change turn is not complete if you only inspected files and did not change anything, unless you explicitly explain the blocker.",
                     "A code-change turn is not complete if you changed files but did not attempt verification, unless you explicitly explain why verification could not be run.",
                     "Prefer apply_patch for focused edits and run_test for verification before you finish.",
@@ -3134,6 +3695,9 @@ class RuntimeManager:
         agent_kind: str = "lead",
         emit_stream_events: bool = True,
         execution_mode: str = "normal",
+        remaining_repair_attempts: int = 1,
+        remaining_auto_verify_attempts: int = 1,
+        preserved_completion_text: str = "",
     ) -> AgentReply:
         client = create_client()
         tool_definitions = await self._autonomous_tool_definitions(allow_subagent_tool=allow_subagent_tool)
@@ -3166,10 +3730,8 @@ class RuntimeManager:
         )
         generated_asset_ids = self._collect_generated_asset_ids(messages)
         empty_response_followup_count = 0
-        require_change_followup_used = False
-        require_verification_followup_used = False
-        require_web_search_followup_used = False
-        require_weak_evidence_followup_used = False
+        consecutive_read_only_batches = 0
+        progress_followup_count = 0
 
         for _ in range(iteration_limit):
             if self._should_cancel_turn(turn_id, cancel_event):
@@ -3186,6 +3748,11 @@ class RuntimeManager:
                 emit_stream_events=emit_stream_events,
                 execution_mode=execution_mode,
                 summary="About to call the model for the next agent step.",
+                extra_context={
+                    "remaining_repair_attempts": remaining_repair_attempts,
+                    "remaining_auto_verify_attempts": remaining_auto_verify_attempts,
+                    "preserved_completion_text": preserved_completion_text,
+                },
             )
             assembled = (
                 context_assembler.assemble_context(
@@ -3228,6 +3795,11 @@ class RuntimeManager:
                 emit_stream_events=emit_stream_events,
                 execution_mode=execution_mode,
                 summary="Model output received for the current agent step.",
+                extra_context={
+                    "remaining_repair_attempts": remaining_repair_attempts,
+                    "remaining_auto_verify_attempts": remaining_auto_verify_attempts,
+                    "preserved_completion_text": preserved_completion_text,
+                },
             )
             tool_calls = [block for block in streamed_blocks if getattr(block, "type", "") == "tool_use"]
             if not tool_calls:
@@ -3254,37 +3826,113 @@ class RuntimeManager:
                         }
                     )
                     continue
-                (
-                    followup,
-                    require_change_followup_used,
-                    require_verification_followup_used,
-                    require_web_search_followup_used,
-                    require_weak_evidence_followup_used,
-                ) = self._completion_gate_followup(
+                reviewer_packet = self._build_verification_review_packet(
                     messages=messages,
                     final_text=final_text,
-                    require_change_followup_used=require_change_followup_used,
-                    require_verification_followup_used=require_verification_followup_used,
-                    require_web_search_followup_used=require_web_search_followup_used,
-                    require_weak_evidence_followup_used=require_weak_evidence_followup_used,
+                    remaining_repair_attempts=remaining_repair_attempts,
+                    remaining_auto_verify_attempts=remaining_auto_verify_attempts,
+                )
+                self._write_checkpoint(
+                    turn_id=turn_id,
+                    phase="before_reflection",
+                    workspace=workspace,
+                    messages=messages,
+                    allowed_external_reads=allowed_external_reads,
+                    write_enabled=write_enabled,
+                    allow_subagent_tool=allow_subagent_tool,
+                    agent_kind=agent_kind,
+                    emit_stream_events=emit_stream_events,
+                    execution_mode=execution_mode,
+                    summary="About to run structured reflection before finalizing the turn.",
+                    extra_context={
+                        "remaining_repair_attempts": remaining_repair_attempts,
+                        "remaining_auto_verify_attempts": remaining_auto_verify_attempts,
+                        "preserved_completion_text": preserved_completion_text,
+                        "reviewer_packet": self._reviewer_packet_meta(reviewer_packet),
+                    },
+                )
+                reflection = self._run_reflection(
+                    messages=messages,
+                    final_text=final_text,
                     agent_kind=agent_kind,
                     execution_mode=execution_mode,
+                    remaining_repair_attempts=remaining_repair_attempts,
+                    remaining_auto_verify_attempts=remaining_auto_verify_attempts,
+                    packet=reviewer_packet,
                 )
-                if followup:
-                    messages.append({"role": "user", "content": followup})
+                reflection_phase = self._reflection_next_phase(reflection)
+                if self._should_preserve_completion_draft(reflection, final_text):
+                    preserved_completion_text = self._merge_completion_text(preserved_completion_text, final_text)
+                followup_prompt = self._reflection_followup_prompt(reflection, final_text)
+                if reflection_phase in {"gather_evidence", "repair", "verify"} and followup_prompt:
+                    messages.append({"role": "user", "content": followup_prompt})
+                    if reflection_phase == "repair":
+                        remaining_repair_attempts = max(0, remaining_repair_attempts - 1)
+                    else:
+                        remaining_auto_verify_attempts = max(0, remaining_auto_verify_attempts - 1)
+                reflection_checkpoint_id = self._write_checkpoint(
+                    turn_id=turn_id,
+                    phase="after_reflection",
+                    workspace=workspace,
+                    messages=messages,
+                    allowed_external_reads=allowed_external_reads,
+                    write_enabled=write_enabled,
+                    allow_subagent_tool=allow_subagent_tool,
+                    agent_kind=agent_kind,
+                    emit_stream_events=emit_stream_events,
+                    execution_mode=execution_mode,
+                    summary=f"Structured reflection returned {reflection.verdict}.",
+                    extra_context={
+                        "remaining_repair_attempts": remaining_repair_attempts,
+                        "remaining_auto_verify_attempts": remaining_auto_verify_attempts,
+                        "preserved_completion_text": preserved_completion_text,
+                        "reviewer_packet": self._reviewer_packet_meta(reviewer_packet),
+                        "reflection": {
+                            "verdict": reflection.verdict,
+                            "reason_codes": reflection.reason_codes,
+                            "next_phase": reflection_phase,
+                            "next_action_prompt": followup_prompt or "",
+                            "summary": reflection.summary,
+                        },
+                        "reflection_final_text": final_text,
+                    },
+                )
+                if turn_id is not None:
+                    reflection_service.create_reflection(
+                        turn_id,
+                        checkpoint_id=reflection_checkpoint_id,
+                        verdict=reflection.verdict,
+                        reason_codes=reflection.reason_codes,
+                        next_action_prompt=followup_prompt or None,
+                        summary=reflection.summary,
+                    )
+                if reflection_phase in {"gather_evidence", "repair", "verify"}:
                     continue
+                if reflection_phase == "blocked":
+                    return AgentReply(
+                        text=self._merge_completion_text(
+                            preserved_completion_text,
+                            self._finalize_blocked_text(final_text, reflection.summary),
+                        ),
+                        asset_ids=generated_asset_ids,
+                    )
                 return AgentReply(
-                    text=final_text if text_blocks else "任务已执行，但模型没有返回最终文本说明。",
+                    text=self._merge_completion_text(
+                        preserved_completion_text,
+                        final_text if text_blocks else "任务已执行，但模型没有返回最终文本说明。",
+                    ),
                     asset_ids=generated_asset_ids,
                 )
 
             results: list[dict[str, object]] = []
+            current_batch_tool_names: list[str] = []
             for block in tool_calls:
                 tool_definition = tool_map.get(block.name)
                 if tool_definition is None:
                     output = f"Unknown tool '{block.name}'"
                     tool_service.create_tool_execution(
                         session_id=session_id,
+                        task_id=self._turn_task_id(turn_id) or self._active_task_id(session_id),
                         tool_name=block.name,
                         tool_source="local",
                         server_name=None,
@@ -3301,6 +3949,7 @@ class RuntimeManager:
                             "status": "error",
                         }
                     )
+                    current_batch_tool_names.append(block.name)
                     continue
 
                 if tool_definition.name == "bash":
@@ -3318,6 +3967,9 @@ class RuntimeManager:
                             agent_kind=agent_kind,
                             emit_stream_events=emit_stream_events,
                             execution_mode=execution_mode,
+                            remaining_repair_attempts=remaining_repair_attempts,
+                            remaining_auto_verify_attempts=remaining_auto_verify_attempts,
+                            preserved_completion_text=preserved_completion_text,
                         ),
                         asset_ids=generated_asset_ids,
                     )
@@ -3345,12 +3997,17 @@ class RuntimeManager:
                             agent_kind=agent_kind,
                             emit_stream_events=emit_stream_events,
                             execution_mode=execution_mode,
+                            remaining_repair_attempts=remaining_repair_attempts,
+                            remaining_auto_verify_attempts=remaining_auto_verify_attempts,
+                            preserved_completion_text=preserved_completion_text,
                         ),
                         asset_ids=generated_asset_ids,
                     )
                 latency_ms = int((time.perf_counter() - started_at) * 1000)
+                current_task_id = self._turn_task_id(turn_id) or self._active_task_id(session_id)
                 tool_service.create_tool_execution(
                     session_id=session_id,
+                    task_id=current_task_id,
                     tool_name=tool_definition.name,
                     tool_source=tool_definition.source,
                     server_name=tool_definition.server_name,
@@ -3377,6 +4034,7 @@ class RuntimeManager:
                         memory_service.remember_artifact(
                             session_id,
                             f"{tool_definition.name} updated {target_path}",
+                            task_id=current_task_id,
                             source_turn_id=turn_id,
                             path_ref=target_path,
                         )
@@ -3397,9 +4055,17 @@ class RuntimeManager:
                         "asset_ids": tool_asset_ids,
                         "tool_name": tool_definition.name,
                         "status": executed.status,
+                        "payload": executed_payload if isinstance(executed_payload, dict) else None,
                     }
                 )
+                current_batch_tool_names.append(tool_definition.name)
             messages.append({"role": "user", "content": results})
+            if current_batch_tool_names and all(
+                self._is_read_only_tool_name(tool_name) for tool_name in current_batch_tool_names
+            ):
+                consecutive_read_only_batches += 1
+            else:
+                consecutive_read_only_batches = 0
             self._write_checkpoint(
                 turn_id=turn_id,
                 phase="after_tools",
@@ -3412,7 +4078,27 @@ class RuntimeManager:
                 emit_stream_events=emit_stream_events,
                 execution_mode=execution_mode,
                 summary="Tool execution results appended to the loop context.",
+                extra_context={
+                    "remaining_auto_verify_attempts": remaining_auto_verify_attempts,
+                    "preserved_completion_text": preserved_completion_text,
+                },
             )
+            if self._should_inject_code_change_progress_followup(
+                messages=messages,
+                current_batch_tool_names=current_batch_tool_names,
+                consecutive_read_only_batches=consecutive_read_only_batches,
+                followup_count=progress_followup_count,
+                agent_kind=agent_kind,
+                execution_mode=execution_mode,
+            ):
+                progress_followup_count += 1
+                consecutive_read_only_batches = 0
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": self._build_code_change_progress_followup(messages),
+                    }
+                )
 
         return AgentReply(
             text=f"任务执行达到了安全迭代上限（{iteration_limit} 轮），我先停在这里。你可以让我继续，或告诉我希望收敛到哪一步。",
@@ -3434,6 +4120,9 @@ class RuntimeManager:
         agent_kind: str,
         emit_stream_events: bool,
         execution_mode: str,
+        remaining_repair_attempts: int,
+        remaining_auto_verify_attempts: int,
+        preserved_completion_text: str,
     ) -> str:
         broker_for_workspace = ToolBroker(workspace, allowed_external_reads=allowed_external_reads, write_enabled=write_enabled)
         context = self._build_runtime_context(
@@ -3449,6 +4138,11 @@ class RuntimeManager:
             tool_use_id=tool_use_id,
             tool_name="bash",
             tool_input=tool_input,
+            extra_context={
+                "remaining_repair_attempts": remaining_repair_attempts,
+                "remaining_auto_verify_attempts": remaining_auto_verify_attempts,
+                "preserved_completion_text": preserved_completion_text,
+            },
         )
         checkpoint_id = self._write_checkpoint(
             turn_id=turn_id,
@@ -3468,17 +4162,26 @@ class RuntimeManager:
         )
         approval = approval_service.create_approval(
             session_id=session_id,
+            task_id=self._turn_task_id(turn_id),
             turn_id=turn_id,
             checkpoint_id=checkpoint_id,
             approval_type="bash",
             prompt=f"bash\n{broker_for_workspace.serialize_input(tool_input)}",
             context=context,
         )
+        if isinstance(turn_id, int):
+            approval_service.reject_superseded_turn_approvals(
+                turn_id=turn_id,
+                approval_type="bash",
+                keep_approval_id=approval.id,
+            )
         if turn_id is not None:
             turn_service.update_turn_status(turn_id, "waiting_approval", resume_hint="Waiting for bash approval.")
+            turn_task_id = self._turn_task_id(turn_id)
             memory_service.remember_open_question(
                 session_id,
                 f"Approve the pending bash command for turn #{turn_id}?",
+                task_id=turn_task_id,
                 source_turn_id=turn_id,
             )
             await self.publish(
@@ -3510,6 +4213,9 @@ class RuntimeManager:
         agent_kind = str(context.get("agent_kind", "lead"))
         emit_stream_events = bool(context.get("emit_stream_events", True))
         execution_mode = self._normalize_execution_mode(str(context.get("execution_mode", "normal")))
+        remaining_repair_attempts = max(0, int(context.get("remaining_repair_attempts", 1) or 0))
+        remaining_auto_verify_attempts = max(0, int(context.get("remaining_auto_verify_attempts", 1) or 0))
+        preserved_completion_text = str(context.get("preserved_completion_text") or "")
 
         if not isinstance(workspace_raw, str) or not isinstance(messages, list):
             return AgentReply(
@@ -3532,6 +4238,7 @@ class RuntimeManager:
         status, output = broker_for_workspace.run(tool_name, tool_input)
         tool_service.create_tool_execution(
             session_id=session_id,
+            task_id=self._turn_task_id(turn_id) or self._active_task_id(session_id),
             tool_name=tool_name,
             tool_source="local",
             server_name=None,
@@ -3571,6 +4278,9 @@ class RuntimeManager:
             agent_kind=agent_kind,
             emit_stream_events=emit_stream_events,
             execution_mode=execution_mode,
+            remaining_repair_attempts=remaining_repair_attempts,
+            remaining_auto_verify_attempts=remaining_auto_verify_attempts,
+            preserved_completion_text=preserved_completion_text,
         )
 
     async def _resume_turn_from_context(
@@ -3588,6 +4298,11 @@ class RuntimeManager:
         agent_kind = str(context.get("agent_kind", "lead"))
         emit_stream_events = bool(context.get("emit_stream_events", True))
         execution_mode = self._normalize_execution_mode(str(context.get("execution_mode", "normal")))
+        remaining_repair_attempts = max(0, int(context.get("remaining_repair_attempts", 1) or 0))
+        remaining_auto_verify_attempts = max(0, int(context.get("remaining_auto_verify_attempts", 1) or 0))
+        preserved_completion_text = str(context.get("preserved_completion_text") or "")
+        reflection = context.get("reflection")
+        reflection_final_text = str(context.get("reflection_final_text") or "").strip()
 
         if not isinstance(workspace_raw, str) or not isinstance(messages, list):
             return AgentReply(
@@ -3601,6 +4316,20 @@ class RuntimeManager:
             if isinstance(allowed_external_reads_raw, list)
             else []
         )
+        if isinstance(reflection, dict):
+            verdict = str(reflection.get("verdict", "")).strip().lower()
+            next_phase = str(reflection.get("next_phase", "")).strip().lower() or self._next_phase_for_reflection_verdict(verdict)
+            summary = str(reflection.get("summary", "")).strip()
+            if next_phase == "finalize" and verdict in {"done", "done_with_uncertainty"}:
+                return AgentReply(
+                    text=reflection_final_text or "任务已执行，但模型没有返回最终文本说明。",
+                    asset_ids=self._collect_generated_asset_ids(messages),
+                )
+            if next_phase == "blocked" or verdict in {"blocked", "blocked_uncertain"}:
+                return AgentReply(
+                    text=self._finalize_blocked_text(reflection_final_text, summary),
+                    asset_ids=self._collect_generated_asset_ids(messages),
+                )
         return await self._continue_agent_loop(
             session_id,
             workspace,
@@ -3613,6 +4342,9 @@ class RuntimeManager:
             agent_kind=agent_kind,
             emit_stream_events=emit_stream_events,
             execution_mode=execution_mode,
+            remaining_repair_attempts=remaining_repair_attempts,
+            remaining_auto_verify_attempts=remaining_auto_verify_attempts,
+            preserved_completion_text=preserved_completion_text,
         )
 
     def _serialize_content_blocks(self, blocks: list[object]) -> list[dict[str, object]]:

@@ -57,7 +57,11 @@ def latest_checkpoint(turn_id: int) -> TurnCheckpointRecord | None:
         ).first()
 
 
-def latest_resumable_checkpoint_context(turn_id: int, *, phases: tuple[str, ...] = ("after_tools", "before_model")) -> tuple[TurnCheckpointRecord, dict[str, object]] | None:
+def latest_resumable_checkpoint_context(
+    turn_id: int,
+    *,
+    phases: tuple[str, ...] = ("after_reflection", "after_tools", "before_model"),
+) -> tuple[TurnCheckpointRecord, dict[str, object]] | None:
     with create_session() as db:
         row = db.scalars(
             select(TurnCheckpointRecord)

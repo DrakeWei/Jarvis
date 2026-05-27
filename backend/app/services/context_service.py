@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import app.services.memory_service as memory_service
 import app.services.session_service as session_service
+import app.services.task_service as task_service
 
 
 def build_turn_messages(session_id: str, *, recent_limit: int = 8) -> list[dict[str, object]]:
-    return session_service.list_message_records(session_id, limit=recent_limit)
+    active = task_service.get_active_task(session_id)
+    return session_service.list_message_records(session_id, limit=recent_limit, task_id=active.id if active else None)
 
 
 def build_session_memory_header(session_id: str) -> str:

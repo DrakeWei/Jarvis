@@ -35,6 +35,7 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, futu
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _migrate_session_columns()
+    _migrate_task_columns()
     _migrate_message_columns()
     _migrate_session_asset_columns()
     _migrate_message_asset_columns()
@@ -46,6 +47,7 @@ def init_db() -> None:
     _migrate_tool_execution_columns()
     _migrate_background_job_columns()
     _migrate_event_log_columns()
+    _migrate_turn_reflection_columns()
     _ensure_query_indexes()
 
 
@@ -124,6 +126,46 @@ def _migrate_session_columns() -> None:
             )
 
 
+def _migrate_task_columns() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"] for column in inspector.get_columns("tasks")}
+    except Exception:
+        return
+
+    statements: list[str] = []
+    if "title" not in columns:
+        statements.append("ALTER TABLE tasks ADD COLUMN title VARCHAR(200)")
+    if "summary" not in columns:
+        statements.append("ALTER TABLE tasks ADD COLUMN summary TEXT")
+    if "origin" not in columns:
+        statements.append("ALTER TABLE tasks ADD COLUMN origin VARCHAR(40)")
+    if "updated_at" not in columns:
+        statements.append("ALTER TABLE tasks ADD COLUMN updated_at DATETIME")
+    if "activated_at" not in columns:
+        statements.append("ALTER TABLE tasks ADD COLUMN activated_at DATETIME")
+    if "suspended_at" not in columns:
+        statements.append("ALTER TABLE tasks ADD COLUMN suspended_at DATETIME")
+    if "completed_at" not in columns:
+        statements.append("ALTER TABLE tasks ADD COLUMN completed_at DATETIME")
+
+    if statements:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+            connection.execute(
+                text(
+                    """
+                    UPDATE tasks
+                    SET title = COALESCE(title, subject),
+                        summary = COALESCE(summary, description),
+                        origin = COALESCE(origin, 'legacy'),
+                        updated_at = COALESCE(updated_at, created_at)
+                    """
+                )
+            )
+
+
 def _migrate_tool_execution_columns() -> None:
     inspector = inspect(engine)
     try:
@@ -136,6 +178,8 @@ def _migrate_tool_execution_columns() -> None:
         statements.append("ALTER TABLE tool_executions ADD COLUMN tool_source VARCHAR(20) NOT NULL DEFAULT 'local'")
     if "server_name" not in columns:
         statements.append("ALTER TABLE tool_executions ADD COLUMN server_name VARCHAR(80)")
+    if "task_id" not in columns:
+        statements.append("ALTER TABLE tool_executions ADD COLUMN task_id INTEGER")
     if "latency_ms" not in columns:
         statements.append("ALTER TABLE tool_executions ADD COLUMN latency_ms INTEGER")
     if "remote_request_id" not in columns:
@@ -211,19 +255,31 @@ def _migrate_event_log_columns() -> None:
 
 def _ensure_query_indexes() -> None:
     statements = [
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_tasks_single_active_per_session ON tasks(session_id) WHERE status = 'active'",
+        "CREATE INDEX IF NOT EXISTS idx_tasks_session_status_updated ON tasks(session_id, status, updated_at)",
+        "CREATE INDEX IF NOT EXISTS idx_tasks_session_suspended_at ON tasks(session_id, suspended_at)",
         "CREATE INDEX IF NOT EXISTS idx_turns_session_status_started ON turns(session_id, status, started_at)",
+        "CREATE INDEX IF NOT EXISTS idx_turns_session_task_status_started ON turns(session_id, task_id, status, started_at)",
         "CREATE INDEX IF NOT EXISTS idx_turns_session_branch_status_started ON turns(session_id, branch_context_id, status, started_at)",
+        "CREATE INDEX IF NOT EXISTS idx_turn_reflections_turn_created ON turn_reflections(turn_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_turn_reflections_turn_seq ON turn_reflections(turn_id, reflection_seq)",
         "CREATE INDEX IF NOT EXISTS idx_background_jobs_type_status_next_attempt ON background_jobs(job_type, status, next_attempt_at)",
         "CREATE INDEX IF NOT EXISTS idx_background_jobs_status_created ON background_jobs(status, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_status_created ON ingestion_jobs(status, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_event_log_session_ephemeral_id ON event_log(session_id, ephemeral, id)",
         "CREATE INDEX IF NOT EXISTS idx_event_log_ephemeral_created ON event_log(ephemeral, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_approvals_session_status_created ON approvals(session_id, status, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_approvals_session_task_status_created ON approvals(session_id, task_id, status, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_approvals_session_branch_status_created ON approvals(session_id, branch_context_id, status, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_tool_executions_session_created ON tool_executions(session_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_tool_executions_session_task_created ON tool_executions(session_id, task_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_session_memory_session_kind_status_updated ON session_memory(session_id, kind, status, updated_at)",
+        "CREATE INDEX IF NOT EXISTS idx_session_memory_session_task_kind_status_updated ON session_memory(session_id, task_id, kind, status, updated_at)",
         "CREATE INDEX IF NOT EXISTS idx_session_memory_session_branch_kind_status_updated ON session_memory(session_id, branch_context_id, kind, status, updated_at)",
+        "CREATE INDEX IF NOT EXISTS idx_messages_session_task_created ON messages(session_id, task_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_messages_session_branch_created ON messages(session_id, branch_context_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_task_state_transitions_task_created ON task_state_transitions(task_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_task_classifications_session_message_created ON task_classifications(session_id, message_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_agent_messages_agent_created ON agent_messages(agent_id, created_at)",
     ]
     with engine.begin() as connection:
@@ -287,6 +343,8 @@ def _migrate_message_columns() -> None:
         return
 
     statements: list[str] = []
+    if "task_id" not in columns:
+        statements.append("ALTER TABLE messages ADD COLUMN task_id INTEGER")
     if "branch_context_id" not in columns:
         statements.append("ALTER TABLE messages ADD COLUMN branch_context_id VARCHAR(36)")
 
@@ -381,6 +439,8 @@ def _migrate_turn_columns() -> None:
         return
 
     statements: list[str] = []
+    if "task_id" not in columns:
+        statements.append("ALTER TABLE turns ADD COLUMN task_id INTEGER")
     if "user_message_id" not in columns:
         statements.append("ALTER TABLE turns ADD COLUMN user_message_id INTEGER")
     if "workspace_path" not in columns:
@@ -423,6 +483,27 @@ def _migrate_turn_columns() -> None:
                     """
                 )
             )
+
+
+def _migrate_turn_reflection_columns() -> None:
+    inspector = inspect(engine)
+    try:
+        columns = {column["name"]: column for column in inspector.get_columns("turn_reflections")}
+    except Exception:
+        return
+    verdict_column = columns.get("verdict")
+    if verdict_column is None:
+        return
+    column_type = str(verdict_column.get("type", "")).lower()
+    if "varchar(40)" in column_type or "character varying(40)" in column_type:
+        return
+    if _is_sqlite(settings.database_url):
+        return
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE turn_reflections ALTER COLUMN verdict TYPE VARCHAR(40)"))
+    except Exception:
+        return
 
 
 def _migrate_agent_columns() -> None:
@@ -471,6 +552,8 @@ def _migrate_approval_columns() -> None:
         return
 
     statements: list[str] = []
+    if "task_id" not in columns:
+        statements.append("ALTER TABLE approvals ADD COLUMN task_id INTEGER")
     if "branch_context_id" not in columns:
         statements.append("ALTER TABLE approvals ADD COLUMN branch_context_id VARCHAR(36)")
     if "turn_id" not in columns:
@@ -505,6 +588,8 @@ def _migrate_session_memory_columns() -> None:
         return
 
     statements: list[str] = []
+    if "task_id" not in columns:
+        statements.append("ALTER TABLE session_memory ADD COLUMN task_id INTEGER")
     if "branch_context_id" not in columns:
         statements.append("ALTER TABLE session_memory ADD COLUMN branch_context_id VARCHAR(36)")
 

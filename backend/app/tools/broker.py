@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 from pathlib import Path
 import shutil
@@ -9,6 +10,7 @@ import tempfile
 
 from app.core.config import settings
 from app.core import workspace as workspace_utils
+from app.mcp.registry import ToolExecutionResult
 
 
 class ToolBroker:
@@ -38,7 +40,7 @@ class ToolBroker:
             "build",
         }
 
-    def run(self, tool_name: str, payload: dict[str, object]) -> tuple[str, str]:
+    def run(self, tool_name: str, payload: dict[str, object]) -> tuple[str, str] | ToolExecutionResult:
         try:
             if tool_name == "list_files":
                 return "completed", self._list_files(str(payload.get("path", "")))
@@ -240,13 +242,42 @@ class ToolBroker:
         output = result.stdout.strip()
         return "completed", (output[:20000] if output else "No diff from HEAD.")
 
-    def _run_test(self, argv: object) -> tuple[str, str]:
+    def _run_test(self, argv: object) -> ToolExecutionResult:
         if not isinstance(argv, list) or not argv:
-            return "error", "run_test requires a non-empty argv list."
+            return ToolExecutionResult(status="error", output="run_test requires a non-empty argv list.")
         command = [str(item).strip() for item in argv if str(item).strip()]
         if not command:
-            return "error", "run_test requires a non-empty argv list."
+            return ToolExecutionResult(status="error", output="run_test requires a non-empty argv list.")
+        original_command = list(command)
         command = self._normalize_test_command(command)
+        target_python = self._workspace_python_executable()
+        command, python_executable = self._rewrite_test_command_for_workspace(command, target_python)
+        classification, verification_kind, evidence_strength = self._classify_run_test_command(command)
+        payload = {
+            "original_command": original_command,
+            "resolved_command": command,
+            "classification": classification,
+            "verification_kind": verification_kind,
+            "evidence_strength": evidence_strength,
+            "target_python_executable": target_python.as_posix() if target_python else None,
+            "python_executable": python_executable.as_posix() if python_executable else None,
+            "used_workspace_venv": bool(
+                target_python and python_executable and python_executable.resolve() == target_python.resolve()
+            ),
+            "wrong_environment": bool(
+                target_python and python_executable and python_executable.resolve() != target_python.resolve()
+            ),
+        }
+        if classification == "blocked_mutation":
+            command_preview = " ".join(original_command[:6])
+            return ToolExecutionResult(
+                status="blocked",
+                output=(
+                    "run_test only supports verification or read-only inspection commands. "
+                    f"Use bash with approval for side-effecting commands such as `{command_preview}`."
+                ),
+                payload=payload,
+            )
         result = subprocess.run(
             command,
             cwd=self.project_root,
@@ -260,7 +291,11 @@ class ToolBroker:
         ).strip()
         output = combined[:20000] if combined else "(no output)"
         prefix = f"exit_code={result.returncode}"
-        return ("completed" if result.returncode == 0 else "error"), f"{prefix}\n{output}"
+        return ToolExecutionResult(
+            status="completed" if result.returncode == 0 else "error",
+            output=f"{prefix}\n{output}",
+            payload=payload,
+        )
 
     def _apply_patch(self, patch_text: str) -> tuple[str, str]:
         if not self.write_enabled:
@@ -319,15 +354,28 @@ class ToolBroker:
         banned = ["rm -rf", "sudo", "shutdown", "reboot"]
         if any(token in command for token in banned):
             return "blocked", "Blocked potentially destructive command."
-        result = subprocess.run(
-            command,
-            shell=True,
-            cwd=self.project_root,
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
+        normalized_argv = self._normalize_bash_command(command)
+        timeout_seconds = 300 if self._looks_like_package_install(command, normalized_argv) else 120
+        if normalized_argv is None:
+            result = subprocess.run(
+                command,
+                shell=True,
+                cwd=self.project_root,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        else:
+            result = subprocess.run(
+                normalized_argv,
+                shell=False,
+                cwd=self.project_root,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
         output = (result.stdout + result.stderr).strip()[:10000] or "(no output)"
+        output = f"exit_code={result.returncode}\n{output}"
         return ("completed" if result.returncode == 0 else "error"), output
 
     def _search_text_fallback(self, query: str, root: Path, limit: int) -> tuple[str, str]:
@@ -356,6 +404,126 @@ class ToolBroker:
             normalized[0] = "python3"
             return normalized
         return command
+
+    def _normalize_bash_command(self, command: str) -> list[str] | None:
+        if self._shell_command_uses_metacharacters(command):
+            return None
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            return None
+        if not argv:
+            return None
+        normalized = self._normalize_test_command(argv)
+        target_python = self._workspace_python_executable()
+        rewritten, _python_executable = self._rewrite_test_command_for_workspace(normalized, target_python)
+        return rewritten
+
+    def _shell_command_uses_metacharacters(self, command: str) -> bool:
+        return bool(re.search(r"[|&;<>$`\\\n]", command))
+
+    def _looks_like_package_install(self, command: str, argv: list[str] | None) -> bool:
+        normalized = command.lower()
+        if re.search(r"(^|\s)(pip|pip3)\s+install(\s|$)", normalized):
+            return True
+        if any(token in normalized for token in ("poetry add ", "npm install ", "uv pip install ")):
+            return True
+        if not argv:
+            return False
+        classification, verification_kind, _evidence_strength = self._classify_run_test_command(argv)
+        return classification == "blocked_mutation" and verification_kind == "package_install"
+
+    def _workspace_python_executable(self) -> Path | None:
+        candidate = self.project_root / ".venv" / "bin" / "python"
+        if candidate.exists() and candidate.is_file():
+            return candidate
+        return None
+
+    def _rewrite_test_command_for_workspace(
+        self,
+        command: list[str],
+        target_python: Path | None,
+    ) -> tuple[list[str], Path | None]:
+        if not command:
+            return command, None
+        first = command[0]
+        if target_python and first in {"python", "python3"}:
+            rewritten = list(command)
+            rewritten[0] = target_python.as_posix()
+            return rewritten, target_python
+        if target_python and first in {"pip", "pip3"}:
+            rewritten = [target_python.as_posix(), "-m", "pip", *command[1:]]
+            return rewritten, target_python
+        first_name = Path(first).name
+        if first_name in {"python", "python3"}:
+            return command, Path(first)
+        return command, None
+
+    def _classify_run_test_command(self, command: list[str]) -> tuple[str, str | None, str | None]:
+        if not command:
+            return "inspection", None, None
+        first = Path(command[0]).name.lower()
+        if first in {"python", "python3"}:
+            return self._classify_python_run_test(command)
+        if first in {"pip", "pip3"}:
+            action = command[1].lower() if len(command) > 1 else ""
+            if action in {"install", "uninstall", "download", "wheel"}:
+                return "blocked_mutation", "package_install", None
+            if action in {"show", "list", "freeze", "check"}:
+                return "verification", "package_probe", "sufficient"
+            return "inspection", "package_inspection", None
+        if first == "npm":
+            action = command[1].lower() if len(command) > 1 else ""
+            if action in {"install", "add", "remove", "update"}:
+                return "blocked_mutation", "package_install", None
+            if action in {"test", "run"}:
+                return "verification", "test_run", "sufficient"
+        if first in {"pnpm", "yarn"}:
+            action = command[1].lower() if len(command) > 1 else ""
+            if action in {"install", "add", "remove", "update"}:
+                return "blocked_mutation", "package_install", None
+        if first == "poetry":
+            action = command[1].lower() if len(command) > 1 else ""
+            if action in {"install", "add", "remove", "update", "sync"}:
+                return "blocked_mutation", "package_install", None
+            if action in {"run", "show"}:
+                return "verification", "package_probe", "sufficient"
+        if first == "uv":
+            action = command[1].lower() if len(command) > 1 else ""
+            if action in {"sync", "add", "remove"}:
+                return "blocked_mutation", "package_install", None
+            if action == "pip":
+                pip_action = command[2].lower() if len(command) > 2 else ""
+                if pip_action in {"install", "uninstall"}:
+                    return "blocked_mutation", "package_install", None
+                if pip_action in {"show", "list", "freeze", "check"}:
+                    return "verification", "package_probe", "sufficient"
+        if first == "git":
+            action = command[1].lower() if len(command) > 1 else ""
+            if action in {"status", "diff", "show", "log", "rev-parse", "branch"}:
+                return "inspection", "git_inspection", None
+        if first in {"ls", "cat", "find", "rg", "grep", "pwd", "which", "echo"}:
+            return "inspection", "read_only_command", None
+        return "verification", "command_execution", "sufficient"
+
+    def _classify_python_run_test(self, command: list[str]) -> tuple[str, str | None, str | None]:
+        if len(command) >= 3 and command[1] == "-m":
+            module = command[2].lower()
+            action = command[3].lower() if len(command) > 3 else ""
+            if module == "pip":
+                if action in {"install", "uninstall", "download", "wheel"}:
+                    return "blocked_mutation", "package_install", None
+                if action in {"show", "list", "freeze", "check"}:
+                    return "verification", "package_probe", "sufficient"
+                return "inspection", "package_inspection", None
+            if module in {"py_compile", "compileall"}:
+                return "verification", "syntax_check", "weak"
+            if module in {"pytest", "unittest"}:
+                return "verification", "test_run", "sufficient"
+            return "verification", "module_run", "sufficient"
+        if len(command) >= 2 and command[1] == "-c":
+            return "verification", "python_inline", "sufficient"
+        return "verification", "script_run", "sufficient"
 
     def _apply_structured_patch(self, patch_text: str) -> tuple[str, str]:
         lines = patch_text.splitlines()

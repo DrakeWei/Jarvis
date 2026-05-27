@@ -22,6 +22,16 @@
       "tool_name": "run_test"
     },
     {
+      "kind": "tool_status_is",
+      "tool_name": "run_test",
+      "statuses": ["completed"]
+    },
+    {
+      "kind": "tool_output_contains_all",
+      "tool_name": "run_test",
+      "contains": ["exit_code=0"]
+    },
+    {
       "kind": "workspace_diff_not_empty"
     },
     {
