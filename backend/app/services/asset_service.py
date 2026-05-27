@@ -91,12 +91,12 @@ def build_asset_reference(asset: SessionAssetSummary) -> dict[str, object]:
         "asset_id": asset.id,
         "filename": asset.filename,
         "kind": asset.kind,
-        "origin": asset.origin,
-        "source_asset_id": asset.source_asset_id,
-        "metadata_json": asset.metadata_json,
-        "status": asset.status,
-        "preview_path": asset.preview_path,
-        "storage_path": asset.storage_path,
+        "origin": getattr(asset, "origin", "generated"),
+        "source_asset_id": getattr(asset, "source_asset_id", None),
+        "metadata_json": getattr(asset, "metadata_json", None),
+        "status": getattr(asset, "status", "ready"),
+        "preview_path": getattr(asset, "preview_path", None),
+        "storage_path": getattr(asset, "storage_path", None),
     }
 
 

@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from app.db.session import create_session
 from app.models import MessageRecord
+import app.services.task_service as task_service
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,7 @@ def search_conversation(
     scan_limit: int = 200,
 ) -> list[ConversationHit]:
     tokens = _tokenize(query)
+    active = task_service.get_active_task(session_id)
     with create_session() as db:
         stmt = (
             select(MessageRecord)
@@ -49,6 +51,8 @@ def search_conversation(
             .order_by(MessageRecord.created_at.desc(), MessageRecord.id.desc())
             .limit(scan_limit)
         )
+        if active is not None:
+            stmt = stmt.where(MessageRecord.task_id == active.id)
         rows = list(db.scalars(stmt).all())
 
     hits: list[ConversationHit] = []
@@ -84,7 +88,7 @@ def search_conversation_text(
         limit=limit,
     )
     if not hits:
-        return f"No conversation history matched query: {query}"
+        return f"No current task conversation history matched query: {query}"
     lines = [
         "Conversation search results:",
         f"Query: {query}",

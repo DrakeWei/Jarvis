@@ -4,6 +4,7 @@ from pydantic import BaseModel
 class TurnSummary(BaseModel):
     id: int
     session_id: str
+    task_id: int | None = None
     branch_context_id: str | None = None
     user_message_id: int | None
     workspace_path: str | None

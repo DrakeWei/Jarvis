@@ -532,10 +532,12 @@ textarea:focus-visible {
   display: grid;
   grid-template-rows: minmax(0, 1fr);
   height: 100%;
+  min-width: 0;
 }
 
 .conversation-body {
   min-height: 0;
+  min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 14px;
@@ -546,6 +548,7 @@ textarea:focus-visible {
   align-content: start;
   gap: 22px;
   padding: 8px 4px 28px 0;
+  min-width: 0;
 }
 
 .timeline-card,
@@ -565,6 +568,7 @@ textarea:focus-visible {
 .timeline-card {
   display: grid;
   gap: 10px;
+  min-width: 0;
   max-width: min(86%, 820px);
   padding: 14px 16px;
   box-shadow: none;
@@ -577,6 +581,7 @@ textarea:focus-visible {
 .timeline-user-message {
   justify-self: end;
   width: fit-content;
+  min-width: 0;
   max-width: min(78%, 760px);
   padding: 16px 20px;
   border-radius: 20px;
@@ -591,6 +596,7 @@ textarea:focus-visible {
 .timeline-assistant-message {
   display: grid;
   gap: 12px;
+  min-width: 0;
   max-width: min(92%, 920px);
   padding-right: 18px;
 }
@@ -856,6 +862,8 @@ textarea:focus-visible {
   margin: 0;
   color: #615a4f;
   line-height: 1.6;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .grouped-activity-list {
@@ -868,6 +876,7 @@ textarea:focus-visible {
   grid-template-columns: auto 1fr;
   gap: 10px;
   align-items: start;
+  min-width: 0;
   font-size: 0.84rem;
 }
 
@@ -925,6 +934,7 @@ textarea:focus-visible {
   color: var(--text-soft);
   line-height: 1.7;
   overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .timeline-assistant-message .markdown-body {
@@ -977,6 +987,9 @@ textarea:focus-visible {
   background: rgba(15, 23, 42, 0.06);
   color: var(--text);
   font-size: 0.92em;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: break-spaces;
 }
 
 .markdown-body pre {
@@ -994,6 +1007,7 @@ textarea:focus-visible {
 .timeline-message-stack {
   display: grid;
   gap: 10px;
+  min-width: 0;
 }
 
 .timeline-image-block {
@@ -1083,6 +1097,7 @@ textarea:focus-visible {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  min-width: 0;
   padding: 10px 12px;
   border-radius: 10px;
   background: linear-gradient(180deg, rgba(255, 251, 235, 0.94), rgba(255, 248, 235, 0.86));
@@ -1093,6 +1108,14 @@ textarea:focus-visible {
   min-width: 0;
   display: grid;
   gap: 5px;
+}
+
+.approval-copy p,
+.timeline-card p,
+.timeline-trace-body p,
+.grouped-activity-row p {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .approval-copy strong {

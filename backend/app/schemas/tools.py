@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 class ToolExecutionSummary(BaseModel):
     id: int
     session_id: str
+    task_id: int | None = None
     tool_name: str
     tool_source: str = "local"
     server_name: str | None = None

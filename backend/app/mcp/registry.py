@@ -111,7 +111,7 @@ def local_tool_definitions(*, allow_subagent_tool: bool = True) -> list[ToolDefi
         ),
         ToolDefinition(
             name="run_test",
-            description="Run a structured test command in the current session workspace without using a shell string. Prefer argv like ['python3', '-m', 'pytest', 'tests/test_file.py'] when relevant.",
+            description="Run a structured verification or read-only inspection command in the current session workspace without using a shell string. Do not use this for side-effecting install or environment-mutation commands. Prefer argv like ['python3', '-m', 'pytest', 'tests/test_file.py'] when relevant.",
             input_schema={
                 "type": "object",
                 "properties": {

@@ -8,6 +8,7 @@ from sqlalchemy import select
 from app.db.session import create_session
 from app.models import MessageRecord, SessionMemoryRecord, SessionRecord
 from app.schemas.memory import SessionMemorySummary
+import app.services.task_service as task_service
 
 ROLLING_SUMMARY_KIND = "rolling_summary"
 GOAL_KIND = "goal"
@@ -54,6 +55,7 @@ def _to_summary(row: SessionMemoryRecord) -> SessionMemorySummary:
     return SessionMemorySummary(
         id=row.id,
         session_id=row.session_id,
+        task_id=row.task_id,
         branch_context_id=row.branch_context_id,
         kind=row.kind,
         content=row.content,
@@ -71,13 +73,24 @@ def _session_branch_context_id(db, session_id: str) -> str | None:
     return session.branch_context_id if session else None
 
 
-def _archive_excess_active_memories(session_id: str, kind: str, *, keep: int) -> None:
+def _active_task_id(db, session_id: str) -> int | None:
+    active = task_service.get_active_task(session_id)
+    return active.id if active else None
+
+
+def _resolve_task_id(db, session_id: str, task_id: int | None = None) -> int | None:
+    return task_id if task_id is not None else _active_task_id(db, session_id)
+
+
+def _archive_excess_active_memories(session_id: str, kind: str, *, keep: int, task_id: int | None = None) -> None:
     with create_session() as db:
         branch_context_id = _session_branch_context_id(db, session_id)
+        resolved_task_id = _resolve_task_id(db, session_id, task_id)
         rows = db.scalars(
             select(SessionMemoryRecord)
             .where(
                 SessionMemoryRecord.session_id == session_id,
+                SessionMemoryRecord.task_id == resolved_task_id,
                 SessionMemoryRecord.branch_context_id == branch_context_id,
                 SessionMemoryRecord.kind == kind,
                 SessionMemoryRecord.status == "active",
@@ -90,12 +103,14 @@ def _archive_excess_active_memories(session_id: str, kind: str, *, keep: int) ->
         db.commit()
 
 
-def resolve_active_memory(session_id: str, kind: str) -> None:
+def resolve_active_memory(session_id: str, kind: str, *, task_id: int | None = None) -> None:
     with create_session() as db:
         branch_context_id = _session_branch_context_id(db, session_id)
+        resolved_task_id = _resolve_task_id(db, session_id, task_id)
         rows = db.scalars(
             select(SessionMemoryRecord).where(
                 SessionMemoryRecord.session_id == session_id,
+                SessionMemoryRecord.task_id == resolved_task_id,
                 SessionMemoryRecord.branch_context_id == branch_context_id,
                 SessionMemoryRecord.kind == kind,
                 SessionMemoryRecord.status == "active",
@@ -107,13 +122,15 @@ def resolve_active_memory(session_id: str, kind: str) -> None:
         db.commit()
 
 
-def get_active_memory(session_id: str, kind: str = ROLLING_SUMMARY_KIND) -> str | None:
+def get_active_memory(session_id: str, kind: str = ROLLING_SUMMARY_KIND, *, task_id: int | None = None) -> str | None:
     with create_session() as db:
         branch_context_id = _session_branch_context_id(db, session_id)
+        resolved_task_id = _resolve_task_id(db, session_id, task_id)
         row = db.scalars(
             select(SessionMemoryRecord)
             .where(
                 SessionMemoryRecord.session_id == session_id,
+                SessionMemoryRecord.task_id == resolved_task_id,
                 SessionMemoryRecord.branch_context_id == branch_context_id,
                 SessionMemoryRecord.kind == kind,
                 SessionMemoryRecord.status == "active",
@@ -129,6 +146,7 @@ def upsert_active_memory(
     kind: str,
     content: str,
     *,
+    task_id: int | None = None,
     source_turn_id: int | None = None,
     salience: int = 80,
     path_ref: str | None = None,
@@ -136,10 +154,12 @@ def upsert_active_memory(
     normalized = normalize_text(content)
     with create_session() as db:
         branch_context_id = _session_branch_context_id(db, session_id)
+        resolved_task_id = _resolve_task_id(db, session_id, task_id)
         row = db.scalars(
             select(SessionMemoryRecord)
             .where(
                 SessionMemoryRecord.session_id == session_id,
+                SessionMemoryRecord.task_id == resolved_task_id,
                 SessionMemoryRecord.branch_context_id == branch_context_id,
                 SessionMemoryRecord.kind == kind,
                 SessionMemoryRecord.status == "active",
@@ -151,6 +171,7 @@ def upsert_active_memory(
         if row is None:
             row = SessionMemoryRecord(
                 session_id=session_id,
+                task_id=resolved_task_id,
                 branch_context_id=branch_context_id,
                 kind=kind,
                 content=normalized,
@@ -177,6 +198,7 @@ def append_memory(
     kind: str,
     content: str,
     *,
+    task_id: int | None = None,
     source_turn_id: int | None = None,
     salience: int = 70,
     path_ref: str | None = None,
@@ -185,8 +207,10 @@ def append_memory(
     with create_session() as db:
         now = _utcnow()
         branch_context_id = _session_branch_context_id(db, session_id)
+        resolved_task_id = _resolve_task_id(db, session_id, task_id)
         row = SessionMemoryRecord(
             session_id=session_id,
+            task_id=resolved_task_id,
             branch_context_id=branch_context_id,
             kind=kind,
             content=normalized,
@@ -202,31 +226,34 @@ def append_memory(
         return normalized
 
 
-def remember_goal(session_id: str, content: str, *, source_turn_id: int | None = None) -> str:
+def remember_goal(session_id: str, content: str, *, task_id: int | None = None, source_turn_id: int | None = None) -> str:
     return upsert_active_memory(
         session_id,
         GOAL_KIND,
         content,
+        task_id=task_id,
         source_turn_id=source_turn_id,
         salience=95,
     )
 
 
-def remember_progress(session_id: str, content: str, *, source_turn_id: int | None = None) -> str:
+def remember_progress(session_id: str, content: str, *, task_id: int | None = None, source_turn_id: int | None = None) -> str:
     return upsert_active_memory(
         session_id,
         PROGRESS_KIND,
         content,
+        task_id=task_id,
         source_turn_id=source_turn_id,
         salience=85,
     )
 
 
-def remember_constraint(session_id: str, content: str, *, source_turn_id: int | None = None) -> str:
+def remember_constraint(session_id: str, content: str, *, task_id: int | None = None, source_turn_id: int | None = None) -> str:
     return upsert_active_memory(
         session_id,
         CONSTRAINT_KIND,
         content,
+        task_id=task_id,
         source_turn_id=source_turn_id,
         salience=90,
     )
@@ -236,6 +263,7 @@ def remember_artifact(
     session_id: str,
     content: str,
     *,
+    task_id: int | None = None,
     source_turn_id: int | None = None,
     path_ref: str | None = None,
 ) -> str:
@@ -243,10 +271,12 @@ def remember_artifact(
     if path_ref:
         with create_session() as db:
             branch_context_id = _session_branch_context_id(db, session_id)
+            resolved_task_id = _resolve_task_id(db, session_id, task_id)
             row = db.scalars(
                 select(SessionMemoryRecord)
                 .where(
                     SessionMemoryRecord.session_id == session_id,
+                    SessionMemoryRecord.task_id == resolved_task_id,
                     SessionMemoryRecord.branch_context_id == branch_context_id,
                     SessionMemoryRecord.kind == ARTIFACT_KIND,
                     SessionMemoryRecord.status == "active",
@@ -259,6 +289,7 @@ def remember_artifact(
             if row is None:
                 row = SessionMemoryRecord(
                     session_id=session_id,
+                    task_id=resolved_task_id,
                     branch_context_id=branch_context_id,
                     kind=ARTIFACT_KIND,
                     content=normalized,
@@ -275,50 +306,55 @@ def remember_artifact(
                 row.source_turn_id = source_turn_id
                 row.updated_at = now
             db.commit()
-        _archive_excess_active_memories(session_id, ARTIFACT_KIND, keep=6)
+        _archive_excess_active_memories(session_id, ARTIFACT_KIND, keep=6, task_id=task_id)
         return normalized
     value = append_memory(
         session_id,
         ARTIFACT_KIND,
         content,
+        task_id=task_id,
         source_turn_id=source_turn_id,
         salience=75,
         path_ref=path_ref,
     )
-    _archive_excess_active_memories(session_id, ARTIFACT_KIND, keep=6)
+    _archive_excess_active_memories(session_id, ARTIFACT_KIND, keep=6, task_id=task_id)
     return value
 
 
-def remember_decision(session_id: str, content: str, *, source_turn_id: int | None = None) -> str:
+def remember_decision(session_id: str, content: str, *, task_id: int | None = None, source_turn_id: int | None = None) -> str:
     value = append_memory(
         session_id,
         DECISION_KIND,
         content,
+        task_id=task_id,
         source_turn_id=source_turn_id,
         salience=88,
     )
-    resolve_active_memory(session_id, OPEN_QUESTION_KIND)
-    _archive_excess_active_memories(session_id, DECISION_KIND, keep=3)
+    resolve_active_memory(session_id, OPEN_QUESTION_KIND, task_id=task_id)
+    _archive_excess_active_memories(session_id, DECISION_KIND, keep=3, task_id=task_id)
     return value
 
 
-def remember_open_question(session_id: str, content: str, *, source_turn_id: int | None = None) -> str:
+def remember_open_question(session_id: str, content: str, *, task_id: int | None = None, source_turn_id: int | None = None) -> str:
     return upsert_active_memory(
         session_id,
         OPEN_QUESTION_KIND,
         content,
+        task_id=task_id,
         source_turn_id=source_turn_id,
         salience=82,
     )
 
 
-def list_active_memories(session_id: str, kind: str, *, limit: int = 3) -> list[str]:
+def list_active_memories(session_id: str, kind: str, *, limit: int = 3, task_id: int | None = None) -> list[str]:
     with create_session() as db:
         branch_context_id = _session_branch_context_id(db, session_id)
+        resolved_task_id = _resolve_task_id(db, session_id, task_id)
         rows = db.scalars(
             select(SessionMemoryRecord)
             .where(
                 SessionMemoryRecord.session_id == session_id,
+                SessionMemoryRecord.task_id == resolved_task_id,
                 SessionMemoryRecord.branch_context_id == branch_context_id,
                 SessionMemoryRecord.kind == kind,
                 SessionMemoryRecord.status == "active",
@@ -329,13 +365,15 @@ def list_active_memories(session_id: str, kind: str, *, limit: int = 3) -> list[
         return [row.content for row in rows]
 
 
-def list_memory(session_id: str, *, limit: int = 80) -> list[SessionMemorySummary]:
+def list_memory(session_id: str, *, limit: int = 80, task_id: int | None = None) -> list[SessionMemorySummary]:
     with create_session() as db:
         branch_context_id = _session_branch_context_id(db, session_id)
+        resolved_task_id = _resolve_task_id(db, session_id, task_id)
         rows = db.scalars(
             select(SessionMemoryRecord)
             .where(
                 SessionMemoryRecord.session_id == session_id,
+                SessionMemoryRecord.task_id == resolved_task_id,
                 SessionMemoryRecord.branch_context_id == branch_context_id,
             )
             .order_by(SessionMemoryRecord.updated_at.desc(), SessionMemoryRecord.id.desc())
@@ -344,12 +382,14 @@ def list_memory(session_id: str, *, limit: int = 80) -> list[SessionMemorySummar
         return [_to_summary(row) for row in rows]
 
 
-def refresh_rolling_summary(session_id: str, source_turn_id: int | None = None) -> str:
+def refresh_rolling_summary(session_id: str, source_turn_id: int | None = None, *, task_id: int | None = None) -> str:
     with create_session() as db:
         branch_context_id = _session_branch_context_id(db, session_id)
+        resolved_task_id = _resolve_task_id(db, session_id, task_id)
         messages = db.scalars(
             select(MessageRecord)
             .where(MessageRecord.session_id == session_id)
+            .where(MessageRecord.task_id == resolved_task_id)
             .where(MessageRecord.branch_context_id == branch_context_id)
             .order_by(MessageRecord.created_at.desc(), MessageRecord.id.desc())
             .limit(10)
@@ -362,7 +402,7 @@ def refresh_rolling_summary(session_id: str, source_turn_id: int | None = None) 
         recent_user = [_preview(message.content, 120) for message in user_messages[-3:]]
         latest_assistant = _preview(assistant_messages[-1].content, 160) if assistant_messages else ""
 
-        lines = ["Session summary:"]
+        lines = ["Task summary:"]
         if latest_goal:
             lines.append(f"- Latest user goal: {latest_goal}")
         if recent_user:
@@ -378,6 +418,7 @@ def refresh_rolling_summary(session_id: str, source_turn_id: int | None = None) 
             select(SessionMemoryRecord)
             .where(
                 SessionMemoryRecord.session_id == session_id,
+                SessionMemoryRecord.task_id == resolved_task_id,
                 SessionMemoryRecord.kind == ROLLING_SUMMARY_KIND,
                 SessionMemoryRecord.status == "active",
             )
@@ -388,6 +429,7 @@ def refresh_rolling_summary(session_id: str, source_turn_id: int | None = None) 
         if row is None:
             row = SessionMemoryRecord(
                 session_id=session_id,
+                task_id=resolved_task_id,
                 kind=ROLLING_SUMMARY_KIND,
                 content=content,
                 source_turn_id=source_turn_id,
@@ -402,4 +444,6 @@ def refresh_rolling_summary(session_id: str, source_turn_id: int | None = None) 
             row.source_turn_id = source_turn_id
             row.updated_at = now
         db.commit()
-        return content
+    if resolved_task_id is not None:
+        task_service.update_task_summary(resolved_task_id, summary=content)
+    return content

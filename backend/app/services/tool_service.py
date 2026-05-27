@@ -11,6 +11,7 @@ def list_tool_executions(session_id: str | None = None) -> list[ToolExecutionSum
             select(
                 ToolExecutionRecord.id,
                 ToolExecutionRecord.session_id,
+                ToolExecutionRecord.task_id,
                 ToolExecutionRecord.tool_name,
                 ToolExecutionRecord.tool_source,
                 ToolExecutionRecord.server_name,
@@ -30,6 +31,7 @@ def list_tool_executions(session_id: str | None = None) -> list[ToolExecutionSum
             ToolExecutionSummary(
                 id=row.id,
                 session_id=row.session_id,
+                task_id=row.task_id,
                 tool_name=row.tool_name,
                 tool_source=row.tool_source,
                 server_name=row.server_name,
@@ -46,6 +48,7 @@ def list_tool_executions(session_id: str | None = None) -> list[ToolExecutionSum
 
 def create_tool_execution(
     session_id: str,
+    task_id: int | None,
     tool_name: str,
     tool_source: str,
     server_name: str | None,
@@ -58,6 +61,7 @@ def create_tool_execution(
     with create_session() as db:
         row = ToolExecutionRecord(
             session_id=session_id,
+            task_id=task_id,
             tool_name=tool_name,
             tool_source=tool_source,
             server_name=server_name,
@@ -73,6 +77,7 @@ def create_tool_execution(
         return ToolExecutionSummary(
             id=row.id,
             session_id=row.session_id,
+            task_id=row.task_id,
             tool_name=row.tool_name,
             tool_source=row.tool_source,
             server_name=row.server_name,

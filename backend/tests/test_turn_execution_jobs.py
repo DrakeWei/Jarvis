@@ -501,3 +501,46 @@ class RuntimeTurnQueueTests(IsolatedAsyncioTestCase):
 
         update_turn_mock.assert_called_once()
         update_job_mock.assert_called_once_with(77, "superseded")
+
+    async def test_run_background_job_marks_waiting_approval_turn_job_completed_without_retry(self) -> None:
+        runtime = RuntimeManager()
+        job_row = SimpleNamespace(id=77, job_type="turn_execution", session_id="session-a", attempts=1, status="queued")
+
+        with patch("app.runtime.manager.background_job_service.get_job", return_value=job_row), patch(
+            "app.runtime.manager.lease_service.try_acquire",
+            return_value=True,
+        ), patch.object(
+            runtime,
+            "_lease_heartbeat_loop",
+            return_value=None,
+        ), patch("app.runtime.manager.background_job_service.update_job_running", return_value=job_row), patch(
+            "app.runtime.manager.background_job_service.payload_dict",
+            return_value={"session_id": "session-a", "turn_id": 12, "content": "Install dependency"},
+        ), patch(
+            "app.runtime.manager.turn_service.get_turn",
+            side_effect=[
+                SimpleNamespace(id=12, status="queued"),
+                SimpleNamespace(id=12, status="waiting_approval"),
+            ],
+        ), patch("app.runtime.manager.turn_service.has_newer_turn", return_value=False), patch(
+            "app.runtime.manager.lease_service.is_active",
+            return_value=False,
+        ), patch.object(
+            runtime,
+            "_start_background_turn",
+        ) as start_turn_mock, patch(
+            "app.runtime.manager.background_job_service.update_job_completed"
+        ) as update_job_mock, patch(
+            "app.runtime.manager.background_job_service.requeue_job"
+        ) as requeue_job_mock, patch("app.runtime.manager.lease_service.release"):
+            await runtime._run_background_job(77)
+
+        start_turn_mock.assert_called_once_with(
+            "session-a",
+            "Install dependency",
+            12,
+            execution_mode="normal",
+            plan_context=None,
+        )
+        update_job_mock.assert_called_once_with(77, "waiting_approval")
+        requeue_job_mock.assert_not_called()

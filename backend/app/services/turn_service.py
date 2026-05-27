@@ -21,6 +21,7 @@ def _to_summary(row: TurnRecord) -> TurnSummary:
     return TurnSummary(
         id=row.id,
         session_id=row.session_id,
+        task_id=row.task_id,
         branch_context_id=row.branch_context_id,
         user_message_id=row.user_message_id,
         workspace_path=row.workspace_path,
@@ -56,6 +57,7 @@ def create_turn(
     workspace_path: str,
     workspace_fingerprint: str,
     *,
+    task_id: int | None = None,
     branch_context_id: str | None = None,
     execution_mode: str = "normal",
 ) -> TurnSummary:
@@ -63,6 +65,7 @@ def create_turn(
         now = _utcnow()
         row = TurnRecord(
             session_id=session_id,
+            task_id=task_id,
             branch_context_id=branch_context_id,
             user_message_id=user_message_id,
             workspace_path=workspace_path,
@@ -81,32 +84,41 @@ def create_turn(
 
 
 def get_turn(turn_id: int) -> TurnSummary | None:
-    with create_session() as db:
-        row = db.get(TurnRecord, turn_id)
-        return _to_summary(row) if row else None
+    try:
+        with create_session() as db:
+            row = db.get(TurnRecord, turn_id)
+            return _to_summary(row) if row else None
+    except Exception:
+        return None
 
 
-def list_turns(session_id: str | None = None, *, branch_context_id: str | None = None) -> list[TurnSummary]:
+def list_turns(session_id: str | None = None, *, branch_context_id: str | None = None, task_id: int | None = None) -> list[TurnSummary]:
     with create_session() as db:
         stmt = select(TurnRecord).order_by(TurnRecord.started_at.desc(), TurnRecord.id.desc())
         if session_id:
             stmt = stmt.where(TurnRecord.session_id == session_id)
+        if task_id is not None:
+            stmt = stmt.where(TurnRecord.task_id == task_id)
         if branch_context_id is not None:
             stmt = stmt.where(TurnRecord.branch_context_id == branch_context_id)
         rows = db.scalars(stmt).all()
         return [_to_summary(row) for row in rows]
 
 
-def latest_turn_by_status(session_id: str, statuses: tuple[str, ...], *, branch_context_id: str | None = None) -> TurnSummary | None:
+def latest_turn_by_status(
+    session_id: str,
+    statuses: tuple[str, ...],
+    *,
+    branch_context_id: str | None = None,
+    task_id: int | None = None,
+) -> TurnSummary | None:
     with create_session() as db:
-        stmt = (
-            select(TurnRecord)
-            .where(TurnRecord.session_id == session_id, TurnRecord.status.in_(statuses))
-            .order_by(TurnRecord.started_at.desc(), TurnRecord.id.desc())
-            .limit(1)
-        )
+        stmt = select(TurnRecord).where(TurnRecord.session_id == session_id, TurnRecord.status.in_(statuses))
+        if task_id is not None:
+            stmt = stmt.where(TurnRecord.task_id == task_id)
         if branch_context_id is not None:
             stmt = stmt.where(TurnRecord.branch_context_id == branch_context_id)
+        stmt = stmt.order_by(TurnRecord.started_at.desc(), TurnRecord.id.desc()).limit(1)
         row = db.scalars(stmt).first()
         return _to_summary(row) if row else None
 
@@ -196,14 +208,17 @@ def request_turn_cancel(turn_id: int) -> TurnSummary | None:
         return _to_summary(row)
 
 
-def latest_cancellable_turn(session_id: str, *, branch_context_id: str | None = None) -> TurnSummary | None:
-    return latest_turn_by_status(session_id, ("queued", "running", "waiting_approval"), branch_context_id=branch_context_id)
+def latest_cancellable_turn(session_id: str, *, branch_context_id: str | None = None, task_id: int | None = None) -> TurnSummary | None:
+    return latest_turn_by_status(session_id, ("queued", "running", "waiting_approval"), branch_context_id=branch_context_id, task_id=task_id)
 
 
 def is_cancel_requested(turn_id: int) -> bool:
-    with create_session() as db:
-        row = db.get(TurnRecord, turn_id)
-        return bool(row and row.cancel_requested)
+    try:
+        with create_session() as db:
+            row = db.get(TurnRecord, turn_id)
+            return bool(row and row.cancel_requested)
+    except Exception:
+        return False
 
 
 def has_newer_turn(session_id: str, turn_id: int, *, branch_context_id: str | None = None) -> bool:

@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 class SessionMemorySummary(BaseModel):
     id: int
     session_id: str
+    task_id: int | None = None
     branch_context_id: str | None = None
     kind: str
     content: str

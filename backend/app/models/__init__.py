@@ -13,9 +13,12 @@ from app.models.entities import (
     SessionAssetRecord,
     SessionMemoryRecord,
     TaskDependencyRecord,
+    TaskClassificationRecord,
     TaskRecord,
+    TaskStateTransitionRecord,
     ToolExecutionRecord,
     TurnCheckpointRecord,
+    TurnReflectionRecord,
     TurnRecord,
 )
 
@@ -34,8 +37,11 @@ __all__ = [
     "SessionAssetRecord",
     "SessionMemoryRecord",
     "TaskDependencyRecord",
+    "TaskClassificationRecord",
     "TaskRecord",
+    "TaskStateTransitionRecord",
     "ToolExecutionRecord",
     "TurnCheckpointRecord",
+    "TurnReflectionRecord",
     "TurnRecord",
 ]

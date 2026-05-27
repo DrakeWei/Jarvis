@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.schemas.assets import SessionAssetSummary
 from app.services import asset_service, session_service
 from app.services import memory_retriever
+import app.services.task_service as task_service
 from app.services.context_budget import (
     compact_tool_result_messages,
     derive_budget,
@@ -65,6 +66,31 @@ def _content_text(content: Any) -> str:
     return "\n".join(parts)
 
 
+def _continuation_only_request(text: str) -> bool:
+    normalized = text.strip().lower().strip(" \t\r\n.,!?;:，。！？；：")
+    if not normalized:
+        return False
+    return normalized in {
+        "继续",
+        "继续吧",
+        "接着",
+        "接着做",
+        "接着来",
+        "继续做",
+        "继续执行",
+        "继续处理",
+        "继续下去",
+        "继续一下",
+        "go on",
+        "continue",
+        "keep going",
+        "carry on",
+        "go ahead",
+        "proceed",
+        "resume",
+    }
+
+
 def _latest_user_text(messages: list[dict[str, Any]]) -> str:
     for message in reversed(messages):
         if message.get("role") != "user":
@@ -83,6 +109,114 @@ def _latest_user_text(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _is_task_root_candidate(text: str) -> bool:
+    normalized = _normalize_text(text)
+    if not normalized or _continuation_only_request(normalized):
+        return False
+    lowered = normalized.lower()
+    referential_prefix = bool(re.match(r"^(那|那你|你之前|直接|然后|再|还有|另外|顺便|现在|那么|对应|兼容)", normalized))
+    english_patterns = [
+        r"\bfix\b",
+        r"\bimplement\b",
+        r"\bcreate\b",
+        r"\bbuild\b",
+        r"\bwrite\b",
+        r"\badd\b",
+        r"\brefactor\b",
+        r"\binstall\b",
+        r"\bconfigure\b",
+        r"\bscript\b",
+        r"\butility\b",
+        r"\btool\b",
+        r"\.py\b",
+        r"\.ts\b",
+        r"\.tsx\b",
+        r"\.js\b",
+        r"\.jsx\b",
+        r"\.json\b",
+        r"\.md\b",
+        r"https?://",
+    ]
+    chinese_patterns = [
+        r"实现",
+        r"修复",
+        r"创建",
+        r"新增",
+        r"重构",
+        r"安装",
+        r"配置",
+        r"脚本",
+        r"工具",
+        r"目录下",
+        r"当前目录",
+    ]
+    has_signal = any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in english_patterns) or any(
+        re.search(pattern, normalized) for pattern in chinese_patterns
+    )
+    if not has_signal:
+        return False
+    if referential_prefix and len(normalized) < 28 and ":" not in normalized and "：" not in normalized:
+        return False
+    return len(normalized) >= 10 or ".py" in lowered or "://" in lowered or ":" in normalized or "：" in normalized
+
+
+def _current_task_cluster_start(messages: list[dict[str, Any]]) -> int:
+    latest_root_index: int | None = None
+    for index, message in enumerate(messages):
+        if message.get("role") != "user":
+            continue
+        text = _content_text(message.get("content", ""))
+        if _is_task_root_candidate(text):
+            latest_root_index = index
+    return latest_root_index or 0
+
+
+def _is_irrelevant_assistant_reply(text: str) -> bool:
+    normalized = _normalize_text(text)
+    lowered = normalized.lower()
+    if not normalized:
+        return False
+    provider_error_markers = [
+        "openai-compatible request failed",
+        "invalid_request_error",
+        "no tool call found for function call output",
+        "function call output with call_id",
+    ]
+    if any(marker in lowered for marker in provider_error_markers):
+        return True
+    generic_external_fact_markers = [
+        "以后当问题涉及这类时效性外部信息时",
+        "对于“今天的比分、最新新闻、当前 ceo、价格、天气”",
+        "对于“今天的比分、最新新闻、当前 ceo、价格、天气”等时效性事实",
+        "我会先查询最新信息再回答",
+        "我会先查询外部信息再回答",
+        "如果结果证据不足，我会明确说明不确定",
+        "如果检索证据不足，我会明确说明答案不确定",
+    ]
+    return any(marker in normalized or marker in lowered for marker in generic_external_fact_markers)
+
+
+def _filter_irrelevant_assistant_messages(cluster: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not cluster:
+        return cluster
+    filtered: list[dict[str, Any]] = []
+    for index, message in enumerate(cluster):
+        if message.get("role") != "assistant":
+            filtered.append(message)
+            continue
+        content = message.get("content", "")
+        text = _content_text(content)
+        if not _is_irrelevant_assistant_reply(text):
+            filtered.append(message)
+            continue
+        previous_role = cluster[index - 1].get("role") if index > 0 else None
+        next_role = cluster[index + 1].get("role") if index + 1 < len(cluster) else None
+        if previous_role == "user" and next_role in {None, "user"}:
+            continue
+        filtered.append(message)
+    return filtered
+
+
 def _tool_name_by_id(messages: list[dict[str, Any]]) -> dict[str, str]:
     mapping: dict[str, str] = {}
     for message in messages:
@@ -96,6 +230,47 @@ def _tool_name_by_id(messages: list[dict[str, Any]]) -> dict[str, str]:
                 continue
             mapping[str(part.get("id", ""))] = str(part.get("name", "tool"))
     return mapping
+
+
+def _tool_result_ids_in_message(message: dict[str, Any]) -> set[str]:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return set()
+    return {
+        str(part.get("tool_use_id", "")).strip()
+        for part in content
+        if isinstance(part, dict) and part.get("type") == "tool_result" and str(part.get("tool_use_id", "")).strip()
+    }
+
+
+def _tool_use_ids_in_message(message: dict[str, Any]) -> set[str]:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return set()
+    return {
+        str(part.get("id", "")).strip()
+        for part in content
+        if isinstance(part, dict) and part.get("type") == "tool_use" and str(part.get("id", "")).strip()
+    }
+
+
+def _expand_indices_for_tool_pairs(messages: list[dict[str, Any]], selected_indices: list[int]) -> list[int]:
+    if not messages or not selected_indices:
+        return selected_indices
+    expanded = set(selected_indices)
+    required_ids: set[str] = set()
+    for index in selected_indices:
+        if 0 <= index < len(messages):
+            required_ids.update(_tool_result_ids_in_message(messages[index]))
+    if not required_ids:
+        return sorted(expanded)
+    for index in range(len(messages)):
+        if index in expanded:
+            continue
+        tool_use_ids = _tool_use_ids_in_message(messages[index])
+        if tool_use_ids & required_ids:
+            expanded.add(index)
+    return sorted(expanded)
 
 
 def _collect_related_paths(
@@ -154,21 +329,33 @@ def build_initial_loop_messages(
     lookback: int = 24,
     keep: int = 12,
 ) -> list[dict[str, Any]]:
-    transcript = session_service.list_message_records(session_id, limit=lookback)
-    selected_indices = _select_transcript_indices(transcript, keep=keep)
-    return [deepcopy(transcript[index]) for index in selected_indices]
+    active = task_service.get_active_task(session_id)
+    transcript = session_service.list_message_records(session_id, limit=lookback, task_id=active.id if active else None)
+    cluster_start = _current_task_cluster_start(transcript)
+    cluster = _filter_irrelevant_assistant_messages(transcript[cluster_start:])
+    selected_indices = _select_transcript_indices(cluster, keep=keep)
+    selected_indices = _expand_indices_for_tool_pairs(cluster, selected_indices)
+    return [deepcopy(cluster[index]) for index in selected_indices]
 
 
 def _find_preserved_suffix_start(messages: list[dict[str, Any]]) -> int:
     if not messages:
         return 0
-    last = messages[-1]
-    content = last.get("content")
-    if last.get("role") == "user" and isinstance(content, list) and any(
-        isinstance(part, dict) and part.get("type") == "tool_result" for part in content
-    ):
-        return max(0, len(messages) - 2)
-    return max(0, len(messages) - 4)
+    start = max(0, len(messages) - 4)
+    while start > 0:
+        required_ids: set[str] = set()
+        for message in messages[start:]:
+            required_ids.update(_tool_result_ids_in_message(message))
+        if not required_ids:
+            return start
+        earliest_match: int | None = None
+        for index in range(start - 1, -1, -1):
+            if _tool_use_ids_in_message(messages[index]) & required_ids:
+                earliest_match = index
+        if earliest_match is None:
+            return start
+        start = earliest_match
+    return start
 
 
 def _workspace_facts(
@@ -446,8 +633,10 @@ def assemble_context(
     budget = derive_budget(max_tokens or settings.llm_max_tokens)
     latest_user_text = _latest_user_text(messages)
     related_paths = _collect_related_paths(messages, allowed_external_reads)
+    active = task_service.get_active_task(session_id)
     retrieval = memory_retriever.retrieve_context_memories(
         session_id,
+        task_id=active.id if active else None,
         query_text=latest_user_text,
         related_paths=related_paths,
     )

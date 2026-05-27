@@ -149,6 +149,36 @@ class Phase1DurableStateTests(TestCase):
         self.assertFalse(second_changed)
         self.assertEqual(second.status if second else None, "approved")
 
+    def test_reject_superseded_turn_approvals_only_keeps_latest_pending(self) -> None:
+        with patch.object(approval_service, "create_session", self._create_session):
+            older = approval_service.create_approval(
+                session_id="session-1",
+                turn_id=12,
+                approval_type="bash",
+                prompt="bash\npython3 -m pip install Pillow",
+                context={"turn_id": 12, "workspace": "/tmp/workspace"},
+            )
+            latest = approval_service.create_approval(
+                session_id="session-1",
+                turn_id=12,
+                approval_type="bash",
+                prompt="bash\n.venv/bin/python -m pip install Pillow",
+                context={"turn_id": 12, "workspace": "/tmp/workspace"},
+            )
+
+            changed = approval_service.reject_superseded_turn_approvals(
+                turn_id=12,
+                approval_type="bash",
+                keep_approval_id=latest.id,
+            )
+            older_row = approval_service.get_approval(older.id)
+            latest_row = approval_service.get_approval(latest.id)
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(older_row.status if older_row else None, "rejected")
+        self.assertEqual(older_row.feedback if older_row else None, "Superseded by a newer approval request.")
+        self.assertEqual(latest_row.status if latest_row else None, "pending")
+
     def test_ingestion_job_lifecycle_is_durable(self) -> None:
         with patch.object(ingestion_job_service, "create_session", self._create_session):
             job = ingestion_job_service.create_job("session-1", "asset-1")
@@ -445,7 +475,9 @@ class Phase1LeaseHeartbeatAsyncTests(IsolatedAsyncioTestCase):
         ), patch.object(runtime, "_write_checkpoint", return_value=34), patch(
             "app.runtime.manager.approval_service.create_approval",
             return_value=SimpleNamespace(id=56),
-        ), patch("app.runtime.manager.turn_service.update_turn_status"), patch(
+        ), patch(
+            "app.runtime.manager.approval_service.reject_superseded_turn_approvals"
+        ) as reject_superseded_mock, patch("app.runtime.manager.turn_service.update_turn_status"), patch(
             "app.runtime.manager.memory_service.remember_open_question"
         ), patch.object(runtime, "publish"):
             message = await runtime._queue_bash_approval(
@@ -461,9 +493,17 @@ class Phase1LeaseHeartbeatAsyncTests(IsolatedAsyncioTestCase):
                 agent_kind="lead",
                 emit_stream_events=False,
                 execution_mode="normal",
+                remaining_repair_attempts=1,
+                remaining_auto_verify_attempts=1,
+                preserved_completion_text="",
             )
 
         self.assertIn("Approval required before running `bash`", message)
+        reject_superseded_mock.assert_called_once_with(
+            turn_id=12,
+            approval_type="bash",
+            keep_approval_id=56,
+        )
 
     async def test_continue_agent_loop_writes_after_tools_checkpoint_with_write_flag(self) -> None:
         runtime = RuntimeManager()
@@ -496,6 +536,7 @@ class Phase1LeaseHeartbeatAsyncTests(IsolatedAsyncioTestCase):
             tool_use_id: str | None = None,
             tool_name: str | None = None,
             tool_input: dict[str, object] | None = None,
+            extra_context: dict[str, object] | None = None,
         ) -> int:
             checkpoint_calls.append((phase, write_enabled))
             return len(checkpoint_calls)
@@ -606,8 +647,14 @@ class Phase1LeaseHeartbeatAsyncTests(IsolatedAsyncioTestCase):
             "app.runtime.manager.approval_service.get_pending_runtime_context",
             return_value=("session-1", {"turn_id": 12, "workspace": "/tmp/workspace"}),
         ), patch(
+            "app.runtime.manager.approval_service.get_approval_turn_metadata",
+            return_value=("session-1", 12, 34, "bash"),
+        ), patch(
             "app.runtime.manager.approval_service.apply_approval_decision",
             return_value=(decision, True),
+        ), patch(
+            "app.runtime.manager.approval_service.approval_matches_latest_checkpoint",
+            return_value=True,
         ), patch("app.runtime.manager.turn_service.update_turn_status"), patch.object(
             runtime,
             "_enqueue_turn_resume_job",
@@ -624,6 +671,35 @@ class Phase1LeaseHeartbeatAsyncTests(IsolatedAsyncioTestCase):
             {"turn_id": 12, "workspace": "/tmp/workspace"},
             "waiting_approval",
         )
+
+    async def test_decide_approval_skips_resume_for_stale_checkpoint_approval(self) -> None:
+        runtime = RuntimeManager()
+        decision = SimpleNamespace(session_id="session-1", status="approved", approval_type="bash")
+
+        with patch("app.runtime.manager.lease_service.try_acquire", return_value=True), patch(
+            "app.runtime.manager.approval_service.get_pending_runtime_context",
+            return_value=("session-1", {"turn_id": 12, "workspace": "/tmp/workspace"}),
+        ), patch(
+            "app.runtime.manager.approval_service.get_approval_turn_metadata",
+            return_value=("session-1", 12, 22, "bash"),
+        ), patch(
+            "app.runtime.manager.approval_service.apply_approval_decision",
+            return_value=(decision, True),
+        ), patch(
+            "app.runtime.manager.approval_service.approval_matches_latest_checkpoint",
+            return_value=False,
+        ), patch("app.runtime.manager.turn_service.update_turn_status") as update_status_mock, patch.object(
+            runtime,
+            "_enqueue_turn_resume_job",
+            return_value=True,
+        ) as enqueue_mock, patch.object(runtime, "publish"), patch(
+            "app.runtime.manager.lease_service.release"
+        ):
+            result = await runtime.decide_approval(56, approve=True, feedback="approved")
+
+        self.assertIs(result, decision)
+        update_status_mock.assert_not_called()
+        enqueue_mock.assert_not_called()
 
     async def test_decide_approval_noops_when_already_resolved(self) -> None:
         runtime = RuntimeManager()

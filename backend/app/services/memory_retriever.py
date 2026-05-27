@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from app.db.session import create_session
 from app.models import SessionMemoryRecord, SessionRecord
+import app.services.task_service as task_service
 
 
 STATUS_PRIORITY = {
@@ -119,6 +120,7 @@ def _row_score(
 def rank_session_memories(
     session_id: str,
     *,
+    task_id: int | None = None,
     query_text: str = "",
     related_paths: Iterable[str] | None = None,
     include_resolved: bool = True,
@@ -129,7 +131,13 @@ def rank_session_memories(
     with create_session() as db:
         session_row = db.get(SessionRecord, session_id)
         branch_context_id = session_row.branch_context_id if session_row else None
+        resolved_task_id = task_id
+        if resolved_task_id is None:
+            active = task_service.get_active_task(session_id)
+            resolved_task_id = active.id if active else None
         stmt = select(SessionMemoryRecord).where(SessionMemoryRecord.session_id == session_id)
+        if resolved_task_id is not None:
+            stmt = stmt.where(SessionMemoryRecord.task_id == resolved_task_id)
         if branch_context_id is not None:
             stmt = stmt.where(SessionMemoryRecord.branch_context_id == branch_context_id)
         stmt = stmt.order_by(SessionMemoryRecord.updated_at.desc(), SessionMemoryRecord.id.desc()).limit(limit)
@@ -179,12 +187,14 @@ def _kind_limited(rows: list[RankedMemory]) -> list[RankedMemory]:
 def retrieve_context_memories(
     session_id: str,
     *,
+    task_id: int | None = None,
     query_text: str = "",
     related_paths: Iterable[str] | None = None,
 ) -> RetrievalResult:
     ranked = _kind_limited(
         rank_session_memories(
             session_id,
+            task_id=task_id,
             query_text=query_text,
             related_paths=related_paths,
         )
@@ -234,12 +244,14 @@ def retrieve_context_memories(
 def search_memories(
     session_id: str,
     *,
+    task_id: int | None = None,
     query_text: str,
     kind: str | None = None,
     limit: int = 5,
 ) -> list[RankedMemory]:
     ranked = rank_session_memories(
         session_id,
+        task_id=task_id,
         query_text=query_text,
         related_paths=[],
     )

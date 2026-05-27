@@ -707,6 +707,7 @@ export function App() {
   const [teammateMessages, setTeammateMessages] = useState<TeammateMessageSummary[]>([]);
   const [teammateDraft, setTeammateDraft] = useState("Review the latest runtime activity.");
   const [approvals, setApprovals] = useState<ApprovalSummary[]>([]);
+  const [approvalDecisionPendingIds, setApprovalDecisionPendingIds] = useState<number[]>([]);
   const [executions, setExecutions] = useState<ToolExecutionSummary[]>([]);
   const [selectedExecutionId, setSelectedExecutionId] = useState<number | null>(null);
   const [skills, setSkills] = useState<SkillSummary[]>([]);
@@ -823,6 +824,13 @@ export function App() {
       fetchSessionAssets(sessionId),
     ]);
 
+    setSessions((current) =>
+      sortSessionsByActivity(
+        current.map((session) =>
+          session.session_id === sessionId ? { ...session, ...nextSessionState.session, isDraft: session.isDraft } : session,
+        ),
+      ),
+    );
     setSubagents(nextSubagents);
     setApprovals(nextApprovals);
     setExecutions(nextExecutions);
@@ -1016,6 +1024,17 @@ export function App() {
           if (event.type === "turn.cancelled") {
             setStreamingBySession((current) => ({ ...current, [event.session_id]: null }));
           }
+          if (
+            event.type === "tool.execution"
+            || event.type === "approval.requested"
+            || event.type === "approval.resolved"
+            || event.type === "turn.waiting_approval"
+            || event.type === "turn.completed"
+            || event.type === "turn.failed"
+            || event.type === "turn.interrupted"
+          ) {
+            setStreamingBySession((current) => ({ ...current, [event.session_id]: null }));
+          }
           if (event.type === "session.renamed") {
             setSessions((current) => touchSession(current, event.session_id, event.created_at, event.content));
             return;
@@ -1133,7 +1152,7 @@ export function App() {
   }
 
   async function onOpenBranchPicker() {
-    if (!activeSessionId || !activeSession || !activeSession.git_enabled) return;
+    if (!activeSessionId || !canManageBranches) return;
     try {
       const branches = await fetchSessionBranches(activeSessionId);
       setBranchPicker({
@@ -1716,14 +1735,32 @@ export function App() {
   }
 
   async function onDecision(approvalId: number, approve: boolean) {
-    await decideApproval(approvalId, approve);
-    if (!activeSessionId) return;
-    const timeline = await fetchTimeline(activeSessionId);
-    setEventsBySession((current) => ({
-      ...current,
-      [activeSessionId]: timeline,
-    }));
-    await refreshSessionState(activeSessionId);
+    const sessionId = activeSessionId;
+    setApprovalDecisionPendingIds((current) => [...current, approvalId]);
+    setApprovals((current) =>
+      current.map((approval) =>
+        approval.id === approvalId
+          ? { ...approval, status: approve ? "approved" : "rejected" }
+          : approval,
+      ),
+    );
+    try {
+      await decideApproval(approvalId, approve);
+      if (!sessionId) return;
+      const timeline = await fetchTimeline(sessionId);
+      setEventsBySession((current) => ({
+        ...current,
+        [sessionId]: timeline,
+      }));
+      await refreshSessionState(sessionId);
+    } catch (error) {
+      if (sessionId) {
+        await refreshSessionState(sessionId);
+      }
+      console.error("Failed to resolve approval", error);
+    } finally {
+      setApprovalDecisionPendingIds((current) => current.filter((id) => id !== approvalId));
+    }
   }
 
   function approvalActionLabels(approvalType: string) {
@@ -1789,7 +1826,19 @@ export function App() {
   const selectedComposerAssets = sessionAssets.filter((asset) => selectedAssetIds.includes(asset.id));
   const events = eventsBySession[activeSessionId] ?? [];
   const streamingAssistant = streamingBySession[activeSessionId] ?? null;
-  const isActiveTurnRunning = Boolean(activeSessionId && streamingAssistant);
+  const activeSession = sessions.find((session) => session.session_id === activeSessionId) ?? null;
+  const activeSessionState = activeSessionId ? sessionStateBySession[activeSessionId] ?? null : null;
+  const activeSessionSummary = activeSessionState?.session ?? activeSession;
+  const hasInFlightTurn = Boolean(
+    activeSessionId
+      && (
+        activeSessionState?.active_turn
+        || activeSessionState?.latest_waiting_approval_turn
+        || activeSessionSummary?.status === "running"
+        || activeSessionSummary?.status === "waiting_approval"
+      ),
+  );
+  const isActiveTurnRunning = Boolean(activeSessionId && (streamingAssistant || hasInFlightTurn));
 
   useEffect(() => {
     if (!activeSessionId || activeSessionId.startsWith(DRAFT_SESSION_PREFIX)) return;
@@ -1854,8 +1903,6 @@ export function App() {
     anchor.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
-  const activeSession = sessions.find((session) => session.session_id === activeSessionId) ?? null;
-  const activeSessionState = activeSessionId ? sessionStateBySession[activeSessionId] ?? null : null;
   const sessionMemory = activeSessionId ? memoryBySession[activeSessionId] ?? [] : [];
   const turns = activeSessionId ? turnsBySession[activeSessionId] ?? [] : [];
   const filteredSessions = sessions.filter((session) =>
@@ -1882,21 +1929,21 @@ export function App() {
       event,
       card: buildTimelineCard(event),
     }));
-  const liveAssistantCard = streamingAssistant
+  const liveAssistantCard = isActiveTurnRunning
     ? {
         event: {
           session_id: activeSessionId,
           type: "message.assistant",
-          content: streamingAssistant.content,
-          created_at: streamingAssistant.created_at,
+          content: streamingAssistant?.content ?? "",
+          created_at: streamingAssistant?.created_at ?? new Date().toISOString(),
         } as TimelineEvent,
         card: {
           tone: "assistant" as const,
           kind: "message" as const,
           layout: "card" as const,
-          content: streamingAssistant.content,
+          content: streamingAssistant?.content ?? "",
           working: true,
-          parts: streamingAssistant.content.trim()
+          parts: streamingAssistant?.content.trim()
             ? [{ type: "text" as const, text: streamingAssistant.content }]
             : [],
         },
@@ -1916,8 +1963,9 @@ export function App() {
         }]
       : [],
   );
-  const activeSessionStamp = activeSession ? formatSessionStamp(activeSession.updated_at ?? activeSession.created_at) : null;
-  const activeSessionGitMeta = formatGitSessionMeta(activeSession ?? null);
+  const activeSessionStamp = activeSessionSummary ? formatSessionStamp(activeSessionSummary.updated_at ?? activeSessionSummary.created_at) : null;
+  const canManageBranches = Boolean(activeSessionSummary?.workspace_mode === "bound" && activeSessionSummary.git_enabled);
+  const activeSessionGitMeta = canManageBranches ? formatGitSessionMeta(activeSessionSummary ?? null) : null;
   const filteredBranches = (branchPicker.branches?.branches ?? []).filter((branch) =>
     branch.toLowerCase().includes(branchPicker.search.trim().toLowerCase()),
   );
@@ -2019,8 +2067,9 @@ export function App() {
             <span className="section-count">{pendingApprovals.length} pending</span>
           </div>
           <div className="workbench-list">
-            {approvals.map((approval) => {
+            {pendingApprovals.map((approval) => {
               const labels = approvalActionLabels(approval.approval_type);
+              const isDeciding = approvalDecisionPendingIds.includes(approval.id);
               return (
                 <article key={approval.id} className="workbench-card">
                   <div className="workbench-card-header">
@@ -2028,20 +2077,18 @@ export function App() {
                     <span className="mini-pill">{approval.status}</span>
                   </div>
                   <p>{approval.prompt}</p>
-                  {approval.status === "pending" ? (
-                    <div className="inline-actions">
-                      <button type="button" className="primary-button" onClick={() => onDecision(approval.id, true)}>
-                        {labels.approve}
-                      </button>
-                      <button type="button" className="secondary-button" onClick={() => onDecision(approval.id, false)}>
-                        {labels.reject}
-                      </button>
-                    </div>
-                  ) : null}
+                  <div className="inline-actions">
+                    <button type="button" className="primary-button" disabled={isDeciding} onClick={() => onDecision(approval.id, true)}>
+                      {labels.approve}
+                    </button>
+                    <button type="button" className="secondary-button" disabled={isDeciding} onClick={() => onDecision(approval.id, false)}>
+                      {labels.reject}
+                    </button>
+                  </div>
                 </article>
               );
             })}
-            {!approvals.length ? <p className="empty-inline">No approvals in this session.</p> : null}
+            {!pendingApprovals.length ? <p className="empty-inline">No pending approvals in this session.</p> : null}
           </div>
         </section>
       );
@@ -2366,10 +2413,10 @@ export function App() {
         <section className="workspace-panel">
         <header className="workspace-header">
           <div className="workspace-title">
-            <h2 className="session-heading">{activeSession?.title ?? "Jarvis"}</h2>
+            <h2 className="session-heading">{activeSessionSummary?.title ?? "Jarvis"}</h2>
             <p className="workspace-subtitle">
-              {activeSession
-                ? `${activeSession.workspace_label || "Workspace pending"}${activeSessionGitMeta ? ` · ${activeSessionGitMeta}` : ""} · ${activeSession.status}${activeSessionStamp ? ` · Updated ${activeSessionStamp}` : ""}`
+              {activeSessionSummary
+                ? `${activeSessionSummary.workspace_label || "Workspace pending"}${activeSessionGitMeta ? ` · ${activeSessionGitMeta}` : ""} · ${activeSessionSummary.status}${activeSessionStamp ? ` · Updated ${activeSessionStamp}` : ""}`
                 : "Choose a session or create a new one to begin."}
             </p>
           </div>
@@ -2553,7 +2600,7 @@ export function App() {
           )}
         </section>
 
-        {activeSession?.status === "interrupted" ? (
+        {activeSessionSummary?.status === "interrupted" ? (
           <div className="inline-approval-stack">
             <article className="inline-approval-bar">
               <div className="approval-copy">
@@ -2582,6 +2629,7 @@ export function App() {
           <div className="inline-approval-stack">
             {pendingApprovals.map((approval) => {
               const labels = approvalActionLabels(approval.approval_type);
+              const isDeciding = approvalDecisionPendingIds.includes(approval.id);
               return (
                 <article key={approval.id} className="inline-approval-bar">
                   <div className="approval-copy">
@@ -2592,10 +2640,10 @@ export function App() {
                     <p>{approval.prompt}</p>
                   </div>
                   <div className="inline-actions">
-                    <button type="button" className="primary-button" onClick={() => onDecision(approval.id, true)}>
+                    <button type="button" className="primary-button" disabled={isDeciding} onClick={() => onDecision(approval.id, true)}>
                       {labels.approve}
                     </button>
-                    <button type="button" className="secondary-button" onClick={() => onDecision(approval.id, false)}>
+                    <button type="button" className="secondary-button" disabled={isDeciding} onClick={() => onDecision(approval.id, false)}>
                       {labels.reject}
                     </button>
                   </div>
@@ -2692,11 +2740,11 @@ export function App() {
           </div>
           {activeSessionId ? (
             <div className="composer-utility-row">
-              {activeSession?.git_enabled ? (
+              {canManageBranches ? (
             <div className="composer-branch-shell" ref={branchPickerRef}>
               <button type="button" className="composer-branch-trigger" onClick={onOpenBranchPicker}>
                 <span className="branch-trigger-icon">⎇</span>
-                <span>{branchDisplayName(activeSession)}</span>
+                <span>{branchDisplayName(activeSessionSummary!)}</span>
                 <span className="branch-trigger-caret">⌄</span>
               </button>
               {branchPicker.open ? (
@@ -2715,9 +2763,9 @@ export function App() {
                         <button
                           key={branch}
                           type="button"
-                          className={branch === activeSession.lead_branch ? "branch-picker-item active-branch-item" : "branch-picker-item"}
+                          className={branch === activeSessionSummary!.lead_branch ? "branch-picker-item active-branch-item" : "branch-picker-item"}
                           onClick={() => {
-                            if (branch === activeSession.lead_branch) {
+                            if (branch === activeSessionSummary!.lead_branch) {
                               setBranchPicker((current) => ({ ...current, open: false, error: "", createMode: false }));
                               return;
                             }
@@ -2728,7 +2776,7 @@ export function App() {
                             <span className="branch-trigger-icon">⎇</span>
                             <span>{branch}</span>
                           </span>
-                          {branch === activeSession.lead_branch ? <span className="branch-item-check">✓</span> : null}
+                          {branch === activeSessionSummary!.lead_branch ? <span className="branch-item-check">✓</span> : null}
                         </button>
                       ))}
                       {!filteredBranches.length ? <p className="empty-inline">No matching branches.</p> : null}

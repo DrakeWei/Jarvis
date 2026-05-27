@@ -22,6 +22,11 @@ BenchmarkCheckKind = Literal[
     "final_text_not_contains_any",
     "file_contains_all",
     "file_not_contains_any",
+    "latest_reflection_verdict_in",
+    "latest_reflection_reason_codes_include_any",
+    "tool_status_is",
+    "tool_output_contains_all",
+    "tool_output_not_contains_any",
     "max_total_approval_count",
     "max_pending_approval_count",
     "tool_used",
@@ -72,6 +77,7 @@ class BenchmarkCheckSpec(BaseModel):
     tool_names: list[str] = Field(default_factory=list)
     statuses: list[str] = Field(default_factory=list)
     max_count: int | None = None
+    occurrence: int | None = None
 
     @model_validator(mode="after")
     def validate_check(self) -> "BenchmarkCheckSpec":
@@ -81,6 +87,8 @@ class BenchmarkCheckSpec(BaseModel):
         self.tool_name = self.tool_name.strip() if self.tool_name else None
         self.tool_names = [item.strip() for item in self.tool_names if item and item.strip()]
         self.statuses = [item.strip() for item in self.statuses if item and item.strip()]
+        if self.occurrence is not None and self.occurrence < 1:
+            raise ValueError("occurrence must be a positive integer when provided.")
         if self.kind == "final_text_contains_all" and not self.contains:
             raise ValueError("final_text_contains_all requires at least one expected substring.")
         if self.kind == "final_text_not_contains_any" and not self.excludes:
@@ -91,6 +99,19 @@ class BenchmarkCheckSpec(BaseModel):
         if self.kind == "file_not_contains_any":
             if not self.path or not self.excludes:
                 raise ValueError("file_not_contains_any requires path and at least one forbidden substring.")
+        if self.kind == "latest_reflection_verdict_in" and not self.statuses:
+            raise ValueError("latest_reflection_verdict_in requires at least one status.")
+        if self.kind == "latest_reflection_reason_codes_include_any" and not self.contains:
+            raise ValueError("latest_reflection_reason_codes_include_any requires at least one reason code.")
+        if self.kind == "tool_status_is":
+            if not self.tool_name or not self.statuses:
+                raise ValueError("tool_status_is requires tool_name and at least one status.")
+        if self.kind == "tool_output_contains_all":
+            if not self.tool_name or not self.contains:
+                raise ValueError("tool_output_contains_all requires tool_name and at least one expected substring.")
+        if self.kind == "tool_output_not_contains_any":
+            if not self.tool_name or not self.excludes:
+                raise ValueError("tool_output_not_contains_any requires tool_name and at least one forbidden substring.")
         if self.kind in {"tool_used", "tool_not_used"} and not self.tool_name:
             raise ValueError(f"{self.kind} requires tool_name.")
         if self.kind == "tool_used_any_of" and not self.tool_names:
@@ -114,6 +135,7 @@ class BenchmarkTaskSpec(BaseModel):
     approval_policy: ApprovalPolicySpec = Field(default_factory=ApprovalPolicySpec)
     time_budget_seconds: int = Field(default=180, ge=1, le=3600)
     initialize_git: bool = False
+    trials_per_task: int = Field(default=1, ge=1, le=20)
     tags: list[str] = Field(default_factory=list)
     expected_checks: list[BenchmarkCheckSpec] = Field(default_factory=list)
     notes: str = ""
@@ -151,6 +173,13 @@ class BenchmarkRunEvidence(BaseModel):
     terminal_turn_status: str | None = None
     latest_turn_error_summary: str | None = None
     latest_turn_resume_hint: str | None = None
+    latest_reflection_verdict: str | None = None
+    latest_reflection_reason_codes: list[str] = Field(default_factory=list)
+    latest_reflection_summary: str | None = None
+    latest_reflection_next_action_prompt: str | None = None
+    reviewer_retry_count: int = 0
+    reviewer_stalled: bool = False
+    reviewer_uncertainty_required: bool = False
     final_assistant_message: str = ""
     pending_approval_count: int = 0
     initial_workspace_status_text: str | None = None
@@ -164,7 +193,8 @@ class BenchmarkRunEvidence(BaseModel):
     turns: list[TurnSummary] = Field(default_factory=list)
 
 
-class BenchmarkTaskResult(BaseModel):
+class BenchmarkTrialResult(BaseModel):
+    trial_index: int = Field(ge=1)
     task_id: str
     task_name: str
     label: BenchmarkLabel
@@ -176,12 +206,32 @@ class BenchmarkTaskResult(BaseModel):
     evidence: BenchmarkRunEvidence
 
 
+class BenchmarkTaskResult(BaseModel):
+    task_id: str
+    task_name: str
+    label: BenchmarkLabel
+    primary_failure_tag: BenchmarkFailureTag | None = None
+    timed_out: bool = False
+    duration_seconds: float = 0.0
+    trial_count: int = 0
+    pass_count: int = 0
+    partial_count: int = 0
+    fail_count: int = 0
+    invalid_run_count: int = 0
+    first_pass_label: BenchmarkLabel | None = None
+    trials: list[BenchmarkTrialResult] = Field(default_factory=list)
+
+
 class BenchmarkSuiteReport(BaseModel):
     started_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     finished_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     duration_seconds: float = 0.0
     total_tasks: int = 0
+    total_trials: int = 0
+    first_pass_success_count: int = 0
+    first_pass_success_rate: float = 0.0
     counts_by_label: dict[BenchmarkLabel, int] = Field(default_factory=dict)
     counts_by_failure_tag: dict[str, int] = Field(default_factory=dict)
+    counts_by_reflection_verdict: dict[str, int] = Field(default_factory=dict)
     counts_by_tag_and_label: dict[str, dict[str, int]] = Field(default_factory=dict)
     results: list[BenchmarkTaskResult] = Field(default_factory=list)

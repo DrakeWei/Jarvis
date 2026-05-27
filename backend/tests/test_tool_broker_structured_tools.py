@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 import subprocess
+import sys
 
 from app.mcp.registry import local_tool_definitions
 from app.tools.broker import ToolBroker
@@ -92,11 +93,37 @@ class ToolBrokerStructuredToolTests(TestCase):
             root = Path(tmpdir)
             broker = ToolBroker(root)
 
-            status, output = broker.run("run_test", {"argv": ["python3", "-c", "print('ok')"]})
+            result = broker.run("run_test", {"argv": ["python3", "-c", "print('ok')"]})
 
-        self.assertEqual(status, "completed")
-        self.assertIn("exit_code=0", output)
-        self.assertIn("ok", output)
+        self.assertEqual(result.status, "completed")
+        self.assertIn("exit_code=0", result.output)
+        self.assertIn("ok", result.output)
+        self.assertEqual(result.payload["classification"], "verification")
+
+    def test_run_test_blocks_package_install_commands(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            broker = ToolBroker(root)
+
+            result = broker.run("run_test", {"argv": ["python3", "-m", "pip", "install", "pypdf"]})
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.payload["classification"], "blocked_mutation")
+        self.assertIn("Use bash with approval", result.output)
+
+    def test_run_test_prefers_workspace_venv_python(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            venv_bin = root / ".venv" / "bin"
+            venv_bin.mkdir(parents=True)
+            (venv_bin / "python").symlink_to(Path(sys.executable))
+            broker = ToolBroker(root)
+
+            result = broker.run("run_test", {"argv": ["python3", "-c", "import sys; print(sys.executable)"]})
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.payload["target_python_executable"], str((venv_bin / "python").resolve()))
+        self.assertTrue(result.payload["used_workspace_venv"])
 
     def test_run_test_normalizes_python_to_python3_when_python_is_missing(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -108,6 +135,46 @@ class ToolBrokerStructuredToolTests(TestCase):
                 normalized = broker._normalize_test_command(["python", "-c", "print('ok')"])
 
         self.assertEqual(normalized[0], "python3")
+
+    def test_bash_prefers_workspace_venv_python_for_simple_python_commands(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            venv_bin = root / ".venv" / "bin"
+            venv_bin.mkdir(parents=True)
+            (venv_bin / "python").symlink_to(Path(sys.executable))
+            broker = ToolBroker(root)
+
+            with patch("app.tools.broker.subprocess.run") as run_mock:
+                run_mock.return_value = subprocess.CompletedProcess(
+                    args=[(venv_bin / "python").as_posix(), "-c", "print('ok')"],
+                    returncode=0,
+                    stdout="ok\n",
+                    stderr="",
+                )
+                status, output = broker.run("bash", {"command": "python3 -c \"print('ok')\""})
+
+        self.assertEqual(status, "completed")
+        called_command = run_mock.call_args.args[0]
+        self.assertEqual(Path(called_command[0]).resolve(), (venv_bin / "python").resolve())
+        self.assertIn("exit_code=0", output)
+
+    def test_bash_extends_timeout_for_package_installs(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            broker = ToolBroker(root)
+
+            with patch("app.tools.broker.subprocess.run") as run_mock:
+                run_mock.return_value = subprocess.CompletedProcess(
+                    args=["python3", "-m", "pip", "install", "Pillow"],
+                    returncode=0,
+                    stdout="installed\n",
+                    stderr="",
+                )
+                status, output = broker.run("bash", {"command": "python3 -m pip install Pillow"})
+
+        self.assertEqual(status, "completed")
+        self.assertEqual(run_mock.call_args.kwargs["timeout"], 300)
+        self.assertIn("exit_code=0", output)
 
     def test_apply_patch_updates_file_inside_workspace(self) -> None:
         with TemporaryDirectory() as tmpdir:

@@ -5,10 +5,11 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import patch
 
+from app.mcp import ToolDefinition
 import app.services.context_assembler as context_assembler
 import app.services.tavily_search_service as tavily_search_service
-from app.runtime.manager import RuntimeManager, SessionTurn
-from app.providers import TextBlock
+from app.runtime.manager import ReflectionDecision, RuntimeManager, SessionTurn
+from app.providers import TextBlock, ToolUseBlock
 import app.services.speech_generation_service as speech_generation_service
 import app.services.video_generation_service as video_generation_service
 
@@ -308,6 +309,218 @@ class AssetRuntimeToolTests(IsolatedAsyncioTestCase):
         self.assertIn("Unable to run tests", reply.text)
         self.assertEqual(stream_mock.await_count, 2)
 
+    async def test_continue_agent_loop_persists_reflection_and_checkpoints(self) -> None:
+        runtime = RuntimeManager()
+        checkpoint_phases: list[str] = []
+        checkpoint_contexts: dict[str, dict[str, object] | None] = {}
+
+        def fake_write_checkpoint(**kwargs):
+            checkpoint_phases.append(kwargs["phase"])
+            checkpoint_contexts[kwargs["phase"]] = kwargs.get("extra_context")
+            return 41 if kwargs["phase"] == "after_reflection" else None
+
+        with patch("app.runtime.manager.create_client", return_value=SimpleNamespace()), patch.object(
+            runtime,
+            "_autonomous_tool_definitions",
+            return_value=[],
+        ), patch.object(
+            runtime,
+            "_stream_agent_response",
+            return_value=[TextBlock(text="All done.")],
+        ), patch.object(
+            context_assembler,
+            "assemble_context",
+            return_value=context_assembler.AssembledContext(
+                system_prompt="You are Jarvis.",
+                messages=[],
+                debug_meta={},
+            ),
+        ), patch.object(
+            runtime,
+            "_write_checkpoint",
+            side_effect=fake_write_checkpoint,
+        ), patch.object(
+            runtime,
+            "_run_reflection",
+            return_value=ReflectionDecision(
+                verdict="done",
+                reason_codes=[],
+                next_action_prompt="",
+                summary="Ready to finalize.",
+            ),
+        ), patch(
+            "app.runtime.manager.reflection_service.create_reflection"
+        ) as reflection_create:
+            reply = await runtime._continue_agent_loop(
+                "session-1",
+                __import__("pathlib").Path("/tmp"),
+                [{"role": "user", "content": "Summarize the repository"}],
+                __import__("asyncio").Event(),
+                turn_id=7,
+            )
+
+        self.assertEqual(reply.text, "All done.")
+        self.assertIn("before_reflection", checkpoint_phases)
+        self.assertIn("after_reflection", checkpoint_phases)
+        self.assertIn("reviewer_packet", checkpoint_contexts["after_reflection"] or {})
+        reflection_create.assert_called_once()
+
+    async def test_continue_agent_loop_preserves_completion_summary_and_appends_verification_result(self) -> None:
+        runtime = RuntimeManager()
+
+        with patch("app.runtime.manager.create_client", return_value=SimpleNamespace()), patch.object(
+            runtime,
+            "_autonomous_tool_definitions",
+            return_value=[ToolDefinition(name="run_test", description="run", input_schema={"type": "object"}, source="local")],
+        ), patch.object(
+            runtime,
+            "_stream_agent_response",
+            side_effect=[
+                [TextBlock(text="已实现 URL 批量检测脚本，位于 `url_batch_checker.py`。")],
+                [ToolUseBlock(id="call-1", name="run_test", input={"argv": ["python3", "url_batch_checker.py", "--help"]})],
+                [TextBlock(text="已验证：`python3 url_batch_checker.py --help` 运行成功，退出码 0，脚本可正常启动并显示参数说明。")],
+            ],
+        ), patch.object(
+            context_assembler,
+            "assemble_context",
+            return_value=context_assembler.AssembledContext(
+                system_prompt="You are Jarvis.",
+                messages=[],
+                debug_meta={},
+            ),
+        ), patch.object(
+            runtime,
+            "_execute_tool_definition",
+            return_value=SimpleNamespace(
+                status="completed",
+                output="exit_code=0\nusage: url_batch_checker.py --help",
+                remote_request_id=None,
+                payload={"classification": "verification", "verification_kind": "script_run", "evidence_strength": "sufficient", "wrong_environment": False},
+            ),
+        ), patch.object(
+            runtime,
+            "_write_checkpoint",
+            return_value=None,
+        ), patch("app.runtime.manager.tool_service.create_tool_execution"), patch.object(
+            runtime,
+            "publish",
+        ), patch.object(
+            runtime,
+            "_run_reflection",
+            side_effect=[
+                ReflectionDecision(
+                    verdict="continue_with_verification",
+                    reason_codes=["verification_gap"],
+                    next_action_prompt="Run verification before finalizing.",
+                    summary="Need verification.",
+                ),
+                ReflectionDecision(
+                    verdict="done",
+                    reason_codes=[],
+                    next_action_prompt="",
+                    summary="Ready to finalize.",
+                ),
+            ],
+        ):
+            reply = await runtime._continue_agent_loop(
+                "session-1",
+                __import__("pathlib").Path("/tmp"),
+                [{"role": "user", "content": "实现一个 URL 批量检测脚本"}],
+                __import__("asyncio").Event(),
+            )
+
+        self.assertIn("已实现 URL 批量检测脚本", reply.text)
+        self.assertIn("已验证：`python3 url_batch_checker.py --help` 运行成功", reply.text)
+
+    def test_reflection_followup_prompt_requires_execution_and_preserves_summary(self) -> None:
+        runtime = RuntimeManager()
+        prompt = runtime._reflection_followup_prompt(
+            ReflectionDecision(
+                verdict="continue_with_verification",
+                reason_codes=["verification_gap"],
+                next_action_prompt="Use run_test for one stronger verification step.",
+                summary="Need verification.",
+            ),
+            "已实现 URL 批量检测脚本，位于 `url_batch_checker.py`。",
+        )
+
+        self.assertIn("Do not reply with review comments", prompt)
+        self.assertIn("must either call the necessary tool", prompt)
+        self.assertIn("Keep this existing user-facing result summary", prompt)
+        self.assertIn("已实现 URL 批量检测脚本", prompt)
+
+    async def test_continue_agent_loop_injects_progress_followup_after_repeated_read_only_batches(self) -> None:
+        runtime = RuntimeManager()
+        captured_messages: list[list[dict[str, object]]] = []
+
+        def fake_assemble_context(**kwargs):
+            messages = kwargs["messages"]
+            captured_messages.append(messages.copy())
+            return context_assembler.AssembledContext(
+                system_prompt="You are Jarvis.",
+                messages=messages,
+                debug_meta={},
+            )
+
+        tool_batches = [
+            [ToolUseBlock(id="call-1", name="list_files", input={"path": "."})],
+            [ToolUseBlock(id="call-2", name="search_text", input={"query": "crawler"})],
+            [ToolUseBlock(id="call-3", name="read_file", input={"path": "README.md"})],
+            [ToolUseBlock(id="call-4", name="show_status", input={})],
+            [TextBlock(text="Blocked because the destination directory is read-only.")],
+            [TextBlock(text="Blocked because the destination directory is read-only.")],
+        ]
+
+        with patch("app.runtime.manager.create_client", return_value=SimpleNamespace()), patch.object(
+            runtime,
+            "_autonomous_tool_definitions",
+            return_value=[
+                ToolDefinition(name="list_files", description="list", input_schema={"type": "object"}, source="local"),
+                ToolDefinition(name="search_text", description="search", input_schema={"type": "object"}, source="local"),
+                ToolDefinition(name="read_file", description="read", input_schema={"type": "object"}, source="local"),
+                ToolDefinition(name="show_status", description="status", input_schema={"type": "object"}, source="local"),
+            ],
+        ), patch.object(
+            runtime,
+            "_stream_agent_response",
+            side_effect=tool_batches,
+        ) as stream_mock, patch.object(
+            context_assembler,
+            "assemble_context",
+            side_effect=fake_assemble_context,
+        ), patch.object(
+            runtime,
+            "_execute_tool_definition",
+            return_value=SimpleNamespace(status="completed", output="ok", remote_request_id=None, payload=None),
+        ), patch.object(
+            runtime,
+            "_write_checkpoint",
+            return_value=None,
+        ), patch("app.runtime.manager.tool_service.create_tool_execution"), patch.object(
+            runtime,
+            "publish",
+        ):
+            reply = await runtime._continue_agent_loop(
+                "session-1",
+                __import__("pathlib").Path("/tmp"),
+                [{"role": "user", "content": "在当前目录下实现一个简易的Python爬虫脚本"}],
+                __import__("asyncio").Event(),
+            )
+
+        self.assertIn("Blocked because", reply.text)
+        self.assertGreaterEqual(stream_mock.await_count, 5)
+        self.assertTrue(
+            any(
+                any(
+                    message.get("role") == "user"
+                    and isinstance(message.get("content"), str)
+                    and "Stop exploring and make concrete progress now." in message["content"]
+                    for message in message_batch
+                )
+                for message_batch in captured_messages
+            )
+        )
+
     async def test_execute_autonomous_tool_web_search_serializes_service_results(self) -> None:
         runtime = RuntimeManager()
         response = tavily_search_service.TavilySearchResponse(
@@ -353,21 +566,116 @@ class AssetRuntimeToolTests(IsolatedAsyncioTestCase):
         self.assertEqual(status, "error")
         self.assertIn("not configured", output)
 
-    def test_completion_gate_requires_web_search_for_time_sensitive_prompt(self) -> None:
+    def test_run_reflection_requires_web_search_for_time_sensitive_prompt(self) -> None:
         runtime = RuntimeManager()
-        followup = runtime._completion_gate_followup(
+        decision = runtime._run_reflection(
             messages=[{"role": "user", "content": "What is today's Cavaliers vs Knicks final score?"}],
             final_text="The Cavaliers beat the Knicks 101-99.",
-            require_change_followup_used=False,
-            require_verification_followup_used=False,
-            require_web_search_followup_used=False,
-            require_weak_evidence_followup_used=False,
             agent_kind="lead",
             execution_mode="normal",
         )
-        self.assertIn("web_search", followup[0])
+        self.assertEqual(decision.verdict, "continue_with_verification")
+        self.assertIn("missing_fresh_evidence", decision.reason_codes)
+        self.assertIn("web_search", decision.next_action_prompt)
 
-    def test_completion_gate_requires_uncertainty_for_weak_web_search_evidence(self) -> None:
+    def test_task_requires_web_search_ignores_current_directory_code_change_prompt(self) -> None:
+        runtime = RuntimeManager()
+        self.assertFalse(
+            runtime._task_requires_web_search(
+                [{"role": "user", "content": "在当前目录下实现一个简易的Python爬虫脚本"}]
+            )
+        )
+
+    def test_latest_request_text_skips_runtime_web_search_followup(self) -> None:
+        runtime = RuntimeManager()
+        messages = [
+            {"role": "user", "content": "在这个目录下用Python实现一个简易的MNIST手写识别体。"},
+            {
+                "role": "user",
+                "content": (
+                    "The user asked for a time-sensitive external fact. "
+                    "Call web_search before finalizing your answer. "
+                    "If web_search fails or returns limited evidence, you may give a best guess only if you state that the answer is uncertain."
+                ),
+            },
+        ]
+        self.assertEqual(runtime._latest_request_text(messages), "在这个目录下用Python实现一个简易的MNIST手写识别体。")
+
+    def test_original_goal_text_ignores_runtime_verification_followup(self) -> None:
+        runtime = RuntimeManager()
+        messages = [
+            {"role": "user", "content": "Fix the bug in foo.py"},
+            {"role": "assistant", "content": "I changed the file."},
+            {
+                "role": "user",
+                "content": (
+                    "Run one stronger verification step that exercises the changed code path, "
+                    "not just syntax validation, and report the concrete outcome."
+                ),
+            },
+            {"role": "user", "content": "继续"},
+        ]
+        self.assertEqual(runtime._original_goal_text(messages), "Fix the bug in foo.py")
+
+    def test_build_verification_review_packet_marks_read_only_analysis_as_soft(self) -> None:
+        runtime = RuntimeManager()
+        messages = [
+            {"role": "user", "content": "总结一下这个仓库结构"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "call-1", "name": "list_files", "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1", "tool_name": "list_files", "status": "completed", "content": "README.md\nbackend/app/runtime/manager.py"}]},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "call-2", "name": "read_file", "input": {"path": "README.md"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-2", "tool_name": "read_file", "status": "completed", "content": "# Jarvis"}]},
+        ]
+
+        packet = runtime._build_verification_review_packet(
+            messages=messages,
+            final_text="仓库分成前后端和运行时两部分。",
+            remaining_auto_verify_attempts=1,
+        )
+
+        self.assertEqual(packet.task_profile.verify_level, "soft")
+        self.assertEqual(packet.task_profile.completion_mode, "evidence_check")
+        self.assertIn("read_only_analysis", packet.task_profile.task_kinds)
+
+    def test_run_reflection_rejects_task_misaligned_generic_final_answer(self) -> None:
+        runtime = RuntimeManager()
+        messages = [
+            {"role": "user", "content": "在这个目录下用Python实现一个简易的MNIST手写识别体。"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "call-1", "name": "write_file", "input": {"path": "simple_mnist.py"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1", "tool_name": "write_file", "status": "completed", "content": "Wrote 100 bytes to /tmp/simple_mnist.py"}]},
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "call-2", "name": "run_test", "input": {"argv": ["python3", "simple_mnist.py", "--help"]}}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call-2",
+                        "tool_name": "run_test",
+                        "status": "completed",
+                        "content": "exit_code=0",
+                        "payload": {
+                            "classification": "verification",
+                            "verification_kind": "script_run",
+                            "evidence_strength": "sufficient",
+                            "wrong_environment": False,
+                        },
+                    }
+                ],
+            },
+        ]
+        decision = runtime._run_reflection(
+            messages=messages,
+            final_text="明白。之后如果用户询问这类时间敏感的外部事实，我会先查询最新信息再作答；若证据不足，我会明确说明不确定。",
+            agent_kind="lead",
+            execution_mode="normal",
+        )
+        self.assertEqual(decision.verdict, "continue_with_verification")
+        self.assertIn("task_misalignment", decision.reason_codes)
+
+    def test_run_reflection_requires_uncertainty_for_weak_web_search_evidence(self) -> None:
         runtime = RuntimeManager()
         messages = [
             {"role": "user", "content": "What is today's Cavaliers vs Knicks final score?"},
@@ -385,17 +693,198 @@ class AssetRuntimeToolTests(IsolatedAsyncioTestCase):
                 ],
             },
         ]
-        followup = runtime._completion_gate_followup(
+        decision = runtime._run_reflection(
             messages=messages,
             final_text="The Cavaliers beat the Knicks 101-99.",
-            require_change_followup_used=False,
-            require_verification_followup_used=False,
-            require_web_search_followup_used=True,
-            require_weak_evidence_followup_used=False,
             agent_kind="lead",
             execution_mode="normal",
         )
-        self.assertIn("uncertain", followup[0].lower())
+        self.assertEqual(decision.verdict, "continue_with_verification")
+        self.assertIn("missing_fresh_evidence", decision.reason_codes)
+        self.assertIn("uncertain", decision.next_action_prompt.lower())
+
+    def test_run_reflection_requires_verification_after_write(self) -> None:
+        runtime = RuntimeManager()
+        messages = [
+            {"role": "user", "content": "Fix the bug in foo.py"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "call-1", "name": "edit_file", "input": {"path": "foo.py"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1", "tool_name": "edit_file", "status": "completed", "content": "Edited foo.py"}]},
+        ]
+        decision = runtime._run_reflection(
+            messages=messages,
+            final_text="I changed the file.",
+            agent_kind="lead",
+            execution_mode="normal",
+        )
+        self.assertEqual(decision.verdict, "continue_with_verification")
+        self.assertIn("verification_gap", decision.reason_codes)
+        self.assertIn("run_test", decision.next_action_prompt)
+
+    def test_run_reflection_does_not_accept_weak_syntax_only_verification(self) -> None:
+        runtime = RuntimeManager()
+        messages = [
+            {"role": "user", "content": "Fix the bug in foo.py"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "call-1", "name": "edit_file", "input": {"path": "foo.py"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1", "tool_name": "edit_file", "status": "completed", "content": "Edited foo.py"}]},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "call-2", "name": "run_test", "input": {"argv": ["python3", "-m", "py_compile", "foo.py"]}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-2", "tool_name": "run_test", "status": "completed", "content": "exit_code=0", "payload": {"classification": "verification", "verification_kind": "syntax_check", "evidence_strength": "weak", "wrong_environment": False}}]},
+        ]
+        decision = runtime._run_reflection(
+            messages=messages,
+            final_text="I fixed the bug and verified it.",
+            agent_kind="lead",
+            execution_mode="normal",
+        )
+        self.assertEqual(decision.verdict, "continue_with_verification")
+        self.assertIn("verification_gap", decision.reason_codes)
+
+    def test_run_reflection_blocks_repeated_weak_verification_loop(self) -> None:
+        runtime = RuntimeManager()
+        messages = [
+            {"role": "user", "content": "Fix the bug in foo.py"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "call-1", "name": "edit_file", "input": {"path": "foo.py"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1", "tool_name": "edit_file", "status": "completed", "content": "Edited foo.py"}]},
+        ]
+        for index in range(3):
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": f"call-v{index}", "name": "run_test", "input": {"argv": ["python3", "-m", "py_compile", "foo.py"]}}],
+                }
+            )
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": f"call-v{index}",
+                            "tool_name": "run_test",
+                            "status": "completed",
+                            "content": "exit_code=0",
+                            "payload": {
+                                "classification": "verification",
+                                "verification_kind": "syntax_check",
+                                "evidence_strength": "weak",
+                                "wrong_environment": False,
+                            },
+                        }
+                    ],
+                }
+            )
+        decision = runtime._run_reflection(
+            messages=messages,
+            final_text="I fixed it.",
+            agent_kind="lead",
+            execution_mode="normal",
+        )
+        self.assertEqual(decision.verdict, "blocked_uncertain")
+        self.assertIn("verification_stalled", decision.reason_codes)
+
+    def test_run_reflection_blocks_when_retry_budget_is_exhausted(self) -> None:
+        runtime = RuntimeManager()
+        messages = [
+            {"role": "user", "content": "Fix the bug in foo.py"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "call-1", "name": "edit_file", "input": {"path": "foo.py"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1", "tool_name": "edit_file", "status": "completed", "content": "Edited foo.py"}]},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "call-2", "name": "run_test", "input": {"argv": ["python3", "-m", "py_compile", "foo.py"]}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-2", "tool_name": "run_test", "status": "completed", "content": "exit_code=0", "payload": {"classification": "verification", "verification_kind": "syntax_check", "evidence_strength": "weak", "wrong_environment": False}}]},
+        ]
+        decision = runtime._run_reflection(
+            messages=messages,
+            final_text="I fixed the bug and did a basic syntax check.",
+            agent_kind="lead",
+            execution_mode="normal",
+            remaining_auto_verify_attempts=0,
+        )
+        self.assertEqual(decision.verdict, "blocked_uncertain")
+        self.assertIn("blocked_uncertain", decision.reason_codes)
+
+    def test_run_reflection_requires_dependency_install_verification_after_requirements_edit(self) -> None:
+        runtime = RuntimeManager()
+        messages = [
+            {"role": "user", "content": "安装一下对应依赖"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "call-1", "name": "edit_file", "input": {"path": "requirements.txt"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1", "tool_name": "edit_file", "status": "completed", "content": "Edited requirements.txt"}]},
+        ]
+        decision = runtime._run_reflection(
+            messages=messages,
+            final_text="已把 pypdf>=4.0.0 加到 requirements.txt。",
+            agent_kind="lead",
+            execution_mode="normal",
+        )
+        self.assertEqual(decision.verdict, "continue_with_verification")
+        self.assertIn("verification_gap", decision.reason_codes)
+
+    def test_run_reflection_repairs_dependency_install_claim_with_wrong_environment_evidence(self) -> None:
+        runtime = RuntimeManager()
+        messages = [
+            {"role": "user", "content": "那你直接用pip install帮我安装吧"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "call-1", "name": "run_test", "input": {"argv": ["python3", "-m", "pip", "show", "pypdf"]}}]},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call-1",
+                        "tool_name": "run_test",
+                        "status": "completed",
+                        "content": "exit_code=0",
+                        "payload": {
+                            "classification": "verification",
+                            "verification_kind": "package_probe",
+                            "evidence_strength": "sufficient",
+                            "wrong_environment": True,
+                        },
+                    }
+                ],
+            },
+        ]
+        decision = runtime._run_reflection(
+            messages=messages,
+            final_text="已经装好了。",
+            agent_kind="lead",
+            execution_mode="normal",
+        )
+        self.assertEqual(decision.verdict, "continue_with_repair")
+        self.assertEqual(decision.next_phase, "repair")
+        self.assertIn("verification_gap", decision.reason_codes)
+
+    async def test_resume_turn_from_after_reflection_blocked_context_returns_blocker(self) -> None:
+        runtime = RuntimeManager()
+        reply = await runtime._resume_turn_from_context(
+            "session-1",
+            12,
+            {
+                "workspace": "/tmp",
+                "messages": [{"role": "user", "content": "Fix the bug in foo.py"}],
+                "allowed_external_reads": [],
+                "write_enabled": True,
+                "allow_subagent_tool": True,
+                "agent_kind": "lead",
+                "emit_stream_events": True,
+                "execution_mode": "normal",
+                "reflection": {
+                    "verdict": "blocked",
+                    "reason_codes": ["missing_edit"],
+                    "next_action_prompt": "",
+                    "summary": "The requested code change could not be completed because the workspace is read-only.",
+                },
+                "reflection_final_text": "I am blocked because the workspace is read-only.",
+            },
+            __import__("asyncio").Event(),
+        )
+        self.assertIn("workspace is read-only", reply.text)
+
+    def test_latest_request_text_skips_continuation_only_messages(self) -> None:
+        runtime = RuntimeManager()
+        messages = [
+            {"role": "user", "content": "在当前目录下实现一个简易的Python爬虫脚本"},
+            {"role": "assistant", "content": "任务执行达到了安全迭代上限。"},
+            {"role": "user", "content": "继续"},
+        ]
+        self.assertEqual(runtime._latest_request_text(messages), "在当前目录下实现一个简易的Python爬虫脚本")
+        self.assertTrue(runtime._task_requires_code_change(messages))
 
     def test_build_agent_system_prompt_includes_code_change_contract(self) -> None:
         runtime = RuntimeManager()
@@ -407,3 +896,4 @@ class AssetRuntimeToolTests(IsolatedAsyncioTestCase):
         self.assertIn("Code-change execution contract:", prompt)
         self.assertIn("apply_patch", prompt)
         self.assertIn("run_test", prompt)
+        self.assertIn("standalone script or utility", prompt)
